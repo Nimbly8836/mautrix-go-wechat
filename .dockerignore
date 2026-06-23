@@ -1,0 +1,8 @@
+.git
+data
+*.db
+*.db-*
+synapse
+docs
+*.md
+swagger.json

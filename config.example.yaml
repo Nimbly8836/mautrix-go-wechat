@@ -1,0 +1,58 @@
+# mautrix-go-wechat example config.
+# Copy to config.yaml (the Docker image does this automatically on first run),
+# fill in the values, then start the bridge.
+
+homeserver:
+    # The address that the bridge can use to connect to the homeserver.
+    # For the bundled docker-compose this is the synapse service name.
+    address: http://synapse:8008
+    # The domain part of your Matrix IDs (e.g. @user:example.com -> example.com).
+    domain: example.com
+
+appservice:
+    # The address that the homeserver uses to connect back to the bridge.
+    # Must match the bridge service name + port in docker-compose.
+    address: http://mautrix-wechat:29318
+    # Bind host/port inside the container.
+    hostname: 0.0.0.0
+    port: 29318
+
+    # Appservice + bot identity. The bot user will be @wechatbot:example.com.
+    id: wechat
+    bot_username: wechatbot
+
+    # Leave empty: `-g` fills these in and writes registration.yaml.
+    as_token: ""
+    hs_token: ""
+
+# Your chat backend. Switch `protocol` to use a different registered backend
+# (e.g. "qq") with no other code changes.
+network:
+    protocol: wechat
+    # Base URL of YOUR WeChat HTTP API (the one described by swagger.json).
+    base_url: http://wechat-api:8080/api
+    # Optional API token, if your API requires one.
+    token: ""
+    # Backend-specific extra options, passed through to the implementation.
+    extra: {}
+
+bridge:
+    username_template: "wechat_{{.}}"
+    displayname_template: "{{.}} (WeChat)"
+    # Opaque backend session blob. Generated after successful Matrix `login`.
+    session_file: /data/session.json
+    # Who may use the bridge. Levels: relay < user < admin.
+    permissions:
+        "example.com": user
+        "@admin:example.com": admin
+
+database:
+    # sqlite3 (default, stored in /data) or postgres.
+    type: sqlite3
+    uri: file:/data/mautrix-wechat.db?_txlock=immediate
+    # For postgres use:
+    # type: postgres
+    # uri: postgres://bridge:bridge@postgres/mautrix_wechat?sslmode=disable
+
+logging:
+    level: info

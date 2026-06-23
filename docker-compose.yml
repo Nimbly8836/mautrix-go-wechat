@@ -1,0 +1,102 @@
+# docker-compose for mautrix-go-wechat, structured like mautrix-telegram's
+# deployment: the bridge + a database, talking to an existing homeserver.
+#
+# First run:
+#   1. docker compose run --rm mautrix-wechat   # writes /data/config.yaml, exits
+#   2. edit ./data/config.yaml (homeserver, network.base_url, permissions)
+#   3. docker compose run --rm mautrix-wechat   # generates registration.yaml, exits
+#   4. copy ./data/registration.yaml to your homeserver and add it to its config
+#      (Synapse: app_service_config_files), then restart the homeserver
+#   5. docker compose up -d mautrix-wechat
+#
+# See README and docs/DEPLOY.md for details.
+
+services:
+    mautrix-wechat:
+        container_name: mautrix-wechat
+        # Pull through the Nexus docker group registry.
+        # Images are pushed to the hosted registry on :28052 and should be
+        # pulled from the group registry on :28051 if that group includes the
+        # hosted repo and anonymous read is enabled.
+        image: 10.0.0.214:28051/mautrix-go-wechat:latest
+        # For local development builds, uncomment this block:
+        # build:
+        #     context: .
+        #     dockerfile: Dockerfile
+        restart: unless-stopped
+        ports:
+            # appservice port the homeserver calls back on
+            - "29318:29318"
+        volumes:
+            - ./data:/data
+        environment:
+            UID: "1337"
+            GID: "1337"
+        # The bridge needs to reach the homeserver and your WeChat API.
+        depends_on:
+            postgres:
+                condition: service_healthy
+        networks:
+            - bridge
+            # Uncomment if your homeserver / WeChat API are on another network:
+            # - matrix
+
+    # Optional Postgres. To use it, set in config.yaml:
+    #   database.type: postgres
+    #   database.uri: postgres://bridge:bridge@postgres/mautrix_wechat?sslmode=disable
+    # If you prefer the built-in SQLite, you can remove this service and the
+    # depends_on block above.
+    postgres:
+        container_name: mautrix-wechat-postgres
+        image: postgres:16-alpine
+        restart: unless-stopped
+        environment:
+            POSTGRES_USER: bridge
+            POSTGRES_PASSWORD: bridge
+            POSTGRES_DB: mautrix_wechat
+        volumes:
+            - ./data/postgres:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U bridge -d mautrix_wechat"]
+            interval: 5s
+            timeout: 5s
+            retries: 10
+        networks:
+            - bridge
+
+    # ---------------------------------------------------------------------
+    # OPTIONAL: a Synapse homeserver, in case you don't already run one.
+    # Uncomment this and the `matrix` network below if you need it.
+    # ---------------------------------------------------------------------
+    # synapse:
+    #     container_name: synapse
+    #     image: matrixdotorg/synapse:latest
+    #     restart: unless-stopped
+    #     ports:
+    #         - "8008:8008"
+    #     volumes:
+    #         - ./synapse:/data
+    #     networks:
+    #         - bridge
+    #         - matrix
+
+    # ---------------------------------------------------------------------
+    # OPTIONAL: your WeChat HTTP API (the swagger.json service).
+    # Replace image/build with your actual API service. The bridge reaches it
+    # via network.base_url in config.yaml (e.g. http://wechat-api:8080/api).
+    # ---------------------------------------------------------------------
+    # wechat-api:
+    #     container_name: wechat-api
+    #     image: your-wechat-api:latest
+    #     restart: unless-stopped
+    #     ports:
+    #         - "8080:8080"
+    #     networks:
+    #         - bridge
+
+networks:
+    bridge:
+        name: mautrix-wechat
+    # matrix:
+    #     external: true
+    #     name: matrix
