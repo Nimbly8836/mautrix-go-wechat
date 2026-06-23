@@ -2,9 +2,10 @@ package matrixas
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -193,11 +194,85 @@ func (s *Server) loginInfoText(ctx context.Context, wxid remoteapi.UserID) strin
 	if len(info.Fields) == 0 {
 		return fmt.Sprintf("%s 没有返回登录缓存信息。", wxid)
 	}
-	b, err := json.MarshalIndent(info.Fields, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("%s 登录信息: %+v", wxid, info.Fields)
+	return safeLoginInfoSummary(info)
+}
+
+func safeLoginInfoSummary(info remoteapi.LoginInfo) string {
+	f := info.Fields
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s 登录信息摘要:\n", info.ID)
+	appendField := func(label, key string) {
+		if v, ok := f[key]; ok && fmt.Sprint(v) != "" && fmt.Sprint(v) != "<nil>" {
+			fmt.Fprintf(&b, "- %s: %v\n", label, v)
+		}
 	}
-	return fmt.Sprintf("%s 登录信息:\n```json\n%s\n```", wxid, string(b))
+	appendField("Wxid", "Wxid")
+	appendField("Uin", "Uin")
+	appendField("昵称", "NickName")
+	appendField("Alias", "Alais")
+	appendField("设备类型", "DeviceType")
+	appendField("设备名", "DeviceName")
+	appendField("客户端版本", "ClientVersion")
+	appendField("短连接 Host", "ShortHost")
+	appendField("长连接 Host", "LongHost")
+	appendField("RomModel", "RomModel")
+	appendField("OS", "OsVersion")
+	if v, ok := f["Mobile"]; ok {
+		fmt.Fprintf(&b, "- 手机: %s\n", maskString(fmt.Sprint(v), 3, 4))
+	}
+	if v, ok := f["Email"]; ok {
+		fmt.Fprintf(&b, "- 邮箱: %s\n", maskEmail(fmt.Sprint(v)))
+	}
+	appendUnixField(&b, "登录时间", f["LoginDate"])
+	appendUnixField(&b, "刷新 Token 时间", f["RefreshTokenDate"])
+	if dev, ok := f["DeviceInfo"].(map[string]any); ok {
+		if brand := fmt.Sprint(dev["devicebrand"]); brand != "" && brand != "<nil>" {
+			fmt.Fprintf(&b, "- 设备品牌: %s\n", brand)
+		}
+		if ostype := fmt.Sprint(dev["ostype"]); ostype != "" && ostype != "<nil>" {
+			fmt.Fprintf(&b, "- 设备 OS: %s\n", ostype)
+		}
+	}
+	keys := make([]string, 0, len(f))
+	for k := range f {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Fprintf(&b, "\n已返回 %d 个顶层字段。敏感密钥/session/token 已隐藏。字段列表:\n%s", len(keys), strings.Join(keys, ", "))
+	return b.String()
+}
+
+func appendUnixField(b *strings.Builder, label string, raw any) {
+	var ts int64
+	switch v := raw.(type) {
+	case float64:
+		ts = int64(v)
+	case int64:
+		ts = v
+	case int:
+		ts = int64(v)
+	default:
+		return
+	}
+	if ts <= 0 {
+		return
+	}
+	fmt.Fprintf(b, "- %s: %s\n", label, time.Unix(ts, 0).Format("2006-01-02 15:04:05"))
+}
+
+func maskString(s string, left, right int) string {
+	if len(s) <= left+right {
+		return strings.Repeat("*", len(s))
+	}
+	return s[:left] + strings.Repeat("*", len(s)-left-right) + s[len(s)-right:]
+}
+
+func maskEmail(s string) string {
+	parts := strings.SplitN(s, "@", 2)
+	if len(parts) != 2 {
+		return maskString(s, 2, 2)
+	}
+	return maskString(parts[0], 2, 1) + "@" + parts[1]
 }
 
 func (s *Server) allowed(sender id.UserID) bool {
