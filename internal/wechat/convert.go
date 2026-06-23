@@ -1,6 +1,7 @@
 package wechat
 
 import (
+	"html"
 	"strings"
 	"time"
 
@@ -25,6 +26,9 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
 	content := m.Content.Str
+	if strings.TrimSpace(content) == "" {
+		content = m.PushContent
+	}
 
 	// Determine chat + real sender. In group chats WeChat prefixes the body
 	// with "<wxid>:\n". The chat is the @chatroom; sender is extracted.
@@ -35,6 +39,9 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 		if idx := strings.Index(content, ":\n"); idx > 0 {
 			sender = content[:idx]
 			content = content[idx+2:]
+		} else if idx := strings.Index(content, ":"); idx > 0 && strings.HasPrefix(content[:idx], "wxid_") {
+			sender = content[:idx]
+			content = strings.TrimSpace(content[idx+1:])
 		}
 	} else if isSelf := from == c.selfWxid(); isSelf {
 		// Outgoing echo: the conversation is the recipient.
@@ -72,7 +79,10 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	case wxLocation:
 		base.Type = remoteapi.MsgLocation
 	case wxApp:
-		base.Type = remoteapi.MsgApp // caller parses XML in content
+		base.Type, base.Text = parseAppMessage(content, m.PushContent)
+		if base.Text == "" {
+			base.Text = "[app]"
+		}
 	case wxRevoke:
 		// A recall notification, not a message.
 		return remoteapi.Event{
@@ -89,6 +99,80 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	}
 
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+}
+
+func parseAppMessage(content, push string) (remoteapi.MessageType, string) {
+	// WeChat app messages are usually XML: <msg><appmsg><title>...</title>...
+	// If the API only gives PushContent, fall back to that instead of showing
+	// a useless [app] placeholder.
+	if !strings.Contains(content, "<appmsg") && !strings.Contains(content, "<msg") {
+		return remoteapi.MsgApp, strings.TrimSpace(firstNonEmpty(content, push))
+	}
+	title := xmlTag(content, "title")
+	des := xmlTag(content, "des")
+	url := xmlTag(content, "url")
+	fileExt := xmlTag(content, "fileext")
+	appType := xmlTag(content, "type")
+
+	var typ remoteapi.MessageType
+	switch appType {
+	case "5", "33", "36": // link / mini program-ish
+		typ = remoteapi.MsgLink
+	case "6":
+		typ = remoteapi.MsgFile
+	case "19":
+		typ = remoteapi.MsgApp // merged forward / chat history
+	default:
+		typ = remoteapi.MsgApp
+	}
+
+	parts := make([]string, 0, 4)
+	if title != "" {
+		parts = append(parts, title)
+	}
+	if des != "" && des != title {
+		parts = append(parts, des)
+	}
+	if fileExt != "" && typ == remoteapi.MsgFile {
+		parts = append(parts, "file type: "+fileExt)
+	}
+	if url != "" {
+		parts = append(parts, url)
+	}
+	if len(parts) == 0 {
+		fallback := strings.TrimSpace(push)
+		if fallback == "" || strings.Contains(fallback, "<appmsg") {
+			fallback = "[app]"
+		}
+		return typ, fallback
+	}
+	return typ, strings.Join(parts, "\n")
+}
+
+func xmlTag(raw, tag string) string {
+	start := strings.Index(raw, "<"+tag+">")
+	endTag := "</" + tag + ">"
+	if start < 0 {
+		return ""
+	}
+	start += len(tag) + 2
+	end := strings.Index(raw[start:], endTag)
+	if end < 0 {
+		return ""
+	}
+	value := strings.TrimSpace(html.UnescapeString(raw[start : start+end]))
+	value = strings.TrimPrefix(value, "<![CDATA[")
+	value = strings.TrimSuffix(value, "]]>")
+	return strings.TrimSpace(value)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (c *Client) selfWxid() string {

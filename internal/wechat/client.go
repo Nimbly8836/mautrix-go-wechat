@@ -151,6 +151,9 @@ func (c *Client) sync(ctx context.Context) ([]rawMessage, error) {
 		c.syncKey = resp.SyncKey
 		c.mu.Unlock()
 	}
+	if len(resp.Messages) > 0 {
+		return append(resp.AddMsgs, resp.Messages...), nil
+	}
 	return resp.AddMsgs, nil
 }
 

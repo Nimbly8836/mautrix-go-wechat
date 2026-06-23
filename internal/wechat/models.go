@@ -105,6 +105,7 @@ type rawMessage struct {
 // syncResponse -> Msg.SyncResponseDoc
 type syncResponse struct {
 	AddMsgs       []rawMessage `json:"AddMsgs"`
+	Messages      []rawMessage `json:"Messages"`
 	SyncKey       string       `json:"SyncKey"`
 	Continue      int          `json:"Continue"`
 	ContinueFlag  int          `json:"ContinueFlag"`

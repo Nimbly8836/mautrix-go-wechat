@@ -219,6 +219,7 @@ func (s *Server) image(ctx context.Context, room id.RoomID, data []byte, body st
 
 // EventSink implementation: remote -> Matrix portal rooms.
 func (s *Server) OnMessage(ctx context.Context, m *remoteapi.InboundMessage) {
+	log.Printf("remote message: chat=%s sender=%s type=%d text=%q", m.Chat, m.Sender, m.Type, m.Text)
 	rec, err := s.ensurePortal(ctx, m.Chat)
 	if err != nil {
 		log.Printf("failed to ensure portal for %s: %v", m.Chat, err)

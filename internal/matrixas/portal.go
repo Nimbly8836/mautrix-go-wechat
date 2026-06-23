@@ -140,11 +140,13 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 		invite = append(invite, owner)
 	}
 	resp, err := s.as.BotIntent().CreateRoom(ctx, &mautrix.ReqCreateRoom{
-		Name:     name + " (WeChat)",
-		Topic:    fmt.Sprintf("WeChat portal for %s", chatID),
-		Invite:   invite,
-		Preset:   "private_chat",
-		IsDirect: !chat.IsGroup,
+		Name:   name + " (WeChat)",
+		Topic:  fmt.Sprintf("WeChat portal for %s", chatID),
+		Invite: invite,
+		Preset: "private_chat",
+		// Do not set is_direct here. Some Matrix clients then display the
+		// room as the ghost user (@wechat_...) instead of the WeChat chat name.
+		IsDirect: false,
 	})
 	if err != nil {
 		return portalRecord{}, fmt.Errorf("create portal room for %s: %w", chatID, err)
@@ -180,8 +182,21 @@ func (s *Server) ensurePuppetJoined(ctx context.Context, user remoteapi.UserID, 
 		log.Printf("failed to join puppet %s to %s: %v", user, room, err)
 		return s.as.BotIntent().Client
 	}
-	_ = intent.SetDisplayName(ctx, string(user))
+	_ = intent.SetDisplayName(ctx, s.displayNameForRemote(ctx, user))
 	return intent.Client
+}
+
+func (s *Server) displayNameForRemote(ctx context.Context, user remoteapi.UserID) string {
+	ct, err := s.api.GetContact(ctx, user)
+	if err == nil {
+		if ct.Remark != "" {
+			return ct.Remark
+		}
+		if ct.Name != "" {
+			return ct.Name
+		}
+	}
+	return string(user)
 }
 
 func (s *Server) sendPortalNotice(ctx context.Context, room id.RoomID, body string) {

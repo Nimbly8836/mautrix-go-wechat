@@ -26,6 +26,8 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 		return &event.MessageEventContent{MsgType: event.MsgFile, Body: body}
 	case remoteapi.MsgLocation:
 		return &event.MessageEventContent{MsgType: event.MsgLocation, Body: body}
+	case remoteapi.MsgLink, remoteapi.MsgApp, remoteapi.MsgContactCard, remoteapi.MsgEmoji:
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	default:
 		return &event.MessageEventContent{MsgType: event.MsgNotice, Body: body}
 	}
