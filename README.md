@@ -90,10 +90,11 @@ go run ./cmd/bridge -c config.yaml -r registration.yaml
 In Matrix, invite `@wechatbot:<your-domain>` to an unencrypted room or start a
 DM with encryption disabled, then send `help`. Use `login` to list WeChat login
 protocols (iPad/Windows/Mac/etc), then e.g. `login ipad` or `login win`. Saved
-accounts can be listed with `accounts`, inspected via the WeChat
-`/Login/GetCacheInfo?wxid=...` API using `account <wxid>`, and switched with
-`use <wxid>`. After login, portal rooms are created automatically for WeChat
-chats.
+accounts can be listed with `accounts`. `account <wxid>` calls the WeChat
+`/Login/GetCacheInfo?wxid=...` API and, if cached login data exists, activates
+that wxid as the current logged-in account. Locally saved accounts can also be
+switched with `use <wxid>`. After login/activation, portal rooms are created
+automatically for WeChat chats.
 
 ## Docker (mautrix-telegram-style deployment)
 

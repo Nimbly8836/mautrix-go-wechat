@@ -33,7 +33,7 @@ status              查看登录状态
 login               列出 WeChat 登录协议
 login <flow>        使用指定协议登录，如 login ipad / login win / login mac
 accounts            列出已保存的微信账号
-account <wxid>      查看 wxid 的登录缓存/账号信息
+account <wxid>      查看 wxid 登录缓存，并设为当前登录账号
 use <wxid>          切换到已保存账号
 logout              退出 WeChat
 portals             列出已创建的 portal rooms
@@ -73,11 +73,12 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 			if self, err := s.api.Self(ctx); err == nil && self != "" {
 				wxid = self
 			} else {
-				s.notice(ctx, room, "用法: account <wxid>。如果当前已登录，也可以直接发送 account。")
+				s.notice(ctx, room, "用法: account <wxid>。如果该 wxid 在 API 里有登录缓存，会被设置为当前登录账号。")
 				return
 			}
 		}
-		s.notice(ctx, room, s.loginInfoText(ctx, wxid))
+		s.portals.setOwner(sender)
+		s.notice(ctx, room, s.activateAccountText(ctx, wxid))
 	case "use", "切换":
 		wxid := remoteapi.UserID(strings.TrimSpace(rest))
 		if wxid == "" {
@@ -178,7 +179,7 @@ func (s *Server) accountsHelp() string {
 		}
 		fmt.Fprintf(&b, "%s %s  protocol=%s  login_flow=%s  updated=%s\n", mark, acc.ID, acc.Protocol, acc.LoginFlow, acc.UpdatedAt.Format("2006-01-02 15:04:05"))
 	}
-	b.WriteString("\n使用 `account <wxid>` 查看服务端登录缓存信息，使用 `use <wxid>` 切换当前账号。")
+	b.WriteString("\n使用 `account <wxid>` 从服务端登录缓存激活账号，使用 `use <wxid>` 切换本地已保存账号。")
 	return b.String()
 }
 
@@ -195,6 +196,28 @@ func (s *Server) loginInfoText(ctx context.Context, wxid remoteapi.UserID) strin
 		return fmt.Sprintf("%s 没有返回登录缓存信息。", wxid)
 	}
 	return safeLoginInfoSummary(info)
+}
+
+func (s *Server) activateAccountText(ctx context.Context, wxid remoteapi.UserID) string {
+	activator, ok := s.api.(remoteapi.CachedLoginActivator)
+	if !ok {
+		return s.loginInfoText(ctx, wxid)
+	}
+	info, err := activator.ActivateCachedLogin(ctx, wxid)
+	if err != nil {
+		return fmt.Sprintf("激活 %s 登录缓存失败: %v", wxid, err)
+	}
+	if len(info.Fields) == 0 {
+		return fmt.Sprintf("%s 没有返回登录缓存信息，无法作为当前登录账号。", wxid)
+	}
+	s.saveSession("cache")
+	if ok, err := s.api.IsLoggedIn(ctx); err != nil {
+		return fmt.Sprintf("已读取并保存 %s 的登录缓存，但心跳检查失败: %v\n\n%s", wxid, err, safeLoginInfoSummary(info))
+	} else if ok {
+		s.startRemote(ctx)
+		return fmt.Sprintf("已将 %s 设置为当前登录账号，并已连接。\n\n%s", wxid, safeLoginInfoSummary(info))
+	}
+	return fmt.Sprintf("已将 %s 设置为当前账号，但心跳检查未通过；缓存可能已过期。\n\n%s", wxid, safeLoginInfoSummary(info))
 }
 
 func safeLoginInfoSummary(info remoteapi.LoginInfo) string {

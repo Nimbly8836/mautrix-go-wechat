@@ -60,10 +60,11 @@ type Client struct {
 
 // compile-time interface checks
 var (
-	_ remoteapi.PuppetAPI         = (*Client)(nil)
-	_ remoteapi.MediaUploader     = (*Client)(nil)
-	_ remoteapi.Pinger            = (*Client)(nil)
-	_ remoteapi.LoginInfoProvider = (*Client)(nil)
+	_ remoteapi.PuppetAPI            = (*Client)(nil)
+	_ remoteapi.MediaUploader        = (*Client)(nil)
+	_ remoteapi.Pinger               = (*Client)(nil)
+	_ remoteapi.LoginInfoProvider    = (*Client)(nil)
+	_ remoteapi.CachedLoginActivator = (*Client)(nil)
 )
 
 // ---------------------------------------------------------------------------
@@ -213,6 +214,39 @@ func (c *Client) GetLoginInfo(ctx context.Context, id remoteapi.UserID) (remotea
 		return remoteapi.LoginInfo{}, err
 	}
 	return remoteapi.LoginInfo{ID: id, Fields: normalizeInfoFields(raw)}, nil
+}
+
+// ActivateCachedLogin makes this client use the given wxid's cached login state
+// from the API service. After this succeeds, IsLoggedIn/Connect/Sync operate as
+// if the account had just completed interactive QR login.
+func (c *Client) ActivateCachedLogin(ctx context.Context, id remoteapi.UserID) (remoteapi.LoginInfo, error) {
+	info, err := c.GetLoginInfo(ctx, id)
+	if err != nil {
+		return remoteapi.LoginInfo{}, err
+	}
+	wxid := stringValue(info.Fields["Wxid"])
+	if wxid == "" {
+		wxid = string(id)
+	}
+	if wxid == "" {
+		return remoteapi.LoginInfo{}, fmt.Errorf("wechat: cached login info has no wxid")
+	}
+	c.mu.Lock()
+	c.wxid = wxid
+	c.syncKey = stringValue(info.Fields["SyncKey"])
+	c.mu.Unlock()
+	if c.syncKey == "" {
+		// Best effort: initialize sync state if cache didn't include SyncKey.
+		_ = c.t.post(ctx, "/Login/Newinit", nil, q("wxid", wxid), nil)
+	}
+	return info, nil
+}
+
+func stringValue(v any) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
 }
 
 func normalizeInfoFields(raw any) map[string]any {

@@ -78,3 +78,11 @@ type LoginInfo struct {
 	ID     UserID         `json:"id"`
 	Fields map[string]any `json:"fields"`
 }
+
+// CachedLoginActivator is an OPTIONAL capability for backends that can restore
+// the current client session from server-side login cache by account id.
+// For WeChat this means /Login/GetCacheInfo?wxid=... contains enough state
+// (wxid + sync key) to make the bridge treat the account as logged in.
+type CachedLoginActivator interface {
+	ActivateCachedLogin(ctx context.Context, id UserID) (LoginInfo, error)
+}

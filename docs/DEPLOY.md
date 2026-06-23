@@ -89,8 +89,11 @@ Portal-room commands:
 !sync
 ```
 
-`account <wxid>` calls the backend's `/Login/GetCacheInfo?wxid=...` endpoint and
-prints the returned login-cache/account fields.
+`account <wxid>` calls the backend's `/Login/GetCacheInfo?wxid=...` endpoint.
+If the API returns login cache for that wxid, the bridge activates it as the
+current logged-in account, saves it to `/data/session.json` and `/data/accounts.json`,
+then starts the sync loop. Sensitive session/key/token fields are not printed in
+Matrix.
 
 If commands don't respond, check whether the room is encrypted. This MVP does
 not decrypt Matrix E2EE rooms yet; use an unencrypted management/portal room.
