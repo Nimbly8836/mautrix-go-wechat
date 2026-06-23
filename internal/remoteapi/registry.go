@@ -64,3 +64,17 @@ type MediaUploader interface {
 type Pinger interface {
 	Ping(ctx context.Context) error
 }
+
+// LoginInfoProvider is an OPTIONAL capability for backends that can query
+// server-side login/session/account information by account id (e.g. WeChat
+// /Login/GetCacheInfo?wxid=...). Fields are intentionally dynamic because
+// such APIs often return backend-specific data.
+type LoginInfoProvider interface {
+	GetLoginInfo(ctx context.Context, id UserID) (LoginInfo, error)
+}
+
+// LoginInfo is dynamic account/session info returned by LoginInfoProvider.
+type LoginInfo struct {
+	ID     UserID         `json:"id"`
+	Fields map[string]any `json:"fields"`
+}

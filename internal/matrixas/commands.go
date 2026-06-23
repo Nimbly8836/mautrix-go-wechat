@@ -2,6 +2,7 @@ package matrixas
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -31,6 +32,7 @@ status              查看登录状态
 login               列出 WeChat 登录协议
 login <flow>        使用指定协议登录，如 login ipad / login win / login mac
 accounts            列出已保存的微信账号
+account <wxid>      查看 wxid 的登录缓存/账号信息
 use <wxid>          切换到已保存账号
 logout              退出 WeChat
 portals             列出已创建的 portal rooms
@@ -64,6 +66,17 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 		go s.runLogin(ctx, room, sender, flow)
 	case "accounts", "账号":
 		s.notice(ctx, room, s.accountsHelp())
+	case "account", "账号信息", "logininfo":
+		wxid := remoteapi.UserID(strings.TrimSpace(rest))
+		if wxid == "" {
+			if self, err := s.api.Self(ctx); err == nil && self != "" {
+				wxid = self
+			} else {
+				s.notice(ctx, room, "用法: account <wxid>。如果当前已登录，也可以直接发送 account。")
+				return
+			}
+		}
+		s.notice(ctx, room, s.loginInfoText(ctx, wxid))
 	case "use", "切换":
 		wxid := remoteapi.UserID(strings.TrimSpace(rest))
 		if wxid == "" {
@@ -164,8 +177,27 @@ func (s *Server) accountsHelp() string {
 		}
 		fmt.Fprintf(&b, "%s %s  protocol=%s  login_flow=%s  updated=%s\n", mark, acc.ID, acc.Protocol, acc.LoginFlow, acc.UpdatedAt.Format("2006-01-02 15:04:05"))
 	}
-	b.WriteString("\n使用 `use <wxid>` 切换当前账号。")
+	b.WriteString("\n使用 `account <wxid>` 查看服务端登录缓存信息，使用 `use <wxid>` 切换当前账号。")
 	return b.String()
+}
+
+func (s *Server) loginInfoText(ctx context.Context, wxid remoteapi.UserID) string {
+	provider, ok := s.api.(remoteapi.LoginInfoProvider)
+	if !ok {
+		return "当前后端不支持查看登录缓存信息。"
+	}
+	info, err := provider.GetLoginInfo(ctx, wxid)
+	if err != nil {
+		return fmt.Sprintf("获取 %s 登录信息失败: %v", wxid, err)
+	}
+	if len(info.Fields) == 0 {
+		return fmt.Sprintf("%s 没有返回登录缓存信息。", wxid)
+	}
+	b, err := json.MarshalIndent(info.Fields, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%s 登录信息: %+v", wxid, info.Fields)
+	}
+	return fmt.Sprintf("%s 登录信息:\n```json\n%s\n```", wxid, string(b))
 }
 
 func (s *Server) allowed(sender id.UserID) bool {

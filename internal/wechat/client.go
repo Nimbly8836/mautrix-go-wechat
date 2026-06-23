@@ -60,9 +60,10 @@ type Client struct {
 
 // compile-time interface checks
 var (
-	_ remoteapi.PuppetAPI     = (*Client)(nil)
-	_ remoteapi.MediaUploader = (*Client)(nil)
-	_ remoteapi.Pinger        = (*Client)(nil)
+	_ remoteapi.PuppetAPI         = (*Client)(nil)
+	_ remoteapi.MediaUploader     = (*Client)(nil)
+	_ remoteapi.Pinger            = (*Client)(nil)
+	_ remoteapi.LoginInfoProvider = (*Client)(nil)
 )
 
 // ---------------------------------------------------------------------------
@@ -201,6 +202,31 @@ func (c *Client) Ping(ctx context.Context) error {
 	wxid := c.wxid
 	c.mu.RUnlock()
 	return c.t.post(ctx, "/Login/HeartBeat", nil, q("wxid", wxid), nil)
+}
+
+// GetLoginInfo fetches server-side login/cache info for a wxid using
+// /Login/GetCacheInfo?wxid=... . The API response is undocumented in
+// swagger.json, so fields are returned dynamically.
+func (c *Client) GetLoginInfo(ctx context.Context, id remoteapi.UserID) (remoteapi.LoginInfo, error) {
+	var raw any
+	if err := c.t.post(ctx, "/Login/GetCacheInfo", nil, q("wxid", string(id)), &raw); err != nil {
+		return remoteapi.LoginInfo{}, err
+	}
+	return remoteapi.LoginInfo{ID: id, Fields: normalizeInfoFields(raw)}, nil
+}
+
+func normalizeInfoFields(raw any) map[string]any {
+	fields := map[string]any{}
+	switch v := raw.(type) {
+	case map[string]any:
+		for k, val := range v {
+			fields[k] = val
+		}
+	case nil:
+	default:
+		fields["raw"] = v
+	}
+	return fields
 }
 
 // ---------------------------------------------------------------------------

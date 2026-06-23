@@ -75,6 +75,7 @@ login
 login ipad
 login win
 accounts
+account <wxid>
 use <wxid>
 status
 portals
@@ -87,6 +88,9 @@ Portal-room commands:
 !info
 !sync
 ```
+
+`account <wxid>` calls the backend's `/Login/GetCacheInfo?wxid=...` endpoint and
+prints the returned login-cache/account fields.
 
 If commands don't respond, check whether the room is encrypted. This MVP does
 not decrypt Matrix E2EE rooms yet; use an unencrypted management/portal room.
