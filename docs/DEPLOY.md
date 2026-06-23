@@ -59,14 +59,23 @@ help
 login
 ```
 
-The bot will send the WeChat QR code in the Matrix room. Scan and confirm in
-WeChat. After login, incoming WeChat messages automatically create Matrix portal
-rooms (one room per WeChat chat), similar to mautrix-telegram. In a portal room,
-plain Matrix text messages are sent back to WeChat.
+The bot can use different WeChat login protocols/client types. First send
+`login` to list available flows, then use one, e.g. `login ipad`, `login win`,
+`login mac`, `login android-pad`. The bot will send the QR code in the Matrix
+room. Scan and confirm in WeChat.
+
+After login, incoming WeChat messages automatically create Matrix portal rooms
+(one room per WeChat chat), similar to mautrix-telegram. In a portal room, plain
+Matrix text messages are sent back to WeChat.
 
 Management-room commands:
 
 ```text
+login
+login ipad
+login win
+accounts
+use <wxid>
 status
 portals
 send <wxid-or-chatroom-id> hello

@@ -43,6 +43,8 @@ bridge:
     session_file: /data/session.json
     # Matrix portal-room mappings for remote WeChat chats.
     portal_file: /data/portals.json
+    # Saved login sessions for multiple WeChat accounts.
+    account_file: /data/accounts.json
     # Who may use the bridge. Levels: relay < user < admin.
     permissions:
         "example.com": user

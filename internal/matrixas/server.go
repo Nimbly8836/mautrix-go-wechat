@@ -33,8 +33,10 @@ type Server struct {
 	as          *appservice.AppService
 	conn        *connector.Connector
 	api         remoteapi.PuppetAPI
+	apiCfg      remoteapi.Config
 	sessionFile string
 	portals     *portalStore
+	accounts    *accountStore
 
 	mu         sync.Mutex
 	rooms      map[id.RoomID]bool
@@ -65,7 +67,7 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	as.Log = zerolog.New(os.Stdout).With().Timestamp().Str("component", "appservice").Logger()
 	as.QueryHandler = queryHandler{bot: id.NewUserID(reg.SenderLocalpart, cfg.Homeserver.Domain), domain: cfg.Homeserver.Domain, prefix: reg.ID + "_"}
 
-	s := &Server{cfg: cfg, as: as, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}}
+	s := &Server{cfg: cfg, as: as, apiCfg: apiCfg, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}}
 	if s.sessionFile == "" {
 		s.sessionFile = "/data/session.json"
 	}
@@ -74,6 +76,11 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 		portalFile = "/data/portals.json"
 	}
 	s.portals = newPortalStore(portalFile)
+	accountFile := cfg.Bridge.AccountFile
+	if accountFile == "" {
+		accountFile = "/data/accounts.json"
+	}
+	s.accounts = newAccountStore(accountFile)
 
 	conn, err := connector.New(cfg.Network.Protocol, apiCfg, s)
 	if err != nil {
@@ -282,7 +289,58 @@ func (s *Server) stopRemote() {
 	s.remoteRun = false
 }
 
-func (s *Server) saveSession() {
+func (s *Server) currentProtocol() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Network.Protocol
+}
+
+func (s *Server) switchProtocol(protocol string) error {
+	if protocol == "" || protocol == s.currentProtocol() {
+		return nil
+	}
+	return s.rebuildConnector(protocol, nil)
+}
+
+func (s *Server) rebuildConnector(protocol string, session []byte) error {
+	s.stopRemote()
+	cfg := s.apiCfg
+	if session != nil {
+		cfg.Session = session
+	}
+	conn, err := connector.New(protocol, cfg, s)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.cfg.Network.Protocol = protocol
+	s.apiCfg = cfg
+	s.conn = conn
+	s.api = conn.API()
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) useSavedAccount(id remoteapi.UserID) error {
+	acc, ok := s.accounts.get(id)
+	if !ok {
+		return fmt.Errorf("unknown account %s", id)
+	}
+	protocol := acc.Protocol
+	if protocol == "" {
+		protocol = s.cfg.Network.Protocol
+	}
+	if err := s.rebuildConnector(protocol, acc.Session); err != nil {
+		return err
+	}
+	s.accounts.setCurrent(id)
+	if err := os.WriteFile(s.sessionFile, acc.Session, 0o600); err != nil {
+		log.Printf("write current session %s: %v", s.sessionFile, err)
+	}
+	return nil
+}
+
+func (s *Server) saveSession(loginFlow string) {
 	blob, err := s.api.DumpSession()
 	if err != nil {
 		log.Printf("dump session: %v", err)
@@ -291,6 +349,11 @@ func (s *Server) saveSession() {
 	if err := os.WriteFile(s.sessionFile, blob, 0o600); err != nil {
 		log.Printf("write session %s: %v", s.sessionFile, err)
 	}
+	self, err := s.api.Self(context.Background())
+	if err != nil || self == "" {
+		return
+	}
+	s.accounts.put(savedAccount{ID: self, Protocol: s.cfg.Network.Protocol, LoginFlow: loginFlow, Session: blob})
 }
 
 func decodeQR(data string) ([]byte, bool) {
