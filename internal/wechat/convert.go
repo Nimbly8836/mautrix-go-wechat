@@ -10,15 +10,65 @@ import (
 
 // WeChat MsgType values (subset). See protocol docs.
 const (
-	wxText     = 1
-	wxImage    = 3
-	wxVoice    = 34
-	wxVideo    = 43
-	wxEmoji    = 47
-	wxLocation = 48
-	wxApp      = 49 // links, files, mini-programs, quotes (parsed from XML)
-	wxRevoke   = 10002
+	wxText         = 1
+	wxImage        = 3
+	wxVoice        = 34
+	wxVideo        = 43
+	wxEmoji        = 47
+	wxLocation     = 48
+	wxApp          = 49 // links, files, mini-programs, quotes (parsed from XML)
+	wxStatusNotify = 51
+	wxRevoke       = 10002
 )
+
+func shouldDropLocal(m localMessage) bool {
+	if m.MsgType == wxStatusNotify {
+		return true
+	}
+	if strings.HasPrefix(m.Talker, "@placeholder") || m.Talker == "" {
+		return true
+	}
+	return false
+}
+
+func (c *Client) convertLocal(m localMessage) (remoteapi.Event, bool) {
+	content := firstNonEmpty(m.ContentText, m.Content, m.PushContent)
+	chat := m.Talker
+	if chat == "" {
+		if m.IsGroup {
+			chat = m.FromUserName
+		} else if m.IsSendBySelf {
+			chat = m.ToUserName
+		} else {
+			chat = m.FromUserName
+		}
+	}
+	sender := m.SenderUserName
+	if sender == "" {
+		if m.IsSendBySelf {
+			sender = c.selfWxid()
+		} else {
+			sender = chat
+		}
+	}
+	base := remoteapi.InboundMessage{
+		ID:        remoteapi.MessageID(itoa(m.NewMsgID)),
+		Chat:      remoteapi.ChatID(chat),
+		Sender:    remoteapi.UserID(sender),
+		Text:      content,
+		Timestamp: time.Unix(m.CreateTime, 0),
+		Extra: map[string]any{
+			"msg_type":      m.MsgType,
+			"msg_type_name": m.MsgTypeName,
+			"msg_source":    m.MsgSource,
+			"raw_msg_id":    m.MsgID,
+			"msg_seq":       m.MsgSeq,
+			"is_local":      true,
+		},
+	}
+	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+}
 
 // convertInbound maps a raw WeChat message into a neutral remoteapi.Event.
 // Returns ok=false for messages the bridge should drop (system noise).
@@ -62,28 +112,7 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 		},
 	}
 
-	switch m.MsgType {
-	case wxText:
-		base.Type = remoteapi.MsgText
-	case wxImage:
-		base.Type = remoteapi.MsgImage
-		base.Media = &remoteapi.Media{MimeType: "image/jpeg"}
-	case wxVoice:
-		base.Type = remoteapi.MsgAudio
-		base.Media = &remoteapi.Media{MimeType: "audio/amr"}
-	case wxVideo:
-		base.Type = remoteapi.MsgVideo
-		base.Media = &remoteapi.Media{MimeType: "video/mp4"}
-	case wxEmoji:
-		base.Type = remoteapi.MsgEmoji
-	case wxLocation:
-		base.Type = remoteapi.MsgLocation
-	case wxApp:
-		base.Type, base.Text = parseAppMessage(content, m.PushContent)
-		if base.Text == "" {
-			base.Text = "[app]"
-		}
-	case wxRevoke:
+	if m.MsgType == wxRevoke {
 		// A recall notification, not a message.
 		return remoteapi.Event{
 			Kind: remoteapi.EventRedaction,
@@ -94,11 +123,44 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 				// Target id is embedded in the revoke XML; parse in caller.
 			},
 		}, true
-	default:
-		base.Type = remoteapi.MsgApp
 	}
+	applyMessageType(&base, m.MsgType, content, m.PushContent)
 
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+}
+
+func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push string) {
+	switch msgType {
+	case wxText:
+		base.Type = remoteapi.MsgText
+	case wxImage:
+		base.Type = remoteapi.MsgImage
+		base.Media = &remoteapi.Media{MimeType: "image/jpeg"}
+		if base.Text == "" || strings.HasPrefix(base.Text, "<msg") {
+			base.Text = firstNonEmpty(push, "[image]")
+		}
+	case wxVoice:
+		base.Type = remoteapi.MsgAudio
+		base.Media = &remoteapi.Media{MimeType: "audio/amr"}
+		base.Text = firstNonEmpty(push, "[voice]")
+	case wxVideo:
+		base.Type = remoteapi.MsgVideo
+		base.Media = &remoteapi.Media{MimeType: "video/mp4"}
+		base.Text = firstNonEmpty(push, "[video]")
+	case wxEmoji:
+		base.Type = remoteapi.MsgEmoji
+		base.Text = firstNonEmpty(base.Text, push, "[emoji]")
+	case wxLocation:
+		base.Type = remoteapi.MsgLocation
+	case wxApp:
+		base.Type, base.Text = parseAppMessage(content, push)
+		if base.Text == "" {
+			base.Text = "[app]"
+		}
+	default:
+		base.Type = remoteapi.MsgApp
+		base.Text = firstNonEmpty(base.Text, push, "[message]")
+	}
 }
 
 func parseAppMessage(content, push string) (remoteapi.MessageType, string) {

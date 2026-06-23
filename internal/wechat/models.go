@@ -72,6 +72,47 @@ type revokeReq struct {
 	CreateTime  int64  `json:"CreateTime"`
 }
 
+// --- QueryLocal ---
+
+type queryLocalReq struct {
+	Wxid            string `json:"Wxid"`
+	Talker          string `json:"Talker,omitempty"`
+	SenderUserName  string `json:"SenderUserName,omitempty"`
+	MsgType         int    `json:"MsgType,omitempty"`
+	Keyword         string `json:"Keyword,omitempty"`
+	StartCreateTime int64  `json:"StartCreateTime,omitempty"`
+	EndCreateTime   int64  `json:"EndCreateTime,omitempty"`
+	Limit           int64  `json:"Limit"`
+	Offset          int64  `json:"Offset"`
+	Desc            bool   `json:"Desc"`
+}
+
+type queryLocalResp struct {
+	Total int64          `json:"total"`
+	List  []localMessage `json:"list"`
+}
+
+type localMessage struct {
+	MsgID          int64  `json:"MsgID"`
+	NewMsgID       int64  `json:"NewMsgID"`
+	MsgSeq         int64  `json:"MsgSeq"`
+	MsgType        int    `json:"MsgType"`
+	MsgTypeName    string `json:"MsgTypeName"`
+	FromUserName   string `json:"FromUserName"`
+	ToUserName     string `json:"ToUserName"`
+	Talker         string `json:"Talker"`
+	SenderUserName string `json:"SenderUserName"`
+	IsSendBySelf   bool   `json:"IsSendBySelf"`
+	IsGroup        bool   `json:"IsGroup"`
+	Content        string `json:"Content"`
+	ContentText    string `json:"ContentText"`
+	PushContent    string `json:"PushContent"`
+	MsgSource      string `json:"MsgSource"`
+	Status         int    `json:"Status"`
+	ImgStatus      int    `json:"ImgStatus"`
+	CreateTime     int64  `json:"CreateTime"`
+}
+
 // --- Sync ---
 
 // syncReq -> Msg.SyncParam

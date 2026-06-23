@@ -22,9 +22,10 @@ func (Factory) New(cfg remoteapi.Config) (remoteapi.PuppetAPI, error) {
 		return nil, fmt.Errorf("wechat: BaseURL is required")
 	}
 	c := &Client{
-		t:      newTransport(cfg.BaseURL),
-		events: make(chan remoteapi.Event, 64),
-		done:   make(chan struct{}),
+		t:         newTransport(cfg.BaseURL),
+		events:    make(chan remoteapi.Event, 64),
+		done:      make(chan struct{}),
+		localSeen: map[string]struct{}{},
 	}
 	if len(cfg.Session) > 0 {
 		var s sessionState
@@ -53,6 +54,9 @@ type Client struct {
 	mu      sync.RWMutex
 	wxid    string
 	syncKey string
+
+	localCursor int64
+	localSeen   map[string]struct{}
 
 	done     chan struct{}
 	stopOnce sync.Once
@@ -112,7 +116,7 @@ func (c *Client) syncLoop() {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
-		msgs, err := c.sync(ctx)
+		msgs, err := c.queryLocal(ctx)
 		cancel()
 
 		if err != nil {
@@ -130,11 +134,70 @@ func (c *Client) syncLoop() {
 		backoff = time.Second
 
 		for _, m := range msgs {
-			if ev, ok := c.convertInbound(m); ok {
+			if ev, ok := c.convertLocal(m); ok {
 				c.emit(ev)
 			}
 		}
+		select {
+		case <-time.After(3 * time.Second):
+		case <-c.done:
+			return
+		}
 	}
+}
+
+func (c *Client) queryLocal(ctx context.Context) ([]localMessage, error) {
+	c.mu.RLock()
+	wxid := c.wxid
+	cursor := c.localCursor
+	c.mu.RUnlock()
+
+	req := queryLocalReq{Wxid: wxid, Limit: 50, Offset: 0, Desc: false}
+	if cursor > 0 {
+		req.StartCreateTime = cursor
+	} else {
+		// First run: grab a small recent window so existing active chats can create
+		// portal rooms, but don't backfill the entire 100k+ local DB.
+		req.Limit = 30
+		req.Desc = true
+	}
+
+	var resp queryLocalResp
+	if err := c.t.post(ctx, "/Msg/QueryLocal", req, nil, &resp); err != nil {
+		return nil, err
+	}
+	msgs := resp.List
+	if req.Desc {
+		for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+			msgs[i], msgs[j] = msgs[j], msgs[i]
+		}
+	}
+
+	out := make([]localMessage, 0, len(msgs))
+	var maxTime int64 = cursor
+	c.mu.Lock()
+	for _, m := range msgs {
+		if m.CreateTime > maxTime {
+			maxTime = m.CreateTime
+		}
+		key := fmt.Sprintf("%d/%d/%d", m.CreateTime, m.NewMsgID, m.MsgID)
+		if _, ok := c.localSeen[key]; ok {
+			continue
+		}
+		c.localSeen[key] = struct{}{}
+		if len(c.localSeen) > 2000 {
+			c.localSeen = map[string]struct{}{key: struct{}{}}
+		}
+		if shouldDropLocal(m) {
+			continue
+		}
+		out = append(out, m)
+	}
+	if maxTime > c.localCursor {
+		c.localCursor = maxTime
+	}
+	c.mu.Unlock()
+	return out, nil
 }
 
 func (c *Client) sync(ctx context.Context) ([]rawMessage, error) {
