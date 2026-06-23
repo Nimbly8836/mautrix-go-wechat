@@ -41,6 +41,8 @@ bridge:
     displayname_template: "{{.}} (WeChat)"
     # Opaque backend session blob. Generated after successful Matrix `login`.
     session_file: /data/session.json
+    # Matrix portal-room mappings for remote WeChat chats.
+    portal_file: /data/portals.json
     # Who may use the bridge. Levels: relay < user < admin.
     permissions:
         "example.com": user

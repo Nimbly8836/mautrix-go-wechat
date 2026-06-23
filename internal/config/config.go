@@ -56,6 +56,8 @@ type Bridge struct {
 	Permissions         map[string]string `yaml:"permissions"`
 	// SessionFile stores the opaque remoteapi session blob (WeChat wxid/sync key).
 	SessionFile string `yaml:"session_file"`
+	// PortalFile stores Matrix room mappings for remote chats.
+	PortalFile string `yaml:"portal_file"`
 }
 
 // Database connection settings.

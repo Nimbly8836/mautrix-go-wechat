@@ -48,6 +48,9 @@ func main() {
 	if cfg.Bridge.SessionFile == "" {
 		cfg.Bridge.SessionFile = "/data/session.json"
 	}
+	if cfg.Bridge.PortalFile == "" {
+		cfg.Bridge.PortalFile = "/data/portals.json"
+	}
 
 	apiCfg := remoteapi.Config{
 		BaseURL: cfg.Network.BaseURL,

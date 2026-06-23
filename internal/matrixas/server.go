@@ -34,6 +34,7 @@ type Server struct {
 	conn        *connector.Connector
 	api         remoteapi.PuppetAPI
 	sessionFile string
+	portals     *portalStore
 
 	mu         sync.Mutex
 	rooms      map[id.RoomID]bool
@@ -68,6 +69,11 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	if s.sessionFile == "" {
 		s.sessionFile = "/data/session.json"
 	}
+	portalFile := cfg.Bridge.PortalFile
+	if portalFile == "" {
+		portalFile = "/data/portals.json"
+	}
+	s.portals = newPortalStore(portalFile)
 
 	conn, err := connector.New(cfg.Network.Protocol, apiCfg, s)
 	if err != nil {
@@ -117,7 +123,7 @@ func (s *Server) matrixLoop(ctx context.Context) {
 func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 	bot := s.as.BotMXID()
 	log.Printf("matrix event: room=%s sender=%s type=%s state=%v", evt.RoomID, evt.Sender, evt.Type.String(), evt.StateKey != nil)
-	if evt.Sender == bot {
+	if evt.Sender == bot || s.isBridgeUser(evt.Sender) {
 		return
 	}
 
@@ -152,8 +158,13 @@ func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 	if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
 		return
 	}
+	body := strings.TrimSpace(msg.Body)
+	if rec, ok := s.portals.byRoom(evt.RoomID); ok {
+		s.handlePortalMessage(ctx, rec, evt.Sender, body)
+		return
+	}
 	s.addRoom(evt.RoomID)
-	s.handleCommand(ctx, evt.RoomID, evt.Sender, strings.TrimSpace(msg.Body))
+	s.handleCommand(ctx, evt.RoomID, evt.Sender, body)
 }
 
 func (s *Server) addRoom(roomID id.RoomID) {
@@ -199,19 +210,32 @@ func (s *Server) image(ctx context.Context, room id.RoomID, data []byte, body st
 	return err
 }
 
-// EventSink implementation: remote -> Matrix management room.
+// EventSink implementation: remote -> Matrix portal rooms.
 func (s *Server) OnMessage(ctx context.Context, m *remoteapi.InboundMessage) {
-	body := fmt.Sprintf("[%s] <%s> %s", m.Chat, m.Sender, m.Text)
-	if body == "" {
-		body = fmt.Sprintf("[%s] <%s> 收到类型 %d 消息", m.Chat, m.Sender, m.Type)
+	rec, err := s.ensurePortal(ctx, m.Chat)
+	if err != nil {
+		log.Printf("failed to ensure portal for %s: %v", m.Chat, err)
+		for _, room := range s.managementRooms() {
+			s.notice(ctx, room, fmt.Sprintf("为 %s 创建 portal 失败: %v", m.Chat, err))
+		}
+		return
 	}
-	for _, room := range s.managementRooms() {
-		s.text(ctx, room, body)
+
+	sender := m.Sender
+	if sender == "" {
+		sender = remoteapi.UserID(m.Chat)
+	}
+	client := s.ensurePuppetJoined(ctx, sender, rec.RoomID)
+	content := matrixContentFromRemote(m)
+	_, err = client.SendMessageEvent(ctx, rec.RoomID, event.EventMessage, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
+	if err != nil {
+		log.Printf("failed to bridge remote msg %s to %s: %v", m.ID, rec.RoomID, err)
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("桥接消息失败: %v", err))
 	}
 }
 func (s *Server) OnRedaction(ctx context.Context, r *remoteapi.Redaction) {
-	for _, room := range s.managementRooms() {
-		s.notice(ctx, room, fmt.Sprintf("[%s] 消息被撤回: %s", r.Chat, r.Target))
+	if rec, ok := s.portals.get(r.Chat); ok {
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("消息被撤回: %s", r.Target))
 	}
 }
 func (s *Server) OnReceipt(context.Context, *remoteapi.Receipt)       {}
@@ -289,6 +313,14 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+func (s *Server) isBridgeUser(user id.UserID) bool {
+	localpart, domain, err := user.Parse()
+	if err != nil || domain != s.cfg.Homeserver.Domain {
+		return false
+	}
+	return strings.HasPrefix(localpart, s.cfg.Appservice.ID+"_")
 }
 
 type queryHandler struct {

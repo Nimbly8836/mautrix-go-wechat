@@ -60,12 +60,27 @@ login
 ```
 
 The bot will send the WeChat QR code in the Matrix room. Scan and confirm in
-WeChat. After login, incoming WeChat messages are forwarded to that management
-room. You can also test outbound text with:
+WeChat. After login, incoming WeChat messages automatically create Matrix portal
+rooms (one room per WeChat chat), similar to mautrix-telegram. In a portal room,
+plain Matrix text messages are sent back to WeChat.
+
+Management-room commands:
 
 ```text
+status
+portals
 send <wxid-or-chatroom-id> hello
 ```
+
+Portal-room commands:
+
+```text
+!info
+!sync
+```
+
+If commands don't respond, check whether the room is encrypted. This MVP does
+not decrypt Matrix E2EE rooms yet; use an unencrypted management/portal room.
 
 ## Switching the database to Postgres
 

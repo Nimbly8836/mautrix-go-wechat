@@ -6,9 +6,11 @@ to your chat API directly**. It talks to one small Go interface,
 implementation. To switch to QQ — or any other backend — you implement the same
 interface and change one line of config.
 
-The current Matrix layer is a minimal mautrix appservice management bot:
+The current Matrix layer is a mautrix appservice bridge MVP:
 invite/chat with `@wechatbot:<domain>`, send `login`, scan the QR, then inbound
-WeChat messages are forwarded to the management room. The login model follows
+WeChat chats automatically create Matrix portal rooms. In those rooms, virtual
+users like `@wechat_<encoded-id>:<domain>` represent WeChat senders, and Matrix
+text messages are sent back to WeChat. The login model follows
 [mautrix-telegram](https://github.com/mautrix/telegram) / mautrix bridgev2's
 state machine (`LoginFlow` → `LoginProcess` → `LoginStep`).
 
@@ -85,8 +87,9 @@ Generate registration first, add it to Synapse, then run:
 go run ./cmd/bridge -c config.yaml -r registration.yaml
 ```
 
-In Matrix, invite `@wechatbot:<your-domain>` to a room or start a DM, then send
-`help` / `login`.
+In Matrix, invite `@wechatbot:<your-domain>` to an unencrypted room or start a
+DM with encryption disabled, then send `help` / `login`. After login, portal
+rooms are created automatically for WeChat chats.
 
 ## Docker (mautrix-telegram-style deployment)
 

@@ -30,9 +30,10 @@ help                显示帮助
 status              查看登录状态
 login               使用二维码登录 WeChat
 logout              退出 WeChat
+portals             列出已创建的 portal rooms
 send <chat> <text>  发送文本到 WeChat wxid/chatroom
 
-当前版本是最小 appservice 管理 bot:收到的 WeChat 消息会转发到这个管理房间。后续可扩展为真正 portal room。`))
+收到的 WeChat 会话会自动创建 Matrix portal room；在 portal room 里直接发送文本即可转发到 WeChat。`))
 	case "status", "状态":
 		ok, err := s.api.IsLoggedIn(ctx)
 		if err != nil {
@@ -47,7 +48,8 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 		s.notice(ctx, room, fmt.Sprintf("已登录: %s", self))
 		s.startRemote(ctx)
 	case "login", "登录":
-		go s.runLogin(ctx, room)
+		s.portals.setOwner(sender)
+		go s.runLogin(ctx, room, sender)
 	case "logout", "登出", "退出":
 		if err := s.api.Logout(ctx); err != nil {
 			s.notice(ctx, room, fmt.Sprintf("退出失败: %v", err))
@@ -55,6 +57,18 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 		}
 		s.stopRemote()
 		s.notice(ctx, room, "已退出 WeChat。")
+	case "portals":
+		items := s.portals.list()
+		if len(items) == 0 {
+			s.notice(ctx, room, "还没有 portal room。收到 WeChat 消息后会自动创建。")
+			return
+		}
+		var b strings.Builder
+		b.WriteString("Portals:\n")
+		for _, p := range items {
+			fmt.Fprintf(&b, "- %s -> %s (%s)\n", p.ChatID, p.RoomID, p.Name)
+		}
+		s.notice(ctx, room, b.String())
 	case "send", "发送":
 		chat, text, ok := strings.Cut(rest, " ")
 		chat = strings.TrimSpace(chat)
@@ -93,7 +107,7 @@ func (s *Server) allowed(sender id.UserID) bool {
 	return level != "" && level != "relay"
 }
 
-func (s *Server) runLogin(ctx context.Context, room id.RoomID) {
+func (s *Server) runLogin(ctx context.Context, room id.RoomID, owner id.UserID) {
 	if ok, _ := s.api.IsLoggedIn(ctx); ok {
 		self, _ := s.api.Self(ctx)
 		s.notice(ctx, room, fmt.Sprintf("已经登录: %s", self))
@@ -129,6 +143,7 @@ func (s *Server) runLogin(ctx context.Context, room id.RoomID) {
 			return
 		case remoteapi.LoginComplete:
 			s.notice(ctx, room, fmt.Sprintf("登录成功: %s", step.Self))
+			s.portals.setOwner(owner)
 			s.saveSession()
 			s.startRemote(ctx)
 			return
