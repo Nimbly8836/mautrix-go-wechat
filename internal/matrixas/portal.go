@@ -294,17 +294,43 @@ func (s *Server) roomAvatarFromURL(ctx context.Context, url string) (id.ContentU
 	return id.ContentURIString(resp.ContentURI.String()), nil
 }
 
+func normalizePortalChat(rec portalRecord, chat remoteapi.Chat) remoteapi.Chat {
+	if chat.ID == "" {
+		chat.ID = rec.ChatID
+	}
+	if strings.HasSuffix(string(chat.ID), "@chatroom") {
+		chat.IsGroup = true
+	} else if chat.ID != "" {
+		chat.IsGroup = false
+	}
+	if chat.Name == "" && chat.ID != "" {
+		chat.Name = string(chat.ID)
+	}
+	return chat
+}
+
+func (s *Server) portalRefreshDebug(chat remoteapi.Chat, joined, failed int) string {
+	avatar := "no"
+	if strings.TrimSpace(chat.Avatar) != "" {
+		avatar = "yes"
+	}
+	return fmt.Sprintf("chat=%s name=%q group=%v members=%d avatar=%s synced_members=%d failed_members=%d", chat.ID, chat.Name, chat.IsGroup, len(chat.Members), avatar, joined, failed)
+}
+
 func (s *Server) applyPortalMetadata(ctx context.Context, rec portalRecord, chat remoteapi.Chat) {
 	if rec.RoomID == "" {
 		return
 	}
-	if !chat.IsGroup && chat.ID != "" && chat.Avatar == "" {
+	chat = normalizePortalChat(rec, chat)
+	if !chat.IsGroup && chat.ID != "" {
 		if ct, ok := s.contactForRemote(ctx, remoteapi.UserID(chat.ID), true); ok {
-			chat.Avatar = ct.AvatarURL
-			if chat.Name == "" || chat.Name == string(chat.ID) {
-				chat.Name = matrixPick(ct.Remark, ct.Name)
+			if ct.AvatarURL != "" {
+				chat.Avatar = ct.AvatarURL
 			}
-			if len(chat.Extra) == 0 && len(ct.Extra) > 0 {
+			if name := matrixPick(ct.Remark, ct.Name); name != "" {
+				chat.Name = name
+			}
+			if len(ct.Extra) > 0 {
 				chat.Extra = ct.Extra
 			}
 		}
@@ -467,6 +493,7 @@ func (s *Server) syncPortalMembers(ctx context.Context, rec portalRecord, chat r
 	if rec.RoomID == "" {
 		return 0, 0
 	}
+	chat = normalizePortalChat(rec, chat)
 	account := s.currentAccountID(ctx)
 	hasMemberContacts := false
 	if account != "" && s.contacts != nil && chat.Extra != nil {

@@ -270,6 +270,7 @@ func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserI
 			log.Printf("failed to refresh portal metadata for %s: %v", rec.ChatID, err)
 			continue
 		}
+		chat = normalizePortalChat(rec, chat)
 		if !rec.IsGroup && chat.Avatar == "" && s.contacts != nil {
 			if ct, ok := s.contacts.get(account, remoteapi.UserID(rec.ChatID)); ok {
 				chat.Avatar = ct.AvatarURL

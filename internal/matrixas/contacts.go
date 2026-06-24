@@ -30,6 +30,7 @@ type contactRecord struct {
 	Name      string           `json:"name,omitempty"`
 	Remark    string           `json:"remark,omitempty"`
 	AvatarURL string           `json:"avatar_url,omitempty"`
+	Extra     map[string]any   `json:"extra,omitempty"`
 	UpdatedAt time.Time        `json:"updated_at"`
 }
 
@@ -123,9 +124,9 @@ func (cs *contactStore) shouldRefresh(account remoteapi.UserID, maxAge time.Dura
 }
 
 func contactToRecord(contact remoteapi.Contact) contactRecord {
-	return contactRecord{ID: contact.ID, Name: contact.Name, Remark: contact.Remark, AvatarURL: contact.AvatarURL, UpdatedAt: time.Now()}
+	return contactRecord{ID: contact.ID, Name: contact.Name, Remark: contact.Remark, AvatarURL: contact.AvatarURL, Extra: contact.Extra, UpdatedAt: time.Now()}
 }
 
 func contactFromRecord(rec contactRecord) remoteapi.Contact {
-	return remoteapi.Contact{ID: rec.ID, Name: rec.Name, Remark: rec.Remark, AvatarURL: rec.AvatarURL}
+	return remoteapi.Contact{ID: rec.ID, Name: rec.Name, Remark: rec.Remark, AvatarURL: rec.AvatarURL, Extra: rec.Extra}
 }
