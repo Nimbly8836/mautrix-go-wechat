@@ -48,8 +48,9 @@ type Factory interface {
 type Config struct {
 	// BaseURL / Token are common for HTTP-style backends. Implementations may
 	// ignore them.
-	BaseURL string
-	Token   string
+	BaseURL     string
+	Token       string
+	ReceiveMode string
 	// Session is the opaque, previously-persisted session blob (see
 	// PuppetAPI.DumpSession). Empty on first login.
 	Session []byte
@@ -123,6 +124,12 @@ type PuppetAPI interface {
 
 	// GetChat returns conversation metadata (group info, members).
 	GetChat(ctx context.Context, id ChatID) (Chat, error)
+}
+
+// WebhookReceiver is an optional backend capability for push-based delivery.
+// The bridge calls this from an HTTP handler when the backend posts new events.
+type WebhookReceiver interface {
+	HandleWebhook(ctx context.Context, payload []byte) error
 }
 
 // MessageID is the backend-native id of a delivered message.

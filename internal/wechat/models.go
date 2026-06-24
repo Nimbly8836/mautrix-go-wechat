@@ -1,5 +1,7 @@
 package wechat
 
+import "encoding/json"
+
 // API request/response structs, mirroring the subset of swagger.json the
 // bridge uses. Field names match the WeChat API JSON exactly.
 
@@ -127,20 +129,48 @@ type syncStringDoc struct {
 	Str string `json:"Str,omitempty"`
 }
 
+func (s *syncStringDoc) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err == nil {
+		s.Str = raw
+		return nil
+	}
+	var obj struct {
+		Str    string `json:"Str"`
+		String string `json:"string"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	if obj.Str != "" {
+		s.Str = obj.Str
+	} else {
+		s.Str = obj.String
+	}
+	return nil
+}
+
 // rawMessage -> Msg.SyncRawMessageDoc
 type rawMessage struct {
-	MsgId        int64         `json:"MsgId"`
-	NewMsgId     int64         `json:"NewMsgId"`
-	MsgType      int           `json:"MsgType"`
-	MsgSeq       int64         `json:"MsgSeq"`
-	MsgSource    string        `json:"MsgSource"`
-	Content      syncStringDoc `json:"Content"`
-	FromUserName syncStringDoc `json:"FromUserName"`
-	ToUserName   syncStringDoc `json:"ToUserName"`
-	PushContent  string        `json:"PushContent"`
-	CreateTime   int64         `json:"CreateTime"`
-	ImgStatus    int           `json:"ImgStatus"`
-	Status       int           `json:"Status"`
+	MsgId          int64         `json:"MsgId"`
+	MsgID          int64         `json:"MsgID"`
+	NewMsgId       int64         `json:"NewMsgId"`
+	NewMsgID       int64         `json:"NewMsgID"`
+	MsgType        int           `json:"MsgType"`
+	MsgSeq         int64         `json:"MsgSeq"`
+	MsgSource      string        `json:"MsgSource"`
+	Content        syncStringDoc `json:"Content"`
+	ContentText    string        `json:"ContentText"`
+	FromUserName   syncStringDoc `json:"FromUserName"`
+	ToUserName     syncStringDoc `json:"ToUserName"`
+	Talker         string        `json:"Talker"`
+	SenderUserName string        `json:"SenderUserName"`
+	IsSendBySelf   bool          `json:"IsSendBySelf"`
+	IsGroup        bool          `json:"IsGroup"`
+	PushContent    string        `json:"PushContent"`
+	CreateTime     int64         `json:"CreateTime"`
+	ImgStatus      int           `json:"ImgStatus"`
+	Status         int           `json:"Status"`
 }
 
 // syncResponse -> Msg.SyncResponseDoc

@@ -3,6 +3,7 @@ package matrixas
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +14,50 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
 
+func parseBridgeCommand(body, commandPrefix string) (cmd, rest string, ok bool) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "", "", false
+	}
+	lower := strings.ToLower(body)
+	commandPrefix = strings.ToLower(commandPrefix)
+	if lower == commandPrefix || strings.HasPrefix(lower, commandPrefix+" ") {
+		rest = strings.TrimSpace(body[len(commandPrefix):])
+		if rest == "" {
+			return "help", "", true
+		}
+		cmd, rest, _ = strings.Cut(rest, " ")
+		return strings.ToLower(cmd), strings.TrimSpace(rest), true
+	}
+	if strings.HasPrefix(body, "!") {
+		return "", "", false
+	}
+	cmd, rest, _ = strings.Cut(body, " ")
+	return strings.ToLower(cmd), strings.TrimSpace(rest), true
+}
+
+func parsePortalCommand(body, commandPrefix string) (cmd, rest string, ok bool) {
+	body = strings.TrimSpace(body)
+	lower := strings.ToLower(body)
+	commandPrefix = strings.ToLower(commandPrefix)
+	if lower != commandPrefix && !strings.HasPrefix(lower, commandPrefix+" ") {
+		return "", "", false
+	}
+	rest = strings.TrimSpace(body[len(commandPrefix):])
+	if rest == "" {
+		return "help", "", true
+	}
+	cmd, rest, _ = strings.Cut(rest, " ")
+	return strings.ToLower(cmd), strings.TrimSpace(rest), true
+}
+
+func (s *Server) commandPrefix() string {
+	if s.cfg != nil && s.cfg.Bridge.CommandPrefix != "" {
+		return s.cfg.Bridge.CommandPrefix
+	}
+	return "!wx"
+}
+
 func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.UserID, body string) {
 	if body == "" {
 		return
@@ -22,28 +67,32 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 		return
 	}
 
-	cmd, rest, _ := strings.Cut(body, " ")
-	cmd = strings.TrimPrefix(strings.ToLower(cmd), "!")
+	cmd, rest, ok := parseBridgeCommand(body, s.commandPrefix())
+	if !ok {
+		return
+	}
 
 	switch cmd {
 	case "help", "帮助":
-		s.notice(ctx, room, strings.TrimSpace(`可用命令:
-help                显示帮助
-status              查看登录状态
-login               列出 WeChat 登录协议
-login <flow>        使用指定协议登录，如 login ipad / login win / login mac
-accounts            列出已保存的微信账号
-account <wxid>      查看 wxid 登录缓存，并设为当前登录账号
-use <wxid>          切换到已保存账号
-logout              退出 WeChat
-space               创建/查看当前微信账号的 Matrix Space
-portal-mode         查看/切换 portal 创建模式(auto/manual)
-pending             列出等待确认创建的会话
-create <chat|all>   手动创建 pending portal
-portals             列出已创建的 portal rooms
-send <chat> <text>  发送文本到 WeChat wxid/chatroom
+		prefix := s.commandPrefix()
+		s.notice(ctx, room, strings.TrimSpace(fmt.Sprintf(`可用命令:
+%[1]s help                显示帮助
+%[1]s status              查看登录状态
+%[1]s login               列出 WeChat 登录协议
+%[1]s login <flow>        使用指定协议登录，如 %[1]s login ipad / %[1]s login win / %[1]s login mac
+%[1]s accounts            列出已保存的微信账号
+%[1]s account <wxid>      查看 wxid 登录缓存，并设为当前登录账号
+%[1]s use <wxid>          切换到已保存账号
+%[1]s logout              退出 WeChat
+%[1]s space               创建/查看当前微信账号的 Matrix Space，并挂载已有 portal
+%[1]s contacts refresh    强制刷新联系人缓存，并更新一对一 portal 房间名
+%[1]s portal-mode         查看/切换 portal 创建模式(auto/manual)
+%[1]s pending             列出等待确认创建的会话
+%[1]s create <chat|all>   手动创建 pending portal
+%[1]s portals             列出已创建的 portal rooms
+%[1]s send <chat> <text>  发送文本到 WeChat wxid/chatroom
 
-收到的 WeChat 会话会自动创建 Matrix portal room；在 portal room 里直接发送文本即可转发到 WeChat。`))
+收到的 WeChat 会话会自动创建 Matrix portal room；在 portal room 里直接发送文本即可转发到 WeChat。portal 本地命令使用 %[1]s info / %[1]s sync。`, prefix)))
 	case "status", "状态":
 		ok, err := s.api.IsLoggedIn(ctx)
 		if err != nil {
@@ -52,9 +101,9 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 		}
 		if !ok {
 			if cur, exists := s.accounts.current(); exists {
-				s.notice(ctx, room, fmt.Sprintf("当前选择账号: %s，但 session 未登录/已失效。发送 `login` 重新登录，或 `accounts` 查看账号。", cur.ID))
+				s.notice(ctx, room, fmt.Sprintf("当前选择账号: %s，但 session 未登录/已失效。发送 `%s login` 重新登录，或 `%s accounts` 查看账号。", cur.ID, s.commandPrefix(), s.commandPrefix()))
 			} else {
-				s.notice(ctx, room, "未登录。发送 `login` 查看可用登录协议。")
+				s.notice(ctx, room, fmt.Sprintf("未登录。发送 `%s login` 查看可用登录协议。", s.commandPrefix()))
 			}
 			return
 		}
@@ -86,7 +135,7 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 	case "use", "切换":
 		wxid := remoteapi.UserID(strings.TrimSpace(rest))
 		if wxid == "" {
-			s.notice(ctx, room, "用法: use <wxid>。发送 `accounts` 查看已保存账号。")
+			s.notice(ctx, room, fmt.Sprintf("用法: use <wxid>。发送 `%s accounts` 查看已保存账号。", s.commandPrefix()))
 			return
 		}
 		if err := s.useSavedAccount(wxid); err != nil {
@@ -105,7 +154,7 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 			s.startRemote(ctx)
 			s.notice(ctx, room, fmt.Sprintf("已切换并连接账号: %s", wxid))
 		} else {
-			s.notice(ctx, room, fmt.Sprintf("已切换到账号 %s，但 session 可能已失效，请重新 `login <flow>`。", wxid))
+			s.notice(ctx, room, fmt.Sprintf("已切换到账号 %s，但 session 可能已失效，请重新 `%s login <flow>`。", wxid, s.commandPrefix()))
 		}
 	case "logout", "登出", "退出":
 		if err := s.api.Logout(ctx); err != nil {
@@ -114,6 +163,8 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 		}
 		s.stopRemote()
 		s.notice(ctx, room, "已退出 WeChat。")
+	case "contacts", "联系人":
+		s.handleContactsCommand(ctx, room, rest)
 	case "portal-mode":
 		mode := strings.TrimSpace(strings.ToLower(rest))
 		if mode == "" {
@@ -138,7 +189,7 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 	case "space", "空间":
 		account := s.currentAccountID(ctx)
 		if account == "" {
-			s.notice(ctx, room, "当前没有选择/登录微信账号。先使用 `account <wxid>` 或 `login <flow>`。")
+			s.notice(ctx, room, fmt.Sprintf("当前没有选择/登录微信账号。先使用 `%s account <wxid>` 或 `%s login <flow>`。", s.commandPrefix(), s.commandPrefix()))
 			return
 		}
 		space, err := s.ensureAccountSpace(ctx, account)
@@ -175,10 +226,59 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 		s.notice(ctx, room, fmt.Sprintf("已发送: %s", id))
 	default:
 		// If it looks like a normal message, keep quiet to avoid noisy rooms.
-		if strings.HasPrefix(body, "!") {
-			s.notice(ctx, room, "未知命令。发送 `help` 查看帮助。")
+		if strings.HasPrefix(body, s.commandPrefix()) {
+			s.notice(ctx, room, fmt.Sprintf("未知命令。发送 `%s help` 查看帮助。", s.commandPrefix()))
 		}
 	}
+}
+
+func (s *Server) handleContactsCommand(ctx context.Context, room id.RoomID, rest string) {
+	action := strings.TrimSpace(strings.ToLower(rest))
+	if action == "" {
+		s.notice(ctx, room, fmt.Sprintf("用法: %s contacts refresh", s.commandPrefix()))
+		return
+	}
+	if action != "refresh" && action != "刷新" {
+		s.notice(ctx, room, fmt.Sprintf("未知 contacts 命令。用法: %s contacts refresh", s.commandPrefix()))
+		return
+	}
+	account := s.currentAccountID(ctx)
+	if account == "" {
+		s.notice(ctx, room, fmt.Sprintf("当前没有选择/登录微信账号。先使用 `%s account <wxid>` 或 `%s login <flow>`。", s.commandPrefix(), s.commandPrefix()))
+		return
+	}
+	count, err := s.refreshContactCache(ctx, account)
+	if err != nil {
+		s.notice(ctx, room, fmt.Sprintf("刷新联系人缓存失败: %v", err))
+		return
+	}
+	updated, failed := s.syncPortalMetadata(ctx, account)
+	s.notice(ctx, room, fmt.Sprintf("已刷新联系人缓存: %d 个联系人。已同步 %d 个 portal 元数据，失败 %d 个。", count, updated, failed))
+}
+
+func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserID) (updated, failed int) {
+	if s.portals == nil {
+		return 0, 0
+	}
+	for _, rec := range s.portals.list() {
+		if rec.RoomID == "" {
+			continue
+		}
+		chat, err := s.api.GetChat(ctx, rec.ChatID)
+		if err != nil {
+			failed++
+			log.Printf("failed to refresh portal metadata for %s: %v", rec.ChatID, err)
+			continue
+		}
+		if !rec.IsGroup && chat.Avatar == "" && s.contacts != nil {
+			if ct, ok := s.contacts.get(account, remoteapi.UserID(rec.ChatID)); ok {
+				chat.Avatar = ct.AvatarURL
+			}
+		}
+		s.applyPortalMetadata(ctx, rec, chat)
+		updated++
+	}
+	return updated, failed
 }
 
 func (s *Server) portalCreationMode() string {
@@ -199,7 +299,7 @@ func (s *Server) pendingPortalsText() string {
 	for _, p := range items {
 		fmt.Fprintf(&b, "- %s  name=%s  sender=%s  count=%d  preview=%s\n", p.ChatID, p.Name, p.Sender, p.Count, trimPreview(p.LastMessage))
 	}
-	b.WriteString("\n发送 `create <chat>` 创建指定 portal，或 `create all` 全部创建。")
+	fmt.Fprintf(&b, "\n发送 `%s create <chat>` 创建指定 portal，或 `%s create all` 全部创建。", s.commandPrefix(), s.commandPrefix())
 	return b.String()
 }
 
@@ -244,11 +344,11 @@ func (s *Server) loginFlowHelp() string {
 		return "当前后端没有可用登录协议。"
 	}
 	var b strings.Builder
-	b.WriteString("请选择 WeChat 登录协议，例如 `login ipad`。可用协议:\n")
+	fmt.Fprintf(&b, "请选择 WeChat 登录协议，例如 `%s login ipad`。可用协议:\n", s.commandPrefix())
 	for _, f := range flows {
 		fmt.Fprintf(&b, "- %s: %s — %s\n", f.ID, f.Name, f.Description)
 	}
-	b.WriteString("\n已登录/保存账号请发送 `accounts`，切换账号发送 `use <wxid>`。")
+	fmt.Fprintf(&b, "\n已登录/保存账号请发送 `%s accounts`，切换账号发送 `%s use <wxid>`。", s.commandPrefix(), s.commandPrefix())
 	return b.String()
 }
 
@@ -264,7 +364,7 @@ func (s *Server) hasLoginFlow(flowID string) bool {
 func (s *Server) accountsHelp() string {
 	accounts := s.accounts.list()
 	if len(accounts) == 0 {
-		return "还没有保存的微信账号。发送 `login` 查看协议，然后使用 `login <flow>` 扫码登录。"
+		return fmt.Sprintf("还没有保存的微信账号。发送 `%s login` 查看协议，然后使用 `%s login <flow>` 扫码登录。", s.commandPrefix(), s.commandPrefix())
 	}
 	cur, _ := s.accounts.current()
 	var b strings.Builder
@@ -276,7 +376,7 @@ func (s *Server) accountsHelp() string {
 		}
 		fmt.Fprintf(&b, "%s %s  protocol=%s  login_flow=%s  space=%s  updated=%s\n", mark, acc.ID, acc.Protocol, acc.LoginFlow, acc.SpaceRoom, acc.UpdatedAt.Format("2006-01-02 15:04:05"))
 	}
-	b.WriteString("\n使用 `account <wxid>` 从服务端登录缓存激活账号，使用 `use <wxid>` 切换本地已保存账号。")
+	fmt.Fprintf(&b, "\n使用 `%s account <wxid>` 从服务端登录缓存激活账号，使用 `%s use <wxid>` 切换本地已保存账号。", s.commandPrefix(), s.commandPrefix())
 	return b.String()
 }
 

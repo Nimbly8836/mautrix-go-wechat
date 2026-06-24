@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -21,11 +22,16 @@ func (Factory) New(cfg remoteapi.Config) (remoteapi.PuppetAPI, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("wechat: BaseURL is required")
 	}
+	mode := cfg.ReceiveMode
+	if mode == "" {
+		mode = "poll"
+	}
 	c := &Client{
-		t:         newTransport(cfg.BaseURL),
-		events:    make(chan remoteapi.Event, 64),
-		done:      make(chan struct{}),
-		localSeen: map[string]struct{}{},
+		t:           newTransport(cfg.BaseURL),
+		events:      make(chan remoteapi.Event, 64),
+		done:        make(chan struct{}),
+		receiveMode: mode,
+		localSeen:   map[string]struct{}{},
 	}
 	if len(cfg.Session) > 0 {
 		var s sessionState
@@ -55,6 +61,7 @@ type Client struct {
 	wxid    string
 	syncKey string
 
+	receiveMode string
 	localCursor int64
 	localSeen   map[string]struct{}
 
@@ -65,6 +72,7 @@ type Client struct {
 // compile-time interface checks
 var (
 	_ remoteapi.PuppetAPI            = (*Client)(nil)
+	_ remoteapi.WebhookReceiver      = (*Client)(nil)
 	_ remoteapi.MediaUploader        = (*Client)(nil)
 	_ remoteapi.Pinger               = (*Client)(nil)
 	_ remoteapi.LoginInfoProvider    = (*Client)(nil)
@@ -83,7 +91,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	if !loggedIn {
 		return fmt.Errorf("wechat: not logged in; call Login first")
 	}
-	go c.syncLoop()
+	if c.receiveMode != "push" {
+		go c.syncLoop()
+	}
 	c.emit(remoteapi.Event{Kind: remoteapi.EventConnected})
 	return nil
 }
@@ -96,6 +106,146 @@ func (c *Client) Disconnect() {
 }
 
 func (c *Client) Events() <-chan remoteapi.Event { return c.events }
+
+func (c *Client) HandleWebhook(ctx context.Context, payload []byte) error {
+	var decoded []rawMessage
+	resp, err := decodeWebhookMessages(payload)
+	if err != nil {
+		return err
+	}
+	if resp.SyncKey != "" {
+		c.mu.Lock()
+		c.syncKey = resp.SyncKey
+		c.mu.Unlock()
+	}
+	decoded = append(decoded, resp.AddMsgs...)
+	decoded = append(decoded, resp.Messages...)
+	log.Printf("wechat webhook: bytes=%d add_msgs=%d messages=%d", len(payload), len(resp.AddMsgs), len(resp.Messages))
+	if len(decoded) == 0 {
+		log.Printf("wechat webhook: decoded zero messages")
+	}
+	seen := map[string]struct{}{}
+	for _, m := range decoded {
+		key := rawWebhookMessageKey(m)
+		if key != "" {
+			if _, ok := seen[key]; ok {
+				log.Printf("wechat webhook: drop duplicate message key=%s", key)
+				continue
+			}
+			seen[key] = struct{}{}
+			if c.markSeenRawMessage(key) {
+				log.Printf("wechat webhook: drop already seen message key=%s", key)
+				continue
+			}
+		}
+		if ev, ok := c.convertInbound(m); ok {
+			if ev.Message != nil {
+				log.Printf("wechat webhook: emit chat=%s sender=%s type=%d text=%q", ev.Message.Chat, ev.Message.Sender, ev.Message.Type, webhookPreview(ev.Message.Text))
+			}
+			c.emit(ev)
+		}
+	}
+	_ = ctx
+	return nil
+}
+
+func decodeWebhookMessages(payload []byte) (syncResponse, error) {
+	var env Envelope
+	if err := json.Unmarshal(payload, &env); err == nil && (len(env.Data) > 0 || env.Code != 0 || env.Message != "") {
+		if !env.Success && env.Code != 0 {
+			return syncResponse{}, &APIError{Code: env.Code, Message: env.Message, Path: "webhook"}
+		}
+		if len(env.Data) == 0 {
+			return syncResponse{}, nil
+		}
+		resp, err := decodeWebhookMessageSet(env.Data)
+		if err != nil {
+			return syncResponse{}, fmt.Errorf("decode webhook data: %w", err)
+		}
+		return resp, nil
+	}
+	return decodeWebhookMessageSet(payload)
+}
+
+func decodeWebhookMessageSet(payload []byte) (syncResponse, error) {
+	var resp syncResponse
+	if err := json.Unmarshal(payload, &resp); err == nil && (len(resp.AddMsgs) > 0 || len(resp.Messages) > 0 || resp.SyncKey != "") {
+		return resp, nil
+	}
+	var list []rawMessage
+	if err := json.Unmarshal(payload, &list); err == nil {
+		resp.Messages = list
+		return resp, nil
+	}
+	var single rawMessage
+	if err := json.Unmarshal(payload, &single); err == nil && (single.MsgId != 0 || single.MsgID != 0 || single.Talker != "" || single.ContentText != "" || single.Content.Str != "") {
+		resp.Messages = []rawMessage{single}
+		return resp, nil
+	}
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return syncResponse{}, fmt.Errorf("decode webhook payload: %w", err)
+	}
+	return resp, nil
+}
+
+func localMessageKey(m localMessage) string {
+	if m.NewMsgID != 0 {
+		return fmt.Sprintf("new:%d", m.NewMsgID)
+	}
+	if m.MsgID != 0 {
+		return fmt.Sprintf("msg:%d", m.MsgID)
+	}
+	if m.Talker != "" && m.ContentText != "" && m.CreateTime != 0 {
+		return fmt.Sprintf("fallback:%s:%d:%s", m.Talker, m.CreateTime, m.ContentText)
+	}
+	return fmt.Sprintf("local:%d:%s", m.CreateTime, firstNonEmpty(m.ContentText, m.Content, m.PushContent))
+}
+
+func (c *Client) markSeenRawMessage(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.localSeen == nil {
+		c.localSeen = map[string]struct{}{}
+	}
+	if _, ok := c.localSeen[key]; ok {
+		return true
+	}
+	c.localSeen[key] = struct{}{}
+	if len(c.localSeen) > 2000 {
+		c.localSeen = map[string]struct{}{key: struct{}{}}
+	}
+	return false
+}
+
+func rawWebhookMessageKey(m rawMessage) string {
+	if m.NewMsgId != 0 {
+		return fmt.Sprintf("new:%d", m.NewMsgId)
+	}
+	if m.NewMsgID != 0 {
+		return fmt.Sprintf("new:%d", m.NewMsgID)
+	}
+	if m.MsgId != 0 {
+		return fmt.Sprintf("msg:%d", m.MsgId)
+	}
+	if m.MsgID != 0 {
+		return fmt.Sprintf("msg:%d", m.MsgID)
+	}
+	text := firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent)
+	chat := firstNonEmpty(m.Talker, m.FromUserName.Str)
+	if chat != "" && text != "" && m.CreateTime != 0 {
+		return fmt.Sprintf("fallback:%s:%d:%s", chat, m.CreateTime, text)
+	}
+	return ""
+}
+
+func webhookPreview(s string) string {
+	s = strings.TrimSpace(s)
+	if len([]rune(s)) <= 160 {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:160]) + "…"
+}
 
 func (c *Client) emit(e remoteapi.Event) {
 	select {
@@ -180,7 +330,7 @@ func (c *Client) queryLocal(ctx context.Context) ([]localMessage, error) {
 		if m.CreateTime > maxTime {
 			maxTime = m.CreateTime
 		}
-		key := fmt.Sprintf("%d/%d/%d", m.CreateTime, m.NewMsgID, m.MsgID)
+		key := localMessageKey(m)
 		if _, ok := c.localSeen[key]; ok {
 			continue
 		}
@@ -495,14 +645,19 @@ func (c *Client) GetChat(ctx context.Context, id remoteapi.ChatID) (remoteapi.Ch
 		if err != nil {
 			return remoteapi.Chat{}, err
 		}
-		return remoteapi.Chat{ID: id, Name: pick(ct.Remark, ct.Name), IsGroup: false}, nil
+		return remoteapi.Chat{ID: id, Name: pick(ct.Remark, ct.Name), IsGroup: false, Avatar: ct.AvatarURL}, nil
 	}
 	c.mu.RLock()
 	wxid := c.wxid
 	c.mu.RUnlock()
 	var r struct {
-		NickName string `json:"NickName"`
-		Members  []struct {
+		NickName    string `json:"NickName"`
+		Remark      string `json:"Remark"`
+		HeadImgUrl  string `json:"HeadImgUrl"`
+		SmallHead   string `json:"SmallHeadImgUrl"`
+		BigHead     string `json:"BigHeadImgUrl"`
+		ChatRoomImg string `json:"ChatRoomHeadImgUrl"`
+		Members     []struct {
 			Wxid string `json:"Wxid"`
 		} `json:"MemberList"`
 	}
@@ -514,7 +669,7 @@ func (c *Client) GetChat(ctx context.Context, id remoteapi.ChatID) (remoteapi.Ch
 	for _, m := range r.Members {
 		members = append(members, remoteapi.UserID(m.Wxid))
 	}
-	return remoteapi.Chat{ID: id, Name: r.NickName, IsGroup: true, Members: members}, nil
+	return remoteapi.Chat{ID: id, Name: pick(r.Remark, r.NickName), IsGroup: true, Members: members, Avatar: pick(r.ChatRoomImg, r.BigHead, r.HeadImgUrl, r.SmallHead)}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -542,9 +697,11 @@ func parseMsgID(id remoteapi.MessageID) int64 {
 	return v
 }
 
-func pick(a, b string) string {
-	if a != "" {
-		return a
+func pick(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
 	}
-	return b
+	return ""
 }

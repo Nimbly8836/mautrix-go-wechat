@@ -22,7 +22,8 @@ const (
 )
 
 func shouldDropLocal(m localMessage) bool {
-	if m.MsgType == wxStatusNotify {
+	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content, m.PushContent))
+	if m.MsgType == wxStatusNotify || content == "" {
 		return true
 	}
 	if strings.HasPrefix(m.Talker, "@placeholder") || m.Talker == "" {
@@ -32,7 +33,10 @@ func shouldDropLocal(m localMessage) bool {
 }
 
 func (c *Client) convertLocal(m localMessage) (remoteapi.Event, bool) {
-	content := firstNonEmpty(m.ContentText, m.Content, m.PushContent)
+	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content, m.PushContent))
+	if content == "" {
+		return remoteapi.Event{}, false
+	}
 	chat := m.Talker
 	if chat == "" {
 		if m.IsGroup {
@@ -75,17 +79,41 @@ func (c *Client) convertLocal(m localMessage) (remoteapi.Event, bool) {
 func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
-	content := m.Content.Str
-	if strings.TrimSpace(content) == "" {
-		content = m.PushContent
+	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent))
+	if shouldDropWebhookNoise(m, content) {
+		return remoteapi.Event{}, false
+	}
+	messageID := m.NewMsgId
+	if messageID == 0 {
+		messageID = m.NewMsgID
+	}
+	rawID := m.MsgId
+	if rawID == 0 {
+		rawID = m.MsgID
 	}
 
-	// Determine chat + real sender. In group chats WeChat prefixes the body
-	// with "<wxid>:\n". The chat is the @chatroom; sender is extracted.
-	chat := from
-	sender := from
-	if strings.HasSuffix(from, "@chatroom") {
-		chat = from
+	// Determine chat + real sender. Callback pushes may use the local-message
+	// shape (Talker/SenderUserName/ContentText), while /Msg/Sync uses raw
+	// FromUserName/ToUserName plus group sender prefixes in Content.
+	chat := firstNonEmpty(m.Talker, from)
+	sender := firstNonEmpty(m.SenderUserName, from)
+	if chat == "" {
+		if m.IsGroup {
+			chat = from
+		} else if m.IsSendBySelf {
+			chat = to
+		} else {
+			chat = from
+		}
+	}
+	if sender == "" {
+		if m.IsSendBySelf {
+			sender = c.selfWxid()
+		} else {
+			sender = chat
+		}
+	}
+	if strings.HasSuffix(chat, "@chatroom") && m.SenderUserName == "" {
 		if idx := strings.Index(content, ":\n"); idx > 0 {
 			sender = content[:idx]
 			content = content[idx+2:]
@@ -93,14 +121,14 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 			sender = content[:idx]
 			content = strings.TrimSpace(content[idx+1:])
 		}
-	} else if isSelf := from == c.selfWxid(); isSelf {
+	} else if from != "" && from == c.selfWxid() && m.Talker == "" {
 		// Outgoing echo: the conversation is the recipient.
 		chat = to
 		sender = from
 	}
 
 	base := remoteapi.InboundMessage{
-		ID:        remoteapi.MessageID(itoa(m.NewMsgId)),
+		ID:        remoteapi.MessageID(itoa(messageID)),
 		Chat:      remoteapi.ChatID(chat),
 		Sender:    remoteapi.UserID(sender),
 		Text:      content,
@@ -108,7 +136,7 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 		Extra: map[string]any{
 			"msg_type":   m.MsgType,
 			"msg_source": m.MsgSource,
-			"raw_msg_id": m.MsgId,
+			"raw_msg_id": rawID,
 		},
 	}
 
@@ -127,6 +155,26 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
 
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+}
+
+func shouldDropWebhookNoise(m rawMessage, content string) bool {
+	return m.MsgType == wxStatusNotify || content == ""
+}
+
+func stripLastMessageOps(content string) string {
+	for strings.Contains(content, "<name>lastMessage</name>") {
+		start := strings.LastIndex(content[:strings.Index(content, "<name>lastMessage</name>")], "<msg>")
+		if start < 0 {
+			break
+		}
+		endRel := strings.Index(content[start:], "</msg>")
+		if endRel < 0 {
+			break
+		}
+		end := start + endRel + len("</msg>")
+		content = content[:start] + content[end:]
+	}
+	return strings.TrimSpace(content)
 }
 
 func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push string) {

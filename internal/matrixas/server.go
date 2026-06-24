@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -37,6 +38,7 @@ type Server struct {
 	sessionFile string
 	portals     *portalStore
 	accounts    *accountStore
+	contacts    *contactStore
 
 	mu         sync.Mutex
 	rooms      map[id.RoomID]bool
@@ -81,6 +83,11 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 		accountFile = "/data/accounts.json"
 	}
 	s.accounts = newAccountStore(accountFile)
+	contactFile := cfg.Bridge.ContactFile
+	if contactFile == "" {
+		contactFile = "/data/contacts.json"
+	}
+	s.contacts = newContactStore(contactFile)
 
 	conn, err := connector.New(cfg.Network.Protocol, apiCfg, s)
 	if err != nil {
@@ -88,6 +95,9 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	}
 	s.conn = conn
 	s.api = conn.API()
+	if cfg.Network.Receive.Mode == "push" {
+		as.Router.HandleFunc("POST "+cfg.Network.Receive.WebhookPath, s.handleWebhook)
+	}
 	return s, nil
 }
 
@@ -116,6 +126,33 @@ func (s *Server) Run(ctx context.Context) error {
 	s.as.Stop()
 	s.stopRemote()
 	return ctx.Err()
+}
+
+func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	receiver, ok := s.api.(remoteapi.WebhookReceiver)
+	if !ok {
+		http.Error(w, "backend does not support webhooks", http.StatusNotImplemented)
+		return
+	}
+	payload, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil {
+		log.Printf("webhook request failed: path=%s read body: %v", r.URL.Path, err)
+		http.Error(w, "read request body", http.StatusBadRequest)
+		return
+	}
+	log.Printf("webhook request: path=%s bytes=%d", r.URL.Path, len(payload))
+	if err := receiver.HandleWebhook(r.Context(), payload); err != nil {
+		log.Printf("webhook request failed: path=%s bytes=%d error=%v", r.URL.Path, len(payload), err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	log.Printf("webhook request handled: path=%s bytes=%d", r.URL.Path, len(payload))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 func (s *Server) matrixLoop(ctx context.Context) {
@@ -275,7 +312,10 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	if sender == "" {
 		sender = remoteapi.UserID(m.Chat)
 	}
-	client := s.ensurePuppetJoined(ctx, sender, rec.RoomID)
+	client := s.as.BotIntent().Client
+	if shouldJoinPuppet(s.currentAccountID(ctx), sender) {
+		client = s.ensurePuppetJoined(ctx, sender, rec.RoomID)
+	}
 	content := matrixContentFromRemote(m)
 	_, err := client.SendMessageEvent(ctx, rec.RoomID, event.EventMessage, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
 	if err != nil {

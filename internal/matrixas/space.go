@@ -19,7 +19,9 @@ func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserI
 		return "", fmt.Errorf("empty account id")
 	}
 	if acc, ok := s.accounts.get(account); ok && acc.SpaceRoom != "" {
-		return id.RoomID(acc.SpaceRoom), nil
+		space := id.RoomID(acc.SpaceRoom)
+		s.attachExistingPortalsToSpace(ctx, space)
+		return space, nil
 	}
 	invite := []id.UserID{}
 	if owner := s.portals.owner(); owner != "" {
@@ -41,6 +43,7 @@ func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserI
 	s.accounts.setSpace(account, resp.RoomID.String())
 	log.Printf("created account space: account=%s room=%s", account, resp.RoomID)
 	s.notifyManagement(ctx, fmt.Sprintf("已创建微信账号 Space:\n- account: %s\n- space: %s", account, resp.RoomID))
+	s.attachExistingPortalsToSpace(ctx, resp.RoomID)
 	return resp.RoomID, nil
 }
 
@@ -48,10 +51,21 @@ func (s *Server) currentAccountID(ctx context.Context) remoteapi.UserID {
 	if self, err := s.api.Self(ctx); err == nil && self != "" {
 		return self
 	}
-	if acc, ok := s.accounts.current(); ok {
-		return acc.ID
+	if s.accounts != nil {
+		if acc, ok := s.accounts.current(); ok {
+			return acc.ID
+		}
 	}
 	return ""
+}
+
+func (s *Server) attachExistingPortalsToSpace(ctx context.Context, space id.RoomID) {
+	if space == "" || s.portals == nil {
+		return
+	}
+	for _, portal := range s.portals.list() {
+		s.addPortalToSpace(ctx, space, portal)
+	}
 }
 
 func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.UserID, portal portalRecord) {
@@ -63,8 +77,15 @@ func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.
 		log.Printf("failed to ensure space for account %s: %v", account, err)
 		return
 	}
+	s.addPortalToSpace(ctx, space, portal)
+}
+
+func (s *Server) addPortalToSpace(ctx context.Context, space id.RoomID, portal portalRecord) {
+	if space == "" || portal.RoomID == "" {
+		return
+	}
 	via := []string{s.cfg.Homeserver.Domain}
-	_, err = s.as.BotIntent().SendStateEvent(ctx, space, event.StateSpaceChild, portal.RoomID.String(), &event.SpaceChildEventContent{
+	_, err := s.as.BotIntent().SendStateEvent(ctx, space, event.StateSpaceChild, portal.RoomID.String(), &event.SpaceChildEventContent{
 		Via:       via,
 		Suggested: true,
 	})
