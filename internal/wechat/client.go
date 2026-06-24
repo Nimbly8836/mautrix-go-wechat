@@ -422,18 +422,70 @@ func (c *Client) ListContacts(ctx context.Context) ([]remoteapi.Contact, error) 
 	c.mu.RLock()
 	wxid := c.wxid
 	c.mu.RUnlock()
-	var raw []contactResp
+	var raw any
 	if err := c.t.post(ctx, "/Friend/GetContractList", map[string]any{"Wxid": wxid}, nil, &raw); err != nil {
 		return nil, err
 	}
-	out := make([]remoteapi.Contact, 0, len(raw))
-	for _, r := range raw {
-		out = append(out, remoteapi.Contact{
-			ID: remoteapi.UserID(r.Wxid), Name: r.NickName, Remark: r.Remark,
-			AvatarURL: pick(r.BigHeadImg, r.HeadImgUrl),
-		})
+	return parseContactList(raw), nil
+}
+
+func parseContactList(raw any) []remoteapi.Contact {
+	out := []remoteapi.Contact{}
+	switch v := raw.(type) {
+	case []any:
+		for _, item := range v {
+			out = appendContact(out, item)
+		}
+	case map[string]any:
+		if list, ok := v["ContactUsernameList"].([]any); ok {
+			for _, item := range list {
+				id := fmt.Sprint(item)
+				if id != "" && id != "<nil>" {
+					out = append(out, remoteapi.Contact{ID: remoteapi.UserID(id), Name: id})
+				}
+			}
+			return out
+		}
+		for _, key := range []string{"List", "list", "Contacts", "contacts", "Items", "items"} {
+			if list, ok := v[key].([]any); ok {
+				for _, item := range list {
+					out = appendContact(out, item)
+				}
+				return out
+			}
+		}
 	}
-	return out, nil
+	return out
+}
+
+func appendContact(out []remoteapi.Contact, item any) []remoteapi.Contact {
+	m, ok := item.(map[string]any)
+	if !ok {
+		id := fmt.Sprint(item)
+		if id != "" && id != "<nil>" {
+			return append(out, remoteapi.Contact{ID: remoteapi.UserID(id), Name: id})
+		}
+		return out
+	}
+	id := firstString(m, "UserName", "Wxid", "wxid", "Username", "userName")
+	if id == "" {
+		return out
+	}
+	return append(out, remoteapi.Contact{
+		ID:        remoteapi.UserID(id),
+		Name:      firstString(m, "NickName", "nickname", "Name", "name"),
+		Remark:    firstString(m, "Remark", "remark", "RemarkName"),
+		AvatarURL: firstString(m, "BigHeadImgUrl", "SmallHeadImgUrl", "HeadImgUrl", "HeadUrl"),
+	})
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := m[key]; ok && fmt.Sprint(v) != "" && fmt.Sprint(v) != "<nil>" {
+			return fmt.Sprint(v)
+		}
+	}
+	return ""
 }
 
 func (c *Client) GetChat(ctx context.Context, id remoteapi.ChatID) (remoteapi.Chat, error) {

@@ -24,12 +24,13 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 	cmd := strings.TrimPrefix(strings.ToLower(strings.Fields(body)[0]), "!")
 	switch cmd {
 	case "help":
-		s.sendPortalNotice(ctx, rec.RoomID, "这是 WeChat portal room。在这里发送文本会转发到 WeChat。命令: !info, !sync")
+		s.sendPortalNotice(ctx, rec.RoomID, "这是 WeChat portal room。在这里发送文本会转发到 WeChat。命令: !info, !sync/!refresh（仅刷新当前房间）")
 		return
 	case "info":
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("WeChat chat: %s\nMatrix room: %s", rec.ChatID, rec.RoomID))
 		return
-	case "sync":
+	case "sync", "refresh", "刷新":
+		// Single-room refresh only: do not refresh the whole contact cache.
 		chat, err := s.api.GetChat(ctx, rec.ChatID)
 		if err != nil {
 			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("同步元数据失败: %v", err))
@@ -40,7 +41,8 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 			s.portals.set(rec)
 			_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomName, "", map[string]any{"name": chat.Name + " (WeChat)"})
 		}
-		s.sendPortalNotice(ctx, rec.RoomID, "已同步 portal 元数据。")
+		s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
+		s.sendPortalNotice(ctx, rec.RoomID, "已刷新当前 portal 房间元数据。")
 		return
 	}
 
