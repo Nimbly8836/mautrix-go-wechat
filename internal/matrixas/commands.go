@@ -197,7 +197,8 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			s.notice(ctx, room, fmt.Sprintf("创建/获取 Space 失败: %v", err))
 			return
 		}
-		s.notice(ctx, room, fmt.Sprintf("当前微信账号 Space: %s", space))
+		s.attachExistingPortalsToAccountSpace(ctx, account, space)
+		s.notice(ctx, room, fmt.Sprintf("当前微信账号 Space: %s\n已确保子文件夹: 联系人 / 公众号 / 群聊，并重新整理已有 portal。", space))
 	case "portals":
 		items := s.portals.list()
 		if len(items) == 0 {

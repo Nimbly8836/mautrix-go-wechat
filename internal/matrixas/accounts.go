@@ -22,12 +22,13 @@ type accountStoreData struct {
 }
 
 type savedAccount struct {
-	ID        remoteapi.UserID `json:"id"`
-	Protocol  string           `json:"protocol"`
-	LoginFlow string           `json:"login_flow,omitempty"`
-	Session   []byte           `json:"session"`
-	SpaceRoom string           `json:"space_room,omitempty"`
-	UpdatedAt time.Time        `json:"updated_at"`
+	ID           remoteapi.UserID  `json:"id"`
+	Protocol     string            `json:"protocol"`
+	LoginFlow    string            `json:"login_flow,omitempty"`
+	Session      []byte            `json:"session"`
+	SpaceRoom    string            `json:"space_room,omitempty"`
+	SpaceFolders map[string]string `json:"space_folders,omitempty"`
+	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
 func newAccountStore(path string) *accountStore {
@@ -64,8 +65,13 @@ func (as *accountStore) saveLocked() {
 func (as *accountStore) put(acc savedAccount) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	if old, ok := as.data.Accounts[string(acc.ID)]; ok && acc.SpaceRoom == "" {
-		acc.SpaceRoom = old.SpaceRoom
+	if old, ok := as.data.Accounts[string(acc.ID)]; ok {
+		if acc.SpaceRoom == "" {
+			acc.SpaceRoom = old.SpaceRoom
+		}
+		if acc.SpaceFolders == nil {
+			acc.SpaceFolders = old.SpaceFolders
+		}
 	}
 	acc.UpdatedAt = time.Now()
 	as.data.Accounts[string(acc.ID)] = acc
@@ -98,6 +104,22 @@ func (as *accountStore) setSpace(id remoteapi.UserID, roomID string) {
 		acc = savedAccount{ID: id}
 	}
 	acc.SpaceRoom = roomID
+	acc.UpdatedAt = time.Now()
+	as.data.Accounts[string(id)] = acc
+	as.saveLocked()
+}
+
+func (as *accountStore) setSpaceFolder(id remoteapi.UserID, folder, roomID string) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	acc, ok := as.data.Accounts[string(id)]
+	if !ok {
+		acc = savedAccount{ID: id}
+	}
+	if acc.SpaceFolders == nil {
+		acc.SpaceFolders = map[string]string{}
+	}
+	acc.SpaceFolders[folder] = roomID
 	acc.UpdatedAt = time.Now()
 	as.data.Accounts[string(id)] = acc
 	as.saveLocked()

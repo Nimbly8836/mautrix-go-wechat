@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/event"
@@ -12,15 +13,36 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
 
+const (
+	spaceFolderContacts = "contacts"
+	spaceFolderOfficial = "official"
+	spaceFolderGroups   = "groups"
+)
+
+type accountSpaceFolder struct {
+	Key   string
+	Name  string
+	Topic string
+}
+
+var accountSpaceFolders = []accountSpaceFolder{
+	{Key: spaceFolderContacts, Name: "联系人", Topic: "WeChat one-to-one contact portals"},
+	{Key: spaceFolderOfficial, Name: "公众号", Topic: "WeChat official account portals"},
+	{Key: spaceFolderGroups, Name: "群聊", Topic: "WeChat group chat portals"},
+}
+
 // ensureAccountSpace creates or returns the Matrix Space for the current WeChat
-// account. The space is one-per-wxid and contains that account's portal rooms.
+// account. The account space contains child spaces (folders) for contacts,
+// official accounts and group chats.
 func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserID) (id.RoomID, error) {
 	if account == "" {
 		return "", fmt.Errorf("empty account id")
 	}
 	if acc, ok := s.accounts.get(account); ok && acc.SpaceRoom != "" {
 		space := id.RoomID(acc.SpaceRoom)
-		s.attachExistingPortalsToSpace(ctx, space)
+		if _, err := s.ensureAccountSpaceFolders(ctx, account, space); err != nil {
+			return "", err
+		}
 		return space, nil
 	}
 	invite := []id.UserID{}
@@ -43,7 +65,9 @@ func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserI
 	s.accounts.setSpace(account, resp.RoomID.String())
 	log.Printf("created account space: account=%s room=%s", account, resp.RoomID)
 	s.notifyManagement(ctx, fmt.Sprintf("已创建微信账号 Space:\n- account: %s\n- space: %s", account, resp.RoomID))
-	s.attachExistingPortalsToSpace(ctx, resp.RoomID)
+	if _, err := s.ensureAccountSpaceFolders(ctx, account, resp.RoomID); err != nil {
+		return resp.RoomID, err
+	}
 	return resp.RoomID, nil
 }
 
@@ -59,12 +83,59 @@ func (s *Server) currentAccountID(ctx context.Context) remoteapi.UserID {
 	return ""
 }
 
-func (s *Server) attachExistingPortalsToSpace(ctx context.Context, space id.RoomID) {
+func (s *Server) ensureAccountSpaceFolders(ctx context.Context, account remoteapi.UserID, parent id.RoomID) (map[string]id.RoomID, error) {
+	out := map[string]id.RoomID{}
+	if parent == "" {
+		return out, fmt.Errorf("empty account space")
+	}
+	acc, _ := s.accounts.get(account)
+	for _, folder := range accountSpaceFolders {
+		roomID := id.RoomID("")
+		if acc.SpaceFolders != nil {
+			roomID = id.RoomID(acc.SpaceFolders[folder.Key])
+		}
+		if roomID == "" {
+			created, err := s.createAccountFolderSpace(ctx, account, folder)
+			if err != nil {
+				return out, err
+			}
+			roomID = created
+			s.accounts.setSpaceFolder(account, folder.Key, roomID.String())
+			log.Printf("created account folder space: account=%s folder=%s room=%s", account, folder.Key, roomID)
+		}
+		out[folder.Key] = roomID
+		s.addSpaceChild(ctx, parent, roomID, true)
+		s.setSpaceParent(ctx, roomID, parent, false)
+	}
+	return out, nil
+}
+
+func (s *Server) createAccountFolderSpace(ctx context.Context, account remoteapi.UserID, folder accountSpaceFolder) (id.RoomID, error) {
+	invite := []id.UserID{}
+	if owner := s.portals.owner(); owner != "" {
+		invite = append(invite, owner)
+	}
+	resp, err := s.as.BotIntent().CreateRoom(ctx, &mautrix.ReqCreateRoom{
+		Name:   fmt.Sprintf("WeChat %s · %s", account, folder.Name),
+		Topic:  folder.Topic,
+		Invite: invite,
+		Preset: "private_chat",
+		CreationContent: map[string]any{
+			"type": event.RoomTypeSpace,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("create account folder space %s for %s: %w", folder.Key, account, err)
+	}
+	return resp.RoomID, nil
+}
+
+func (s *Server) attachExistingPortalsToAccountSpace(ctx context.Context, account remoteapi.UserID, space id.RoomID) {
 	if space == "" || s.portals == nil {
 		return
 	}
 	for _, portal := range s.portals.list() {
-		s.addPortalToSpace(ctx, space, portal)
+		s.addPortalToAccountSpace(ctx, account, portal)
 	}
 }
 
@@ -77,26 +148,99 @@ func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.
 		log.Printf("failed to ensure space for account %s: %v", account, err)
 		return
 	}
-	s.addPortalToSpace(ctx, space, portal)
+	folders, err := s.ensureAccountSpaceFolders(ctx, account, space)
+	if err != nil {
+		log.Printf("failed to ensure folder spaces for account %s: %v", account, err)
+		return
+	}
+	folder := s.portalSpaceFolder(ctx, portal)
+	folderSpace := folders[folder]
+	if folderSpace == "" {
+		folderSpace = space
+	}
+	// Remove legacy direct child link from account root, then add the portal to
+	// the category folder. Empty content makes the child link invalid in clients.
+	s.removeSpaceChild(ctx, space, portal.RoomID)
+	s.removeSpaceParent(ctx, portal.RoomID, space)
+	s.addPortalToSpace(ctx, folderSpace, portal)
+}
+
+func (s *Server) portalSpaceFolder(ctx context.Context, portal portalRecord) string {
+	chatID := portal.ChatID
+	if strings.HasSuffix(string(chatID), "@chatroom") {
+		return spaceFolderGroups
+	}
+	if s.api != nil && chatID != "" {
+		if chat, err := s.api.GetChat(ctx, chatID); err == nil {
+			chat = normalizePortalChat(portal, chat)
+			if chat.IsGroup {
+				return spaceFolderGroups
+			}
+			if isOfficialChat(chat) {
+				return spaceFolderOfficial
+			}
+		} else {
+			log.Printf("failed to classify portal space folder chat=%s: %v", chatID, err)
+		}
+	}
+	if portal.IsGroup {
+		return spaceFolderGroups
+	}
+	return spaceFolderContacts
 }
 
 func (s *Server) addPortalToSpace(ctx context.Context, space id.RoomID, portal portalRecord) {
 	if space == "" || portal.RoomID == "" {
 		return
 	}
-	via := []string{s.cfg.Homeserver.Domain}
-	_, err := s.as.BotIntent().SendStateEvent(ctx, space, event.StateSpaceChild, portal.RoomID.String(), &event.SpaceChildEventContent{
-		Via:       via,
-		Suggested: true,
-	})
-	if err != nil {
-		log.Printf("failed to add portal %s to space %s: %v", portal.RoomID, space, err)
+	s.addSpaceChild(ctx, space, portal.RoomID, true)
+	s.setSpaceParent(ctx, portal.RoomID, space, true)
+}
+
+func (s *Server) addSpaceChild(ctx context.Context, space, child id.RoomID, suggested bool) {
+	if space == "" || child == "" {
+		return
 	}
-	_, err = s.as.BotIntent().SendStateEvent(ctx, portal.RoomID, event.StateSpaceParent, space.String(), &event.SpaceParentEventContent{
+	via := []string{s.cfg.Homeserver.Domain}
+	_, err := s.as.BotIntent().SendStateEvent(ctx, space, event.StateSpaceChild, child.String(), &event.SpaceChildEventContent{
 		Via:       via,
-		Canonical: true,
+		Suggested: suggested,
 	})
 	if err != nil {
-		log.Printf("failed to set space parent %s on portal %s: %v", space, portal.RoomID, err)
+		log.Printf("failed to add child %s to space %s: %v", child, space, err)
+	}
+}
+
+func (s *Server) setSpaceParent(ctx context.Context, room, parent id.RoomID, canonical bool) {
+	if room == "" || parent == "" {
+		return
+	}
+	via := []string{s.cfg.Homeserver.Domain}
+	_, err := s.as.BotIntent().SendStateEvent(ctx, room, event.StateSpaceParent, parent.String(), &event.SpaceParentEventContent{
+		Via:       via,
+		Canonical: canonical,
+	})
+	if err != nil {
+		log.Printf("failed to set space parent %s on room %s: %v", parent, room, err)
+	}
+}
+
+func (s *Server) removeSpaceChild(ctx context.Context, space, child id.RoomID) {
+	if space == "" || child == "" {
+		return
+	}
+	_, err := s.as.BotIntent().SendStateEvent(ctx, space, event.StateSpaceChild, child.String(), map[string]any{})
+	if err != nil {
+		log.Printf("failed to remove child %s from space %s: %v", child, space, err)
+	}
+}
+
+func (s *Server) removeSpaceParent(ctx context.Context, room, parent id.RoomID) {
+	if room == "" || parent == "" {
+		return
+	}
+	_, err := s.as.BotIntent().SendStateEvent(ctx, room, event.StateSpaceParent, parent.String(), map[string]any{})
+	if err != nil {
+		log.Printf("failed to remove space parent %s from room %s: %v", parent, room, err)
 	}
 }
