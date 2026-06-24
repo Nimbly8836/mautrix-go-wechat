@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -107,34 +108,80 @@ func (c *Client) Disconnect() {
 func (c *Client) Events() <-chan remoteapi.Event { return c.events }
 
 func (c *Client) HandleWebhook(ctx context.Context, payload []byte) error {
-	var resp syncResponse
-	var env Envelope
-	if err := json.Unmarshal(payload, &env); err == nil && (len(env.Data) > 0 || env.Code != 0 || env.Message != "") {
-		if !env.Success && env.Code != 0 {
-			return &APIError{Code: env.Code, Message: env.Message, Path: "webhook"}
-		}
-		if len(env.Data) == 0 {
-			return nil
-		}
-		if err := json.Unmarshal(env.Data, &resp); err != nil {
-			return fmt.Errorf("decode webhook data: %w", err)
-		}
-	} else if err := json.Unmarshal(payload, &resp); err != nil {
-		return fmt.Errorf("decode webhook payload: %w", err)
+	var decoded []rawMessage
+	resp, err := decodeWebhookMessages(payload)
+	if err != nil {
+		return err
 	}
 	if resp.SyncKey != "" {
 		c.mu.Lock()
 		c.syncKey = resp.SyncKey
 		c.mu.Unlock()
 	}
-	msgs := append(resp.AddMsgs, resp.Messages...)
-	for _, m := range msgs {
+	decoded = append(decoded, resp.AddMsgs...)
+	decoded = append(decoded, resp.Messages...)
+	log.Printf("wechat webhook: bytes=%d add_msgs=%d messages=%d", len(payload), len(resp.AddMsgs), len(resp.Messages))
+	if len(decoded) == 0 {
+		log.Printf("wechat webhook: decoded zero messages")
+	}
+	for _, m := range decoded {
 		if ev, ok := c.convertInbound(m); ok {
+			if ev.Message != nil {
+				log.Printf("wechat webhook: emit chat=%s sender=%s type=%d text=%q", ev.Message.Chat, ev.Message.Sender, ev.Message.Type, webhookPreview(ev.Message.Text))
+			}
 			c.emit(ev)
 		}
 	}
 	_ = ctx
 	return nil
+}
+
+func decodeWebhookMessages(payload []byte) (syncResponse, error) {
+	var env Envelope
+	if err := json.Unmarshal(payload, &env); err == nil && (len(env.Data) > 0 || env.Code != 0 || env.Message != "") {
+		if !env.Success && env.Code != 0 {
+			return syncResponse{}, &APIError{Code: env.Code, Message: env.Message, Path: "webhook"}
+		}
+		if len(env.Data) == 0 {
+			return syncResponse{}, nil
+		}
+		resp, err := decodeWebhookMessageSet(env.Data)
+		if err != nil {
+			return syncResponse{}, fmt.Errorf("decode webhook data: %w", err)
+		}
+		return resp, nil
+	}
+	return decodeWebhookMessageSet(payload)
+}
+
+func decodeWebhookMessageSet(payload []byte) (syncResponse, error) {
+	var resp syncResponse
+	if err := json.Unmarshal(payload, &resp); err == nil && (len(resp.AddMsgs) > 0 || len(resp.Messages) > 0 || resp.SyncKey != "") {
+		return resp, nil
+	}
+	var list []rawMessage
+	if err := json.Unmarshal(payload, &list); err == nil {
+		resp.Messages = list
+		return resp, nil
+	}
+	var single rawMessage
+	if err := json.Unmarshal(payload, &single); err == nil && (single.MsgId != 0 || single.MsgID != 0 || single.Talker != "" || single.ContentText != "" || single.Content.Str != "") {
+		resp.Messages = []rawMessage{single}
+		return resp, nil
+	}
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return syncResponse{}, fmt.Errorf("decode webhook payload: %w", err)
+	}
+	return resp, nil
+}
+
+func webhookPreview(s string) string {
+	s = strings.TrimSpace(s)
+	if len([]rune(s)) <= 160 {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:160]) + "…"
 }
 
 func (c *Client) emit(e remoteapi.Event) {

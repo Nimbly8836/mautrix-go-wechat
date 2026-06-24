@@ -75,17 +75,38 @@ func (c *Client) convertLocal(m localMessage) (remoteapi.Event, bool) {
 func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
-	content := m.Content.Str
-	if strings.TrimSpace(content) == "" {
-		content = m.PushContent
+	content := firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent)
+	messageID := m.NewMsgId
+	if messageID == 0 {
+		messageID = m.NewMsgID
+	}
+	rawID := m.MsgId
+	if rawID == 0 {
+		rawID = m.MsgID
 	}
 
-	// Determine chat + real sender. In group chats WeChat prefixes the body
-	// with "<wxid>:\n". The chat is the @chatroom; sender is extracted.
-	chat := from
-	sender := from
-	if strings.HasSuffix(from, "@chatroom") {
-		chat = from
+	// Determine chat + real sender. Callback pushes may use the local-message
+	// shape (Talker/SenderUserName/ContentText), while /Msg/Sync uses raw
+	// FromUserName/ToUserName plus group sender prefixes in Content.
+	chat := firstNonEmpty(m.Talker, from)
+	sender := firstNonEmpty(m.SenderUserName, from)
+	if chat == "" {
+		if m.IsGroup {
+			chat = from
+		} else if m.IsSendBySelf {
+			chat = to
+		} else {
+			chat = from
+		}
+	}
+	if sender == "" {
+		if m.IsSendBySelf {
+			sender = c.selfWxid()
+		} else {
+			sender = chat
+		}
+	}
+	if strings.HasSuffix(chat, "@chatroom") && m.SenderUserName == "" {
 		if idx := strings.Index(content, ":\n"); idx > 0 {
 			sender = content[:idx]
 			content = content[idx+2:]
@@ -93,14 +114,14 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 			sender = content[:idx]
 			content = strings.TrimSpace(content[idx+1:])
 		}
-	} else if isSelf := from == c.selfWxid(); isSelf {
+	} else if from != "" && from == c.selfWxid() && m.Talker == "" {
 		// Outgoing echo: the conversation is the recipient.
 		chat = to
 		sender = from
 	}
 
 	base := remoteapi.InboundMessage{
-		ID:        remoteapi.MessageID(itoa(m.NewMsgId)),
+		ID:        remoteapi.MessageID(itoa(messageID)),
 		Chat:      remoteapi.ChatID(chat),
 		Sender:    remoteapi.UserID(sender),
 		Text:      content,
@@ -108,7 +129,7 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 		Extra: map[string]any{
 			"msg_type":   m.MsgType,
 			"msg_source": m.MsgSource,
-			"raw_msg_id": m.MsgId,
+			"raw_msg_id": rawID,
 		},
 	}
 

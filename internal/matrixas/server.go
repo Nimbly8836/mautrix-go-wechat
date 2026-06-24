@@ -134,13 +134,17 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	payload, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
 	if err != nil {
+		log.Printf("webhook request failed: path=%s read body: %v", r.URL.Path, err)
 		http.Error(w, "read request body", http.StatusBadRequest)
 		return
 	}
+	log.Printf("webhook request: path=%s bytes=%d", r.URL.Path, len(payload))
 	if err := receiver.HandleWebhook(r.Context(), payload); err != nil {
+		log.Printf("webhook request failed: path=%s bytes=%d error=%v", r.URL.Path, len(payload), err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	log.Printf("webhook request handled: path=%s bytes=%d", r.URL.Path, len(payload))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
 }
