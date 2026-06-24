@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 
-	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
@@ -44,12 +43,7 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("同步元数据失败: %v", err))
 			return
 		}
-		name := s.portalRoomName(ctx, chat)
-		if name != "" {
-			rec.Name = name
-			s.portals.set(rec)
-			_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomName, "", map[string]any{"name": name})
-		}
+		s.applyPortalMetadata(ctx, rec, chat)
 		s.sendPortalNotice(ctx, rec.RoomID, "已同步 portal 元数据。")
 		return
 	default:

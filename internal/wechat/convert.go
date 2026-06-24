@@ -22,7 +22,8 @@ const (
 )
 
 func shouldDropLocal(m localMessage) bool {
-	if m.MsgType == wxStatusNotify {
+	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content, m.PushContent))
+	if m.MsgType == wxStatusNotify || content == "" {
 		return true
 	}
 	if strings.HasPrefix(m.Talker, "@placeholder") || m.Talker == "" {
@@ -32,7 +33,10 @@ func shouldDropLocal(m localMessage) bool {
 }
 
 func (c *Client) convertLocal(m localMessage) (remoteapi.Event, bool) {
-	content := firstNonEmpty(m.ContentText, m.Content, m.PushContent)
+	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content, m.PushContent))
+	if content == "" {
+		return remoteapi.Event{}, false
+	}
 	chat := m.Talker
 	if chat == "" {
 		if m.IsGroup {
@@ -75,7 +79,10 @@ func (c *Client) convertLocal(m localMessage) (remoteapi.Event, bool) {
 func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
-	content := firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent)
+	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent))
+	if shouldDropWebhookNoise(m, content) {
+		return remoteapi.Event{}, false
+	}
 	messageID := m.NewMsgId
 	if messageID == 0 {
 		messageID = m.NewMsgID
@@ -148,6 +155,26 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
 
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+}
+
+func shouldDropWebhookNoise(m rawMessage, content string) bool {
+	return m.MsgType == wxStatusNotify || content == ""
+}
+
+func stripLastMessageOps(content string) string {
+	for strings.Contains(content, "<name>lastMessage</name>") {
+		start := strings.LastIndex(content[:strings.Index(content, "<name>lastMessage</name>")], "<msg>")
+		if start < 0 {
+			break
+		}
+		endRel := strings.Index(content[start:], "</msg>")
+		if endRel < 0 {
+			break
+		}
+		end := start + endRel + len("</msg>")
+		content = content[:start] + content[end:]
+	}
+	return strings.TrimSpace(content)
 }
 
 func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push string) {

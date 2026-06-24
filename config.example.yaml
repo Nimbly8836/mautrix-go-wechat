@@ -52,6 +52,8 @@ bridge:
     portal_file: /data/portals.json
     # Saved login sessions for multiple WeChat accounts.
     account_file: /data/accounts.json
+    # Cached WeChat contact metadata, used for room and puppet names.
+    contact_file: /data/contacts.json
     # Bridge command prefix for management and portal-local commands.
     command_prefix: "!wx"
     # New chat portal creation mode:

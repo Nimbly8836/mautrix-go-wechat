@@ -70,6 +70,8 @@ type Bridge struct {
 	PortalFile string `yaml:"portal_file"`
 	// AccountFile stores multiple logged-in backend account sessions.
 	AccountFile string `yaml:"account_file"`
+	// ContactFile stores cached backend contact metadata per account.
+	ContactFile string `yaml:"contact_file"`
 	// PortalCreation controls how new remote chats become Matrix portal rooms.
 	// Values: "auto" (default) or "manual".
 	PortalCreation string `yaml:"portal_creation"`
@@ -133,6 +135,9 @@ func (c *Config) validate() error {
 	}
 	if c.Bridge.CommandPrefix == "" {
 		c.Bridge.CommandPrefix = "!wx"
+	}
+	if c.Bridge.ContactFile == "" {
+		c.Bridge.ContactFile = "/data/contacts.json"
 	}
 	if c.Bridge.CommandPrefix[0] != '!' {
 		c.Bridge.CommandPrefix = "!" + c.Bridge.CommandPrefix

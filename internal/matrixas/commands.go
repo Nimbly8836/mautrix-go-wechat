@@ -3,6 +3,7 @@ package matrixas
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -84,6 +85,7 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 %[1]s use <wxid>          切换到已保存账号
 %[1]s logout              退出 WeChat
 %[1]s space               创建/查看当前微信账号的 Matrix Space，并挂载已有 portal
+%[1]s contacts refresh    强制刷新联系人缓存，并更新一对一 portal 房间名
 %[1]s portal-mode         查看/切换 portal 创建模式(auto/manual)
 %[1]s pending             列出等待确认创建的会话
 %[1]s create <chat|all>   手动创建 pending portal
@@ -161,6 +163,8 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 		}
 		s.stopRemote()
 		s.notice(ctx, room, "已退出 WeChat。")
+	case "contacts", "联系人":
+		s.handleContactsCommand(ctx, room, rest)
 	case "portal-mode":
 		mode := strings.TrimSpace(strings.ToLower(rest))
 		if mode == "" {
@@ -226,6 +230,55 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			s.notice(ctx, room, fmt.Sprintf("未知命令。发送 `%s help` 查看帮助。", s.commandPrefix()))
 		}
 	}
+}
+
+func (s *Server) handleContactsCommand(ctx context.Context, room id.RoomID, rest string) {
+	action := strings.TrimSpace(strings.ToLower(rest))
+	if action == "" {
+		s.notice(ctx, room, fmt.Sprintf("用法: %s contacts refresh", s.commandPrefix()))
+		return
+	}
+	if action != "refresh" && action != "刷新" {
+		s.notice(ctx, room, fmt.Sprintf("未知 contacts 命令。用法: %s contacts refresh", s.commandPrefix()))
+		return
+	}
+	account := s.currentAccountID(ctx)
+	if account == "" {
+		s.notice(ctx, room, fmt.Sprintf("当前没有选择/登录微信账号。先使用 `%s account <wxid>` 或 `%s login <flow>`。", s.commandPrefix(), s.commandPrefix()))
+		return
+	}
+	count, err := s.refreshContactCache(ctx, account)
+	if err != nil {
+		s.notice(ctx, room, fmt.Sprintf("刷新联系人缓存失败: %v", err))
+		return
+	}
+	updated, failed := s.syncPortalMetadata(ctx, account)
+	s.notice(ctx, room, fmt.Sprintf("已刷新联系人缓存: %d 个联系人。已同步 %d 个 portal 元数据，失败 %d 个。", count, updated, failed))
+}
+
+func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserID) (updated, failed int) {
+	if s.portals == nil {
+		return 0, 0
+	}
+	for _, rec := range s.portals.list() {
+		if rec.RoomID == "" {
+			continue
+		}
+		chat, err := s.api.GetChat(ctx, rec.ChatID)
+		if err != nil {
+			failed++
+			log.Printf("failed to refresh portal metadata for %s: %v", rec.ChatID, err)
+			continue
+		}
+		if !rec.IsGroup && chat.Avatar == "" && s.contacts != nil {
+			if ct, ok := s.contacts.get(account, remoteapi.UserID(rec.ChatID)); ok {
+				chat.Avatar = ct.AvatarURL
+			}
+		}
+		s.applyPortalMetadata(ctx, rec, chat)
+		updated++
+	}
+	return updated, failed
 }
 
 func (s *Server) portalCreationMode() string {

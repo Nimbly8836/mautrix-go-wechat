@@ -51,8 +51,10 @@ func (s *Server) currentAccountID(ctx context.Context) remoteapi.UserID {
 	if self, err := s.api.Self(ctx); err == nil && self != "" {
 		return self
 	}
-	if acc, ok := s.accounts.current(); ok {
-		return acc.ID
+	if s.accounts != nil {
+		if acc, ok := s.accounts.current(); ok {
+			return acc.ID
+		}
 	}
 	return ""
 }

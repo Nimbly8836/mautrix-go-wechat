@@ -173,14 +173,9 @@ func (ps *portalStore) pendingList() []pendingPortal {
 
 func (s *Server) portalRoomName(ctx context.Context, chat remoteapi.Chat) string {
 	chatID := string(chat.ID)
-	if !chat.IsGroup && chat.ID != "" && s.api != nil {
-		if ct, err := s.api.GetContact(ctx, remoteapi.UserID(chat.ID)); err == nil {
-			if ct.Remark != "" {
-				return ct.Remark
-			}
-			if ct.Name != "" {
-				return ct.Name
-			}
+	if !chat.IsGroup && chat.ID != "" {
+		if name := s.contactDisplayName(ctx, remoteapi.UserID(chat.ID)); name != "" {
+			return name
 		}
 	}
 	if chat.Name != "" && chat.Name != chatID {
@@ -190,6 +185,81 @@ func (s *Server) portalRoomName(ctx context.Context, chat remoteapi.Chat) string
 		return chat.Name
 	}
 	return chatID
+}
+
+func matrixPick(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (s *Server) contactDisplayName(ctx context.Context, user remoteapi.UserID) string {
+	if user == "" || s.api == nil {
+		return ""
+	}
+	account := s.currentAccountID(ctx)
+	if account != "" && s.contacts != nil {
+		if ct, ok := s.contacts.get(account, user); ok {
+			return matrixPick(ct.Remark, ct.Name)
+		}
+	}
+	ct, err := s.api.GetContact(ctx, user)
+	if err != nil {
+		return ""
+	}
+	if ct.ID == "" {
+		ct.ID = user
+	}
+	if account != "" && s.contacts != nil {
+		s.contacts.put(account, ct)
+	}
+	return matrixPick(ct.Remark, ct.Name)
+}
+
+func (s *Server) refreshContactCache(ctx context.Context, account remoteapi.UserID) (int, error) {
+	if s.contacts == nil {
+		return 0, fmt.Errorf("contact cache is not configured")
+	}
+	contacts, err := s.api.ListContacts(ctx)
+	if err != nil {
+		return 0, err
+	}
+	s.contacts.putList(account, contacts)
+	log.Printf("refreshed contact cache: account=%s contacts=%d", account, len(contacts))
+	return len(contacts), nil
+}
+
+func (s *Server) roomAvatarFromURL(ctx context.Context, url string) (id.ContentURIString, error) {
+	if strings.TrimSpace(url) == "" {
+		return "", nil
+	}
+	if s.as == nil || s.as.BotIntent() == nil || s.as.BotIntent().Client == nil {
+		return "", fmt.Errorf("matrix client unavailable")
+	}
+	resp, err := s.as.BotIntent().Client.UploadLink(ctx, url)
+	if err != nil {
+		return "", err
+	}
+	return id.ContentURIString(resp.ContentURI.String()), nil
+}
+
+func (s *Server) applyPortalMetadata(ctx context.Context, rec portalRecord, chat remoteapi.Chat) {
+	if rec.RoomID == "" {
+		return
+	}
+	if name := s.portalRoomName(ctx, chat); name != "" && name != rec.Name {
+		rec.Name = name
+		s.portals.set(rec)
+		_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomName, "", map[string]any{"name": name})
+	}
+	if avatar := strings.TrimSpace(chat.Avatar); avatar != "" {
+		if mxc, err := s.roomAvatarFromURL(ctx, avatar); err == nil && mxc != "" {
+			_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomAvatar, "", event.RoomAvatarEventContent{URL: mxc})
+		}
+	}
 }
 
 // ensurePortal returns the Matrix room for a remote chat, creating it if needed.
@@ -224,6 +294,7 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 	}
 	rec := portalRecord{ChatID: chatID, RoomID: resp.RoomID, Name: name, IsGroup: chat.IsGroup}
 	s.portals.set(rec)
+	s.applyPortalMetadata(ctx, rec, chat)
 	log.Printf("created portal room: chat=%s room=%s", chatID, resp.RoomID)
 	s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
 	return rec, nil
@@ -239,8 +310,7 @@ func (s *Server) puppetIntent(ctx context.Context, user remoteapi.UserID) *mautr
 		log.Printf("failed to register puppet %s: %v", user, err)
 		return s.as.BotIntent().Client
 	}
-	// Best effort profile update. Avoid doing expensive contact lookup here.
-	_ = intent.SetDisplayName(ctx, string(user))
+	_ = intent.SetDisplayName(ctx, s.displayNameForRemote(ctx, user))
 	return intent.Client
 }
 
@@ -263,14 +333,8 @@ func (s *Server) ensurePuppetJoined(ctx context.Context, user remoteapi.UserID, 
 }
 
 func (s *Server) displayNameForRemote(ctx context.Context, user remoteapi.UserID) string {
-	ct, err := s.api.GetContact(ctx, user)
-	if err == nil {
-		if ct.Remark != "" {
-			return ct.Remark
-		}
-		if ct.Name != "" {
-			return ct.Name
-		}
+	if name := s.contactDisplayName(ctx, user); name != "" {
+		return name
 	}
 	return string(user)
 }

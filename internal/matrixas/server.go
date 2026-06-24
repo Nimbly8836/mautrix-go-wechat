@@ -38,6 +38,7 @@ type Server struct {
 	sessionFile string
 	portals     *portalStore
 	accounts    *accountStore
+	contacts    *contactStore
 
 	mu         sync.Mutex
 	rooms      map[id.RoomID]bool
@@ -82,6 +83,11 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 		accountFile = "/data/accounts.json"
 	}
 	s.accounts = newAccountStore(accountFile)
+	contactFile := cfg.Bridge.ContactFile
+	if contactFile == "" {
+		contactFile = "/data/contacts.json"
+	}
+	s.contacts = newContactStore(contactFile)
 
 	conn, err := connector.New(cfg.Network.Protocol, apiCfg, s)
 	if err != nil {

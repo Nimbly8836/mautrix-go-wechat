@@ -12,6 +12,14 @@ type namingAPI struct {
 	contacts map[remoteapi.UserID]remoteapi.Contact
 }
 
+func (a namingAPI) Self(ctx context.Context) (remoteapi.UserID, error) { return "wxid_self", nil }
+func (a namingAPI) ListContacts(ctx context.Context) ([]remoteapi.Contact, error) {
+	out := make([]remoteapi.Contact, 0, len(a.contacts))
+	for _, c := range a.contacts {
+		out = append(out, c)
+	}
+	return out, nil
+}
 func (a namingAPI) GetContact(ctx context.Context, id remoteapi.UserID) (remoteapi.Contact, error) {
 	if c, ok := a.contacts[id]; ok {
 		return c, nil
