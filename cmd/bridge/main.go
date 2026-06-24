@@ -54,6 +54,9 @@ func main() {
 	if cfg.Bridge.AccountFile == "" {
 		cfg.Bridge.AccountFile = "/data/accounts.json"
 	}
+	if cfg.Bridge.PortalCreation == "" {
+		cfg.Bridge.PortalCreation = "auto"
+	}
 
 	apiCfg := remoteapi.Config{
 		BaseURL: cfg.Network.BaseURL,

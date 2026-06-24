@@ -93,8 +93,9 @@ protocols (iPad/Windows/Mac/etc), then e.g. `login ipad` or `login win`. Saved
 accounts can be listed with `accounts`. `account <wxid>` calls the WeChat
 `/Login/GetCacheInfo?wxid=...` API and, if cached login data exists, activates
 that wxid as the current logged-in account. Locally saved accounts can also be
-switched with `use <wxid>`. After login/activation, portal rooms are created
-automatically for WeChat chats.
+switched with `use <wxid>`. After login/activation, portal rooms are created for WeChat chats. Creation can
+be automatic or manually confirmed via bot commands (`portal-mode manual`,
+`pending`, `create <chat>`), similar to mautrix-telegram.
 
 ## Docker (mautrix-telegram-style deployment)
 

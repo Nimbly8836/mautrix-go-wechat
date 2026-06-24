@@ -202,6 +202,26 @@ func (s *Server) notice(ctx context.Context, room id.RoomID, body string) {
 	}
 }
 
+func (s *Server) notifyManagement(ctx context.Context, body string) {
+	rooms := s.managementRooms()
+	if len(rooms) == 0 {
+		log.Printf("management notification with no management rooms: %s", body)
+		return
+	}
+	for _, room := range rooms {
+		s.notice(ctx, room, body)
+	}
+}
+
+func trimPreview(s string) string {
+	s = strings.TrimSpace(s)
+	if len([]rune(s)) <= 160 {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:160]) + "…"
+}
+
 func (s *Server) text(ctx context.Context, room id.RoomID, body string) {
 	_, err := s.as.BotIntent().SendMessageEvent(ctx, room, event.EventMessage, &event.MessageEventContent{MsgType: event.MsgText, Body: body})
 	if err != nil {
@@ -225,6 +245,18 @@ func (s *Server) image(ctx context.Context, room id.RoomID, data []byte, body st
 // EventSink implementation: remote -> Matrix portal rooms.
 func (s *Server) OnMessage(ctx context.Context, m *remoteapi.InboundMessage) {
 	log.Printf("remote message: chat=%s sender=%s type=%d text=%q", m.Chat, m.Sender, m.Type, m.Text)
+	if m.Chat == "" {
+		log.Printf("dropping remote message with empty chat: sender=%s type=%d text=%q", m.Sender, m.Type, m.Text)
+		return
+	}
+	if rec, ok := s.portals.get(m.Chat); ok && rec.RoomID != "" {
+		s.bridgeRemoteToPortal(ctx, rec, m)
+		return
+	}
+	if s.portalCreationMode() == "manual" {
+		s.addPendingPortal(ctx, m)
+		return
+	}
 	rec, err := s.ensurePortal(ctx, m.Chat)
 	if err != nil {
 		log.Printf("failed to ensure portal for %s: %v", m.Chat, err)
@@ -234,16 +266,40 @@ func (s *Server) OnMessage(ctx context.Context, m *remoteapi.InboundMessage) {
 		return
 	}
 
+	s.notifyManagement(ctx, fmt.Sprintf("已自动创建 WeChat portal:\n- chat: %s\n- room: %s\n- name: %s", rec.ChatID, rec.RoomID, rec.Name))
+	s.bridgeRemoteToPortal(ctx, rec, m)
+}
+
+func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *remoteapi.InboundMessage) {
 	sender := m.Sender
 	if sender == "" {
 		sender = remoteapi.UserID(m.Chat)
 	}
 	client := s.ensurePuppetJoined(ctx, sender, rec.RoomID)
 	content := matrixContentFromRemote(m)
-	_, err = client.SendMessageEvent(ctx, rec.RoomID, event.EventMessage, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
+	_, err := client.SendMessageEvent(ctx, rec.RoomID, event.EventMessage, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
 	if err != nil {
 		log.Printf("failed to bridge remote msg %s to %s: %v", m.ID, rec.RoomID, err)
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("桥接消息失败: %v", err))
+	}
+}
+
+func (s *Server) addPendingPortal(ctx context.Context, m *remoteapi.InboundMessage) {
+	name := string(m.Chat)
+	if chat, err := s.api.GetChat(ctx, m.Chat); err == nil && chat.Name != "" {
+		name = chat.Name
+	}
+	isNew, count := s.portals.addPending(pendingPortal{
+		ChatID:      m.Chat,
+		Sender:      m.Sender,
+		Name:        name,
+		LastMessage: m.Text,
+		IsGroup:     strings.HasSuffix(string(m.Chat), "@chatroom"),
+	})
+	if isNew {
+		s.notifyManagement(ctx, fmt.Sprintf("发现新的 WeChat 会话，等待确认创建 portal:\n- chat: %s\n- name: %s\n- sender: %s\n- preview: %s\n\n发送 `create %s` 创建房间，或 `create all` 创建全部待处理会话。", m.Chat, name, m.Sender, trimPreview(m.Text), m.Chat))
+	} else if count%10 == 0 {
+		s.notifyManagement(ctx, fmt.Sprintf("WeChat 会话 %s 仍在等待创建 portal，累计 %d 条消息。发送 `create %s` 创建。", m.Chat, count, m.Chat))
 	}
 }
 func (s *Server) OnRedaction(ctx context.Context, r *remoteapi.Redaction) {

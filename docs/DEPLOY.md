@@ -82,6 +82,28 @@ portals
 send <wxid-or-chatroom-id> hello
 ```
 
+Portal creation can be automatic or manual:
+
+```yaml
+bridge:
+    portal_creation: auto   # or manual
+```
+
+Bot commands for portal control:
+
+```text
+portal-mode
+portal-mode auto
+portal-mode manual
+pending
+create <chat>
+create all
+```
+
+When `portal_creation: manual`, new WeChat chats do not immediately create Matrix
+rooms. The bot posts a notification in the management room and waits for
+`create <chat>`.
+
 Portal-room commands:
 
 ```text

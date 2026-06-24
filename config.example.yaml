@@ -45,6 +45,10 @@ bridge:
     portal_file: /data/portals.json
     # Saved login sessions for multiple WeChat accounts.
     account_file: /data/accounts.json
+    # New chat portal creation mode:
+    #   auto   - create rooms immediately and notify management rooms
+    #   manual - notify first; create only after `create <chat>` in bot room
+    portal_creation: auto
     # Who may use the bridge. Levels: relay < user < admin.
     permissions:
         "example.com": user

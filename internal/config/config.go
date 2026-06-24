@@ -60,6 +60,9 @@ type Bridge struct {
 	PortalFile string `yaml:"portal_file"`
 	// AccountFile stores multiple logged-in backend account sessions.
 	AccountFile string `yaml:"account_file"`
+	// PortalCreation controls how new remote chats become Matrix portal rooms.
+	// Values: "auto" (default) or "manual".
+	PortalCreation string `yaml:"portal_creation"`
 }
 
 // Database connection settings.

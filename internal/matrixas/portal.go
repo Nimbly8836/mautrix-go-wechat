@@ -20,8 +20,9 @@ import (
 // portalState is persisted to disk. It's deliberately simple for this MVP;
 // replacing it with a SQL store later won't affect the remoteapi layer.
 type portalState struct {
-	Owner   id.UserID               `json:"owner,omitempty"`
-	Portals map[string]portalRecord `json:"portals"`
+	Owner   id.UserID                `json:"owner,omitempty"`
+	Portals map[string]portalRecord  `json:"portals"`
+	Pending map[string]pendingPortal `json:"pending,omitempty"`
 }
 
 type portalRecord struct {
@@ -31,6 +32,15 @@ type portalRecord struct {
 	IsGroup bool             `json:"is_group,omitempty"`
 }
 
+type pendingPortal struct {
+	ChatID      remoteapi.ChatID `json:"chat_id"`
+	Sender      remoteapi.UserID `json:"sender,omitempty"`
+	Name        string           `json:"name,omitempty"`
+	LastMessage string           `json:"last_message,omitempty"`
+	IsGroup     bool             `json:"is_group,omitempty"`
+	Count       int              `json:"count"`
+}
+
 type portalStore struct {
 	mu   sync.Mutex
 	path string
@@ -38,7 +48,7 @@ type portalStore struct {
 }
 
 func newPortalStore(path string) *portalStore {
-	ps := &portalStore{path: path, data: portalState{Portals: map[string]portalRecord{}}}
+	ps := &portalStore{path: path, data: portalState{Portals: map[string]portalRecord{}, Pending: map[string]pendingPortal{}}}
 	ps.load()
 	return ps
 }
@@ -54,6 +64,9 @@ func (ps *portalStore) load() {
 	}
 	if ps.data.Portals == nil {
 		ps.data.Portals = map[string]portalRecord{}
+	}
+	if ps.data.Pending == nil {
+		ps.data.Pending = map[string]pendingPortal{}
 	}
 }
 
@@ -95,6 +108,7 @@ func (ps *portalStore) set(r portalRecord) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	ps.data.Portals[string(r.ChatID)] = r
+	delete(ps.data.Pending, string(r.ChatID))
 	ps.saveLocked()
 }
 
@@ -114,7 +128,45 @@ func (ps *portalStore) list() []portalRecord {
 	defer ps.mu.Unlock()
 	out := make([]portalRecord, 0, len(ps.data.Portals))
 	for _, r := range ps.data.Portals {
+		if r.ChatID == "" {
+			continue
+		}
 		out = append(out, r)
+	}
+	return out
+}
+
+func (ps *portalStore) addPending(p pendingPortal) (isNew bool, count int) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	key := string(p.ChatID)
+	old, ok := ps.data.Pending[key]
+	if ok {
+		p.Count = old.Count + 1
+		if p.Name == "" {
+			p.Name = old.Name
+		}
+	} else if p.Count == 0 {
+		p.Count = 1
+	}
+	ps.data.Pending[key] = p
+	ps.saveLocked()
+	return !ok, p.Count
+}
+
+func (ps *portalStore) pending(chat remoteapi.ChatID) (pendingPortal, bool) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	p, ok := ps.data.Pending[string(chat)]
+	return p, ok
+}
+
+func (ps *portalStore) pendingList() []pendingPortal {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	out := make([]pendingPortal, 0, len(ps.data.Pending))
+	for _, p := range ps.data.Pending {
+		out = append(out, p)
 	}
 	return out
 }

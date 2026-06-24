@@ -40,6 +40,7 @@ func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserI
 	}
 	s.accounts.setSpace(account, resp.RoomID.String())
 	log.Printf("created account space: account=%s room=%s", account, resp.RoomID)
+	s.notifyManagement(ctx, fmt.Sprintf("已创建微信账号 Space:\n- account: %s\n- space: %s", account, resp.RoomID))
 	return resp.RoomID, nil
 }
 

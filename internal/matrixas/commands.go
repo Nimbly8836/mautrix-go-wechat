@@ -37,6 +37,9 @@ account <wxid>      查看 wxid 登录缓存，并设为当前登录账号
 use <wxid>          切换到已保存账号
 logout              退出 WeChat
 space               创建/查看当前微信账号的 Matrix Space
+portal-mode         查看/切换 portal 创建模式(auto/manual)
+pending             列出等待确认创建的会话
+create <chat|all>   手动创建 pending portal
 portals             列出已创建的 portal rooms
 send <chat> <text>  发送文本到 WeChat wxid/chatroom
 
@@ -111,6 +114,27 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 		}
 		s.stopRemote()
 		s.notice(ctx, room, "已退出 WeChat。")
+	case "portal-mode":
+		mode := strings.TrimSpace(strings.ToLower(rest))
+		if mode == "" {
+			s.notice(ctx, room, fmt.Sprintf("当前 portal 创建模式: %s\n可用: portal-mode auto / portal-mode manual", s.portalCreationMode()))
+			return
+		}
+		if mode != "auto" && mode != "manual" {
+			s.notice(ctx, room, "用法: portal-mode auto 或 portal-mode manual")
+			return
+		}
+		s.cfg.Bridge.PortalCreation = mode
+		s.notice(ctx, room, fmt.Sprintf("已切换 portal 创建模式为 %s。注意: 这是运行时设置，如需持久化请修改 config.yaml。", mode))
+	case "pending":
+		s.notice(ctx, room, s.pendingPortalsText())
+	case "create", "创建":
+		target := strings.TrimSpace(rest)
+		if target == "" {
+			s.notice(ctx, room, "用法: create <chat> 或 create all。发送 pending 查看待创建会话。")
+			return
+		}
+		go s.createPendingPortalCommand(ctx, room, target)
 	case "space", "空间":
 		account := s.currentAccountID(ctx)
 		if account == "" {
@@ -155,6 +179,63 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 			s.notice(ctx, room, "未知命令。发送 `help` 查看帮助。")
 		}
 	}
+}
+
+func (s *Server) portalCreationMode() string {
+	mode := strings.ToLower(strings.TrimSpace(s.cfg.Bridge.PortalCreation))
+	if mode == "" {
+		return "auto"
+	}
+	return mode
+}
+
+func (s *Server) pendingPortalsText() string {
+	items := s.portals.pendingList()
+	if len(items) == 0 {
+		return "没有等待确认创建的 WeChat 会话。"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "等待创建的 WeChat 会话(%d):\n", len(items))
+	for _, p := range items {
+		fmt.Fprintf(&b, "- %s  name=%s  sender=%s  count=%d  preview=%s\n", p.ChatID, p.Name, p.Sender, p.Count, trimPreview(p.LastMessage))
+	}
+	b.WriteString("\n发送 `create <chat>` 创建指定 portal，或 `create all` 全部创建。")
+	return b.String()
+}
+
+func (s *Server) createPendingPortalCommand(ctx context.Context, room id.RoomID, target string) {
+	if strings.EqualFold(target, "all") {
+		items := s.portals.pendingList()
+		if len(items) == 0 {
+			s.notice(ctx, room, "没有待创建会话。")
+			return
+		}
+		created := 0
+		for _, p := range items {
+			if _, err := s.ensurePortal(ctx, p.ChatID); err != nil {
+				s.notice(ctx, room, fmt.Sprintf("创建 %s 失败: %v", p.ChatID, err))
+				continue
+			}
+			created++
+		}
+		s.notice(ctx, room, fmt.Sprintf("已创建 %d 个 pending portal。", created))
+		return
+	}
+	chat := remoteapi.ChatID(target)
+	if _, ok := s.portals.pending(chat); !ok {
+		if rec, exists := s.portals.get(chat); exists && rec.RoomID != "" {
+			s.notice(ctx, room, fmt.Sprintf("portal 已存在: %s -> %s", rec.ChatID, rec.RoomID))
+			return
+		}
+		s.notice(ctx, room, fmt.Sprintf("没有找到 pending 会话 %s。发送 pending 查看。", chat))
+		return
+	}
+	rec, err := s.ensurePortal(ctx, chat)
+	if err != nil {
+		s.notice(ctx, room, fmt.Sprintf("创建 portal 失败: %v", err))
+		return
+	}
+	s.notice(ctx, room, fmt.Sprintf("已创建 WeChat portal: %s -> %s", rec.ChatID, rec.RoomID))
 }
 
 func (s *Server) loginFlowHelp() string {
