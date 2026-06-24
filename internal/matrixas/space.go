@@ -83,6 +83,35 @@ func (s *Server) currentAccountID(ctx context.Context) remoteapi.UserID {
 	return ""
 }
 
+func (s *Server) inviteUserToRoom(ctx context.Context, room id.RoomID, user id.UserID) {
+	if room == "" || user == "" {
+		return
+	}
+	_, err := s.as.BotIntent().InviteUser(ctx, room, &mautrix.ReqInviteUser{
+		UserID: user,
+		Reason: "WeChat bridge space access",
+	})
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "already") {
+		log.Printf("failed to invite %s to room/space %s: %v", user, room, err)
+	}
+}
+
+func (s *Server) ensureAccountSpaceVisibleTo(ctx context.Context, account remoteapi.UserID, user id.UserID) (id.RoomID, map[string]id.RoomID, error) {
+	space, err := s.ensureAccountSpace(ctx, account)
+	if err != nil {
+		return "", nil, err
+	}
+	folders, err := s.ensureAccountSpaceFolders(ctx, account, space)
+	if err != nil {
+		return space, folders, err
+	}
+	s.inviteUserToRoom(ctx, space, user)
+	for _, folder := range folders {
+		s.inviteUserToRoom(ctx, folder, user)
+	}
+	return space, folders, nil
+}
+
 func (s *Server) ensureAccountSpaceFolders(ctx context.Context, account remoteapi.UserID, parent id.RoomID) (map[string]id.RoomID, error) {
 	out := map[string]id.RoomID{}
 	if parent == "" {

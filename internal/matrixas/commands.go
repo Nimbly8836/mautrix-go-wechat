@@ -192,13 +192,14 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			s.notice(ctx, room, fmt.Sprintf("当前没有选择/登录微信账号。先使用 `%s account <wxid>` 或 `%s login <flow>`。", s.commandPrefix(), s.commandPrefix()))
 			return
 		}
-		space, err := s.ensureAccountSpace(ctx, account)
+		s.portals.setOwner(sender)
+		space, folders, err := s.ensureAccountSpaceVisibleTo(ctx, account, sender)
 		if err != nil {
 			s.notice(ctx, room, fmt.Sprintf("创建/获取 Space 失败: %v", err))
 			return
 		}
 		s.attachExistingPortalsToAccountSpace(ctx, account, space)
-		s.notice(ctx, room, fmt.Sprintf("当前微信账号 Space: %s\n已确保子文件夹: 联系人 / 公众号 / 群聊，并重新整理已有 portal。", space))
+		s.notice(ctx, room, fmt.Sprintf("当前微信账号 Space: %s\n分类 Space:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s\n\n已邀请你加入这些 Space，并重新整理已有 portal。", space, folders[spaceFolderContacts], folders[spaceFolderOfficial], folders[spaceFolderGroups]))
 	case "portals":
 		items := s.portals.list()
 		if len(items) == 0 {
