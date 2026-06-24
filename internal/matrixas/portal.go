@@ -173,18 +173,45 @@ func (ps *portalStore) pendingList() []pendingPortal {
 
 func (s *Server) portalRoomName(ctx context.Context, chat remoteapi.Chat) string {
 	chatID := string(chat.ID)
+	name := ""
 	if !chat.IsGroup && chat.ID != "" {
-		if name := s.contactDisplayName(ctx, remoteapi.UserID(chat.ID)); name != "" {
-			return name
-		}
+		name = s.contactDisplayName(ctx, remoteapi.UserID(chat.ID))
 	}
-	if chat.Name != "" && chat.Name != chatID {
-		return chat.Name
+	if name == "" && chat.Name != "" && chat.Name != chatID {
+		name = chat.Name
 	}
-	if chat.Name != "" {
-		return chat.Name
+	if name == "" && chat.Name != "" {
+		name = chat.Name
 	}
-	return chatID
+	if name == "" {
+		name = chatID
+	}
+	if isOfficialChat(chat) && name != "" && !strings.HasPrefix(name, "公众号 · ") {
+		return "公众号 · " + name
+	}
+	return name
+}
+
+func isOfficialChat(chat remoteapi.Chat) bool {
+	if chat.Extra == nil {
+		return false
+	}
+	if v, ok := chat.Extra["official_account"].(bool); ok {
+		return v
+	}
+	_, exists := chat.Extra["description"]
+	return exists
+}
+
+func portalTopic(name string, chat remoteapi.Chat) string {
+	kind := "WeChat portal"
+	if isOfficialChat(chat) {
+		kind = "WeChat official account portal"
+	}
+	if name != "" && name != string(chat.ID) {
+		return fmt.Sprintf("%s for %s (%s)", kind, name, chat.ID)
+	}
+	return fmt.Sprintf("%s for %s", kind, chat.ID)
 }
 
 func matrixPick(values ...string) string {
@@ -261,11 +288,7 @@ func (s *Server) applyPortalMetadata(ctx context.Context, rec portalRecord, chat
 		_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomName, "", map[string]any{"name": name})
 	}
 	if name != "" {
-		topic := fmt.Sprintf("WeChat portal for %s", chat.ID)
-		if name != string(chat.ID) {
-			topic = fmt.Sprintf("WeChat portal for %s (%s)", name, chat.ID)
-		}
-		_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateTopic, "", map[string]any{"topic": topic})
+		_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateTopic, "", map[string]any{"topic": portalTopic(name, chat)})
 	}
 	if avatar := strings.TrimSpace(chat.Avatar); avatar != "" {
 		if mxc, err := s.roomAvatarFromURL(ctx, avatar); err == nil && mxc != "" {
@@ -292,10 +315,7 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 	if owner := s.portals.owner(); owner != "" {
 		invite = append(invite, owner)
 	}
-	topic := fmt.Sprintf("WeChat portal for %s", chatID)
-	if name != "" && name != string(chatID) {
-		topic = fmt.Sprintf("WeChat portal for %s (%s)", name, chatID)
-	}
+	topic := portalTopic(name, chat)
 	resp, err := s.as.BotIntent().CreateRoom(ctx, &mautrix.ReqCreateRoom{
 		Name:   name,
 		Topic:  topic,

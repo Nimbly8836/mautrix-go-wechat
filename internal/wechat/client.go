@@ -587,11 +587,30 @@ func contactFromMap(m map[string]any, fallback remoteapi.UserID) remoteapi.Conta
 	if id == "" {
 		id = string(fallback)
 	}
+	description, hasDescription := nestedString(m, "CustomizedInfo", "ExternalInfo")
+	avatar := firstString(m, "BigHeadImgUrl", "SmallHeadImgUrl", "HeadImgUrl", "HeadUrl", "BrandIconURL")
+	if brandIcon, ok := nestedString(m, "CustomizedInfo", "BrandIconURL"); ok && brandIcon != "" {
+		avatar = brandIcon
+	}
+	extra := map[string]any{}
+	if hasDescription {
+		// Rails parity: Contact#official_account? is true when description is not nil.
+		// Empty string still means official account.
+		extra["description"] = description
+		extra["official_account"] = true
+	}
+	if alias := firstString(m, "Alias", "alias"); alias != "" {
+		extra["alias"] = alias
+	}
+	if verify := firstString(m, "VerifyInfo"); verify != "" {
+		extra["verify_info"] = verify
+	}
 	return remoteapi.Contact{
 		ID:        remoteapi.UserID(id),
 		Name:      firstString(m, "NickName", "nickname", "Name", "name", "VerifyInfo"),
 		Remark:    firstString(m, "Remark", "remark", "RemarkName"),
-		AvatarURL: firstString(m, "BigHeadImgUrl", "SmallHeadImgUrl", "HeadImgUrl", "HeadUrl", "BrandIconURL"),
+		AvatarURL: avatar,
+		Extra:     extra,
 	}
 }
 
@@ -651,6 +670,22 @@ func appendContact(out []remoteapi.Contact, item any) []remoteapi.Contact {
 	return append(out, ct)
 }
 
+func nestedString(m map[string]any, path ...string) (string, bool) {
+	var cur any = m
+	for _, key := range path {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		v, exists := mm[key]
+		if !exists {
+			return "", false
+		}
+		cur = v
+	}
+	return anyString(cur), true
+}
+
 func firstString(m map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if v, ok := m[key]; ok {
@@ -696,7 +731,7 @@ func (c *Client) GetChat(ctx context.Context, id remoteapi.ChatID) (remoteapi.Ch
 		if err != nil {
 			return remoteapi.Chat{}, err
 		}
-		return remoteapi.Chat{ID: id, Name: pick(ct.Remark, ct.Name), IsGroup: false, Avatar: ct.AvatarURL}, nil
+		return remoteapi.Chat{ID: id, Name: pick(ct.Remark, ct.Name), IsGroup: false, Avatar: ct.AvatarURL, Extra: ct.Extra}, nil
 	}
 	c.mu.RLock()
 	wxid := c.wxid
