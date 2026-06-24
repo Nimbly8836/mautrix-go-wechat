@@ -26,6 +26,7 @@ type savedAccount struct {
 	Protocol  string           `json:"protocol"`
 	LoginFlow string           `json:"login_flow,omitempty"`
 	Session   []byte           `json:"session"`
+	SpaceRoom string           `json:"space_room,omitempty"`
 	UpdatedAt time.Time        `json:"updated_at"`
 }
 
@@ -63,6 +64,9 @@ func (as *accountStore) saveLocked() {
 func (as *accountStore) put(acc savedAccount) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	if old, ok := as.data.Accounts[string(acc.ID)]; ok && acc.SpaceRoom == "" {
+		acc.SpaceRoom = old.SpaceRoom
+	}
 	acc.UpdatedAt = time.Now()
 	as.data.Accounts[string(acc.ID)] = acc
 	as.data.Current = acc.ID
@@ -84,6 +88,19 @@ func (as *accountStore) current() (savedAccount, bool) {
 	}
 	acc, ok := as.data.Accounts[string(as.data.Current)]
 	return acc, ok
+}
+
+func (as *accountStore) setSpace(id remoteapi.UserID, roomID string) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	acc, ok := as.data.Accounts[string(id)]
+	if !ok {
+		acc = savedAccount{ID: id}
+	}
+	acc.SpaceRoom = roomID
+	acc.UpdatedAt = time.Now()
+	as.data.Accounts[string(id)] = acc
+	as.saveLocked()
 }
 
 func (as *accountStore) setCurrent(id remoteapi.UserID) bool {

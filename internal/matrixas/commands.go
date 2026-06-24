@@ -36,6 +36,7 @@ accounts            列出已保存的微信账号
 account <wxid>      查看 wxid 登录缓存，并设为当前登录账号
 use <wxid>          切换到已保存账号
 logout              退出 WeChat
+space               创建/查看当前微信账号的 Matrix Space
 portals             列出已创建的 portal rooms
 send <chat> <text>  发送文本到 WeChat wxid/chatroom
 
@@ -95,6 +96,9 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 			return
 		}
 		if ok {
+			if _, err := s.ensureAccountSpace(ctx, wxid); err != nil {
+				s.notice(ctx, room, fmt.Sprintf("已切换账号，但创建/获取 Space 失败: %v", err))
+			}
 			s.startRemote(ctx)
 			s.notice(ctx, room, fmt.Sprintf("已切换并连接账号: %s", wxid))
 		} else {
@@ -107,6 +111,18 @@ send <chat> <text>  发送文本到 WeChat wxid/chatroom
 		}
 		s.stopRemote()
 		s.notice(ctx, room, "已退出 WeChat。")
+	case "space", "空间":
+		account := s.currentAccountID(ctx)
+		if account == "" {
+			s.notice(ctx, room, "当前没有选择/登录微信账号。先使用 `account <wxid>` 或 `login <flow>`。")
+			return
+		}
+		space, err := s.ensureAccountSpace(ctx, account)
+		if err != nil {
+			s.notice(ctx, room, fmt.Sprintf("创建/获取 Space 失败: %v", err))
+			return
+		}
+		s.notice(ctx, room, fmt.Sprintf("当前微信账号 Space: %s", space))
 	case "portals":
 		items := s.portals.list()
 		if len(items) == 0 {
@@ -177,7 +193,7 @@ func (s *Server) accountsHelp() string {
 		if cur.ID == acc.ID {
 			mark = "*"
 		}
-		fmt.Fprintf(&b, "%s %s  protocol=%s  login_flow=%s  updated=%s\n", mark, acc.ID, acc.Protocol, acc.LoginFlow, acc.UpdatedAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(&b, "%s %s  protocol=%s  login_flow=%s  space=%s  updated=%s\n", mark, acc.ID, acc.Protocol, acc.LoginFlow, acc.SpaceRoom, acc.UpdatedAt.Format("2006-01-02 15:04:05"))
 	}
 	b.WriteString("\n使用 `account <wxid>` 从服务端登录缓存激活账号，使用 `use <wxid>` 切换本地已保存账号。")
 	return b.String()
@@ -211,6 +227,11 @@ func (s *Server) activateAccountText(ctx context.Context, wxid remoteapi.UserID)
 		return fmt.Sprintf("%s 没有返回登录缓存信息，无法作为当前登录账号。", wxid)
 	}
 	s.saveSession("cache")
+	if account := s.currentAccountID(ctx); account != "" {
+		if _, err := s.ensureAccountSpace(ctx, account); err != nil {
+			return fmt.Sprintf("已读取并保存 %s 的登录缓存，但创建 Space 失败: %v\n\n%s", wxid, err, safeLoginInfoSummary(info))
+		}
+	}
 	if ok, err := s.api.IsLoggedIn(ctx); err != nil {
 		return fmt.Sprintf("已读取并保存 %s 的登录缓存，但心跳检查失败: %v\n\n%s", wxid, err, safeLoginInfoSummary(info))
 	} else if ok {
@@ -349,6 +370,9 @@ func (s *Server) runLogin(ctx context.Context, room id.RoomID, owner id.UserID, 
 			s.notice(ctx, room, fmt.Sprintf("登录成功: %s\n登录协议: %s", step.Self, flowID))
 			s.portals.setOwner(owner)
 			s.saveSession(flowID)
+			if _, err := s.ensureAccountSpace(ctx, step.Self); err != nil {
+				s.notice(ctx, room, fmt.Sprintf("登录成功，但创建 Space 失败: %v", err))
+			}
 			s.startRemote(ctx)
 			return
 		case remoteapi.LoginError:

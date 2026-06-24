@@ -122,6 +122,7 @@ func (ps *portalStore) list() []portalRecord {
 // ensurePortal returns the Matrix room for a remote chat, creating it if needed.
 func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (portalRecord, error) {
 	if rec, ok := s.portals.get(chatID); ok && rec.RoomID != "" {
+		s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
 		return rec, nil
 	}
 
@@ -154,6 +155,7 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 	rec := portalRecord{ChatID: chatID, RoomID: resp.RoomID, Name: name, IsGroup: chat.IsGroup}
 	s.portals.set(rec)
 	log.Printf("created portal room: chat=%s room=%s", chatID, resp.RoomID)
+	s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
 	return rec, nil
 }
 

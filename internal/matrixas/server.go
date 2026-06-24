@@ -103,6 +103,11 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.matrixLoop(ctx)
 
 	if ok, _ := s.api.IsLoggedIn(ctx); ok {
+		if account := s.currentAccountID(ctx); account != "" {
+			if _, err := s.ensureAccountSpace(ctx, account); err != nil {
+				log.Printf("failed to ensure account space for %s: %v", account, err)
+			}
+		}
 		s.startRemote(ctx)
 	}
 
