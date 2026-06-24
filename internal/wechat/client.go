@@ -554,18 +554,45 @@ func (c *Client) GetContact(ctx context.Context, id remoteapi.UserID) (remoteapi
 	c.mu.RLock()
 	wxid := c.wxid
 	c.mu.RUnlock()
-	var r contactResp
-	// Endpoint name is illustrative; map to your actual Friend/GetContact path.
+	var raw any
 	if err := c.t.post(ctx, "/Friend/GetContractDetail",
-		map[string]any{"Wxid": wxid, "Towxids": string(id)}, nil, &r); err != nil {
+		map[string]any{"Wxid": wxid, "Towxids": string(id)}, nil, &raw); err != nil {
 		return remoteapi.Contact{}, err
 	}
+	ct := parseContactDetail(raw, id)
+	if ct.ID == "" {
+		ct.ID = id
+	}
+	if ct.Name == "" {
+		ct.Name = string(id)
+	}
+	return ct, nil
+}
+
+func parseContactDetail(raw any, fallback remoteapi.UserID) remoteapi.Contact {
+	// API shape often is: {ContactList:[{UserName:{string:"..."}, NickName:{string:"..."}, ...}]}
+	if m, ok := raw.(map[string]any); ok {
+		if list, ok := m["ContactList"].([]any); ok && len(list) > 0 {
+			if item, ok := list[0].(map[string]any); ok {
+				return contactFromMap(item, fallback)
+			}
+		}
+		return contactFromMap(m, fallback)
+	}
+	return remoteapi.Contact{ID: fallback, Name: string(fallback)}
+}
+
+func contactFromMap(m map[string]any, fallback remoteapi.UserID) remoteapi.Contact {
+	id := firstString(m, "UserName", "Wxid", "wxid", "Username", "userName")
+	if id == "" {
+		id = string(fallback)
+	}
 	return remoteapi.Contact{
-		ID:        remoteapi.UserID(r.Wxid),
-		Name:      r.NickName,
-		Remark:    r.Remark,
-		AvatarURL: pick(r.BigHeadImg, r.HeadImgUrl),
-	}, nil
+		ID:        remoteapi.UserID(id),
+		Name:      firstString(m, "NickName", "nickname", "Name", "name", "VerifyInfo"),
+		Remark:    firstString(m, "Remark", "remark", "RemarkName"),
+		AvatarURL: firstString(m, "BigHeadImgUrl", "SmallHeadImgUrl", "HeadImgUrl", "HeadUrl", "BrandIconURL"),
+	}
 }
 
 func (c *Client) ListContacts(ctx context.Context) ([]remoteapi.Contact, error) {
@@ -617,25 +644,49 @@ func appendContact(out []remoteapi.Contact, item any) []remoteapi.Contact {
 		}
 		return out
 	}
-	id := firstString(m, "UserName", "Wxid", "wxid", "Username", "userName")
-	if id == "" {
+	ct := contactFromMap(m, "")
+	if ct.ID == "" {
 		return out
 	}
-	return append(out, remoteapi.Contact{
-		ID:        remoteapi.UserID(id),
-		Name:      firstString(m, "NickName", "nickname", "Name", "name"),
-		Remark:    firstString(m, "Remark", "remark", "RemarkName"),
-		AvatarURL: firstString(m, "BigHeadImgUrl", "SmallHeadImgUrl", "HeadImgUrl", "HeadUrl"),
-	})
+	return append(out, ct)
 }
 
 func firstString(m map[string]any, keys ...string) string {
 	for _, key := range keys {
-		if v, ok := m[key]; ok && fmt.Sprint(v) != "" && fmt.Sprint(v) != "<nil>" {
-			return fmt.Sprint(v)
+		if v, ok := m[key]; ok {
+			if s := anyString(v); s != "" {
+				return s
+			}
 		}
 	}
 	return ""
+}
+
+func anyString(v any) string {
+	switch val := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(val)
+	case map[string]any:
+		// protobuf-json style: {"string":"..."}
+		if s := anyString(val["string"]); s != "" {
+			return s
+		}
+		if s := anyString(val["Str"]); s != "" {
+			return s
+		}
+		if s := anyString(val["Value"]); s != "" {
+			return s
+		}
+		return ""
+	default:
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s == "<nil>" || s == "map[]" {
+			return ""
+		}
+		return s
+	}
 }
 
 func (c *Client) GetChat(ctx context.Context, id remoteapi.ChatID) (remoteapi.Chat, error) {
