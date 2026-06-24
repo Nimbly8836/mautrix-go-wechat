@@ -252,13 +252,13 @@ func (s *Server) handleContactsCommand(ctx context.Context, room id.RoomID, rest
 		s.notice(ctx, room, fmt.Sprintf("刷新联系人缓存失败: %v", err))
 		return
 	}
-	updated, failed := s.syncPortalMetadata(ctx, account)
-	s.notice(ctx, room, fmt.Sprintf("已刷新联系人缓存: %d 个联系人。已同步 %d 个 portal 元数据，失败 %d 个。", count, updated, failed))
+	updated, failed, members, memberFailed := s.syncPortalMetadata(ctx, account)
+	s.notice(ctx, room, fmt.Sprintf("已刷新联系人缓存: %d 个联系人。已同步 %d 个 portal 元数据，失败 %d 个；已同步 %d 个成员/puppet，失败 %d 个。", count, updated, failed, members, memberFailed))
 }
 
-func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserID) (updated, failed int) {
+func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserID) (updated, failed, members, memberFailed int) {
 	if s.portals == nil {
-		return 0, 0
+		return 0, 0, 0, 0
 	}
 	for _, rec := range s.portals.list() {
 		if rec.RoomID == "" {
@@ -276,9 +276,12 @@ func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserI
 			}
 		}
 		s.applyPortalMetadata(ctx, rec, chat)
+		joined, failedMembers := s.syncPortalMembers(ctx, rec, chat, true)
+		members += joined
+		memberFailed += failedMembers
 		updated++
 	}
-	return updated, failed
+	return updated, failed, members, memberFailed
 }
 
 func (s *Server) portalCreationMode() string {

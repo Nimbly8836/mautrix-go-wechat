@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -224,30 +225,46 @@ func matrixPick(values ...string) string {
 }
 
 func (s *Server) contactDisplayName(ctx context.Context, user remoteapi.UserID) string {
-	if user == "" || s.api == nil {
+	ct, ok := s.contactForRemote(ctx, user, false)
+	if !ok {
 		return ""
 	}
+	return matrixPick(ct.Remark, ct.Name)
+}
+
+func (s *Server) contactForRemote(ctx context.Context, user remoteapi.UserID, force bool) (remoteapi.Contact, bool) {
+	if user == "" || s.api == nil {
+		return remoteapi.Contact{}, false
+	}
 	account := s.currentAccountID(ctx)
-	if account != "" && s.contacts != nil {
+	if !force && account != "" && s.contacts != nil {
 		if ct, ok := s.contacts.get(account, user); ok {
 			if name := matrixPick(ct.Remark, ct.Name); name != "" && name != string(user) {
-				return name
+				return ct, true
 			}
 			// Cached contact only contains the raw wxid/gh id. Treat it as incomplete
-			// and fall through to GetContact so invitations can show real names.
+			// and fall through to GetContact so invitations/profile refresh can show real names.
 		}
 	}
 	ct, err := s.api.GetContact(ctx, user)
 	if err != nil {
-		return ""
+		if account != "" && s.contacts != nil {
+			if cached, ok := s.contacts.get(account, user); ok {
+				return cached, true
+			}
+		}
+		return remoteapi.Contact{ID: user, Name: string(user)}, false
 	}
 	if ct.ID == "" {
 		ct.ID = user
 	}
+	if ct.Name == "" && ct.Remark == "" {
+		ct.Name = string(user)
+	}
 	if account != "" && s.contacts != nil {
 		s.contacts.put(account, ct)
 	}
-	return matrixPick(ct.Remark, ct.Name)
+	return ct, true
 }
 
 func (s *Server) refreshContactCache(ctx context.Context, account remoteapi.UserID) (int, error) {
@@ -281,18 +298,37 @@ func (s *Server) applyPortalMetadata(ctx context.Context, rec portalRecord, chat
 	if rec.RoomID == "" {
 		return
 	}
-	name := s.portalRoomName(ctx, chat)
-	if name != "" && name != rec.Name {
-		rec.Name = name
-		s.portals.set(rec)
-		_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomName, "", map[string]any{"name": name})
+	if !chat.IsGroup && chat.ID != "" && chat.Avatar == "" {
+		if ct, ok := s.contactForRemote(ctx, remoteapi.UserID(chat.ID), true); ok {
+			chat.Avatar = ct.AvatarURL
+			if chat.Name == "" || chat.Name == string(chat.ID) {
+				chat.Name = matrixPick(ct.Remark, ct.Name)
+			}
+			if len(chat.Extra) == 0 && len(ct.Extra) > 0 {
+				chat.Extra = ct.Extra
+			}
+		}
 	}
+	name := s.portalRoomName(ctx, chat)
 	if name != "" {
-		_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateTopic, "", map[string]any{"topic": portalTopic(name, chat)})
+		if name != rec.Name {
+			rec.Name = name
+			s.portals.set(rec)
+		}
+		if _, err := s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomName, "", map[string]any{"name": name}); err != nil {
+			log.Printf("failed to set portal room name room=%s chat=%s: %v", rec.RoomID, rec.ChatID, err)
+		}
+		if _, err := s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateTopic, "", map[string]any{"topic": portalTopic(name, chat)}); err != nil {
+			log.Printf("failed to set portal room topic room=%s chat=%s: %v", rec.RoomID, rec.ChatID, err)
+		}
 	}
 	if avatar := strings.TrimSpace(chat.Avatar); avatar != "" {
 		if mxc, err := s.roomAvatarFromURL(ctx, avatar); err == nil && mxc != "" {
-			_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomAvatar, "", event.RoomAvatarEventContent{URL: mxc})
+			if _, err := s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomAvatar, "", event.RoomAvatarEventContent{URL: mxc}); err != nil {
+				log.Printf("failed to set portal room avatar room=%s chat=%s: %v", rec.RoomID, rec.ChatID, err)
+			}
+		} else if err != nil {
+			log.Printf("failed to upload portal room avatar room=%s chat=%s url=%s: %v", rec.RoomID, rec.ChatID, avatar, err)
 		}
 	}
 }
@@ -331,23 +367,32 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 	rec := portalRecord{ChatID: chatID, RoomID: resp.RoomID, Name: name, IsGroup: chat.IsGroup}
 	s.portals.set(rec)
 	s.applyPortalMetadata(ctx, rec, chat)
+	s.syncPortalMembers(ctx, rec, chat, true)
 	log.Printf("created portal room: chat=%s room=%s", chatID, resp.RoomID)
 	s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
 	return rec, nil
 }
 
 func (s *Server) puppetIntent(ctx context.Context, user remoteapi.UserID) *mautrix.Client {
+	intent, ok := s.puppetIntentAPI(ctx, user)
+	if !ok {
+		return s.as.BotIntent().Client
+	}
+	s.updatePuppetProfile(ctx, user, false)
+	return intent.Client
+}
+
+func (s *Server) puppetIntentAPI(ctx context.Context, user remoteapi.UserID) (*appservice.IntentAPI, bool) {
 	localpart := s.cfg.Appservice.ID + "_" + encodeLocalpart(string(user))
 	intent := s.as.Intent(id.NewUserID(localpart, s.cfg.Homeserver.Domain))
 	if intent == nil {
-		return s.as.BotIntent().Client
+		return nil, false
 	}
 	if err := intent.EnsureRegistered(ctx); err != nil {
 		log.Printf("failed to register puppet %s: %v", user, err)
-		return s.as.BotIntent().Client
+		return nil, false
 	}
-	_ = intent.SetDisplayName(ctx, s.displayNameForRemote(ctx, user))
-	return intent.Client
+	return intent, true
 }
 
 func shouldJoinPuppet(account, sender remoteapi.UserID) bool {
@@ -355,17 +400,101 @@ func shouldJoinPuppet(account, sender remoteapi.UserID) bool {
 }
 
 func (s *Server) ensurePuppetJoined(ctx context.Context, user remoteapi.UserID, room id.RoomID) *mautrix.Client {
-	localpart := s.cfg.Appservice.ID + "_" + encodeLocalpart(string(user))
-	intent := s.as.Intent(id.NewUserID(localpart, s.cfg.Homeserver.Domain))
-	if intent == nil {
+	intent, ok := s.ensurePuppetJoinedWithProfile(ctx, user, room, false)
+	if !ok {
 		return s.as.BotIntent().Client
 	}
-	if err := intent.EnsureJoined(ctx, room); err != nil {
-		log.Printf("failed to join puppet %s to %s: %v", user, room, err)
-		return s.as.BotIntent().Client
-	}
-	_ = intent.SetDisplayName(ctx, s.displayNameForRemote(ctx, user))
 	return intent.Client
+}
+
+func (s *Server) ensurePuppetJoinedWithProfile(ctx context.Context, user remoteapi.UserID, room id.RoomID, force bool) (*appservice.IntentAPI, bool) {
+	intent, ok := s.puppetIntentAPI(ctx, user)
+	if !ok {
+		return nil, false
+	}
+	name, avatar := s.updatePuppetProfile(ctx, user, force)
+	extra := map[string]interface{}{}
+	if name != "" {
+		extra["displayname"] = name
+	}
+	if avatar != "" {
+		extra["avatar_url"] = string(avatar)
+	}
+	if _, err := intent.JoinRoomByID(ctx, room, extra); err != nil {
+		log.Printf("failed to join/update puppet %s in %s: %v", user, room, err)
+		if err := intent.EnsureJoined(ctx, room); err != nil {
+			log.Printf("failed to ensure puppet %s joined to %s: %v", user, room, err)
+			return nil, false
+		}
+	}
+	return intent, true
+}
+
+func (s *Server) updatePuppetProfile(ctx context.Context, user remoteapi.UserID, force bool) (string, id.ContentURIString) {
+	intent, ok := s.puppetIntentAPI(ctx, user)
+	if !ok {
+		return string(user), ""
+	}
+	ct, _ := s.contactForRemote(ctx, user, force)
+	name := matrixPick(ct.Remark, ct.Name)
+	if name == "" {
+		name = string(user)
+	}
+	if err := intent.SetDisplayName(ctx, name); err != nil {
+		log.Printf("failed to set puppet displayname user=%s name=%q: %v", user, name, err)
+	}
+	avatarURL := strings.TrimSpace(ct.AvatarURL)
+	if avatarURL == "" {
+		return name, ""
+	}
+	mxc, err := s.roomAvatarFromURL(ctx, avatarURL)
+	if err != nil {
+		log.Printf("failed to upload puppet avatar user=%s url=%s: %v", user, avatarURL, err)
+		return name, ""
+	}
+	parsed, err := mxc.Parse()
+	if err != nil {
+		log.Printf("failed to parse uploaded puppet avatar user=%s mxc=%s: %v", user, mxc, err)
+		return name, ""
+	}
+	if err := intent.SetAvatarURL(ctx, parsed); err != nil {
+		log.Printf("failed to set puppet avatar user=%s mxc=%s: %v", user, mxc, err)
+	}
+	return name, mxc
+}
+
+func (s *Server) syncPortalMembers(ctx context.Context, rec portalRecord, chat remoteapi.Chat, force bool) (joined, failed int) {
+	if rec.RoomID == "" {
+		return 0, 0
+	}
+	account := s.currentAccountID(ctx)
+	hasMemberContacts := false
+	if account != "" && s.contacts != nil && chat.Extra != nil {
+		if contacts, ok := chat.Extra["member_contacts"].([]remoteapi.Contact); ok {
+			hasMemberContacts = len(contacts) > 0
+			for _, ct := range contacts {
+				s.contacts.put(account, ct)
+			}
+		}
+	}
+	members := chat.Members
+	if !chat.IsGroup && chat.ID != "" {
+		members = []remoteapi.UserID{remoteapi.UserID(chat.ID)}
+	}
+	seen := map[remoteapi.UserID]bool{}
+	for _, user := range members {
+		if user == "" || user == account || seen[user] {
+			continue
+		}
+		seen[user] = true
+		profileForce := force && !(chat.IsGroup && hasMemberContacts)
+		if _, ok := s.ensurePuppetJoinedWithProfile(ctx, user, rec.RoomID, profileForce); ok {
+			joined++
+		} else {
+			failed++
+		}
+	}
+	return joined, failed
 }
 
 func (s *Server) displayNameForRemote(ctx context.Context, user remoteapi.UserID) string {

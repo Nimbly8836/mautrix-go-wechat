@@ -45,8 +45,9 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 			return
 		}
 		s.applyPortalMetadata(ctx, rec, chat)
+		joined, memberFailed := s.syncPortalMembers(ctx, rec, chat, true)
 		s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
-		s.sendPortalNotice(ctx, rec.RoomID, "已刷新当前 portal 房间元数据。")
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("已刷新当前 portal 房间元数据。已同步 %d 个成员/puppet，失败 %d 个。", joined, memberFailed))
 		return
 	default:
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("未知命令。发送 `%s help` 查看帮助。", s.commandPrefix()))

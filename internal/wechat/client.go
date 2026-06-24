@@ -736,26 +736,56 @@ func (c *Client) GetChat(ctx context.Context, id remoteapi.ChatID) (remoteapi.Ch
 	c.mu.RLock()
 	wxid := c.wxid
 	c.mu.RUnlock()
-	var r struct {
-		NickName    string `json:"NickName"`
-		Remark      string `json:"Remark"`
-		HeadImgUrl  string `json:"HeadImgUrl"`
-		SmallHead   string `json:"SmallHeadImgUrl"`
-		BigHead     string `json:"BigHeadImgUrl"`
-		ChatRoomImg string `json:"ChatRoomHeadImgUrl"`
-		Members     []struct {
-			Wxid string `json:"Wxid"`
-		} `json:"MemberList"`
-	}
+	var raw any
 	if err := c.t.post(ctx, "/Group/GetChatRoomInfo",
-		map[string]any{"Wxid": wxid, "QID": string(id)}, nil, &r); err != nil {
+		map[string]any{"Wxid": wxid, "QID": string(id)}, nil, &raw); err != nil {
 		return remoteapi.Chat{}, err
 	}
-	members := make([]remoteapi.UserID, 0, len(r.Members))
-	for _, m := range r.Members {
-		members = append(members, remoteapi.UserID(m.Wxid))
+	m, _ := raw.(map[string]any)
+	members, memberContacts := parseChatMembers(m)
+	extra := map[string]any{}
+	if len(memberContacts) > 0 {
+		extra["member_contacts"] = memberContacts
 	}
-	return remoteapi.Chat{ID: id, Name: pick(r.Remark, r.NickName), IsGroup: true, Members: members, Avatar: pick(r.ChatRoomImg, r.BigHead, r.HeadImgUrl, r.SmallHead)}, nil
+	return remoteapi.Chat{
+		ID:      id,
+		Name:    pick(firstString(m, "Remark", "RemarkName"), firstString(m, "NickName", "Name")),
+		IsGroup: true,
+		Members: members,
+		Avatar:  firstString(m, "ChatRoomHeadImgUrl", "BigHeadImgUrl", "HeadImgUrl", "SmallHeadImgUrl"),
+		Extra:   extra,
+	}, nil
+}
+
+func parseChatMembers(m map[string]any) ([]remoteapi.UserID, []remoteapi.Contact) {
+	members := []remoteapi.UserID{}
+	contacts := []remoteapi.Contact{}
+	for _, key := range []string{"MemberList", "Members", "member_list", "ChatRoomMember"} {
+		list, ok := m[key].([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range list {
+			mm, ok := item.(map[string]any)
+			if !ok {
+				id := remoteapi.UserID(anyString(item))
+				if id != "" {
+					members = append(members, id)
+				}
+				continue
+			}
+			ct := contactFromMap(mm, "")
+			if ct.ID == "" {
+				continue
+			}
+			members = append(members, ct.ID)
+			if ct.Name != "" || ct.Remark != "" || ct.AvatarURL != "" {
+				contacts = append(contacts, ct)
+			}
+		}
+		break
+	}
+	return members, contacts
 }
 
 // ---------------------------------------------------------------------------
