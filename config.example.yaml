@@ -33,6 +33,13 @@ network:
     base_url: http://wechat-api:8080/api
     # Optional API token, if your API requires one.
     token: ""
+    # Message receiving mode:
+    #   poll - bridge polls the WeChat API, compatible default
+    #   push - WeChat API posts new messages to webhook_path
+    receive:
+        mode: poll
+        # Required when mode is push. This is mounted on the appservice HTTP server.
+        webhook_path: /wechat/callback
     # Backend-specific extra options, passed through to the implementation.
     extra: {}
 
@@ -45,9 +52,11 @@ bridge:
     portal_file: /data/portals.json
     # Saved login sessions for multiple WeChat accounts.
     account_file: /data/accounts.json
+    # Bridge command prefix for management and portal-local commands.
+    command_prefix: "!wx"
     # New chat portal creation mode:
     #   auto   - create rooms immediately and notify management rooms
-    #   manual - notify first; create only after `create <chat>` in bot room
+    #   manual - notify first; create only after `!wx create <chat>` in bot room
     portal_creation: auto
     # Who may use the bridge. Levels: relay < user < admin.
     permissions:

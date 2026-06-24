@@ -46,7 +46,17 @@ type Network struct {
 	Protocol string         `yaml:"protocol"`
 	BaseURL  string         `yaml:"base_url"`
 	Token    string         `yaml:"token"`
+	Receive  Receive        `yaml:"receive"`
 	Extra    map[string]any `yaml:"extra"`
+}
+
+// Receive controls how backend messages are delivered into the bridge.
+// Mode is intentionally a strict choice: either poll the API or accept pushes.
+type Receive struct {
+	// Mode is "poll" (default) or "push".
+	Mode string `yaml:"mode"`
+	// WebhookPath is the appservice-local HTTP path for push callbacks.
+	WebhookPath string `yaml:"webhook_path"`
 }
 
 // Bridge holds generic bridge behaviour toggles.
@@ -63,6 +73,8 @@ type Bridge struct {
 	// PortalCreation controls how new remote chats become Matrix portal rooms.
 	// Values: "auto" (default) or "manual".
 	PortalCreation string `yaml:"portal_creation"`
+	// CommandPrefix is used for management and portal-local commands.
+	CommandPrefix string `yaml:"command_prefix"`
 }
 
 // Database connection settings.
@@ -104,6 +116,26 @@ func (c *Config) validate() error {
 	}
 	if c.Network.Protocol == "" {
 		c.Network.Protocol = "wechat"
+	}
+	if c.Network.Receive.Mode == "" {
+		c.Network.Receive.Mode = "poll"
+	}
+	if c.Network.Receive.Mode != "poll" && c.Network.Receive.Mode != "push" {
+		return fmt.Errorf("network.receive.mode must be poll or push")
+	}
+	if c.Network.Receive.Mode == "push" {
+		if c.Network.Receive.WebhookPath == "" {
+			return fmt.Errorf("network.receive.webhook_path is required when network.receive.mode is push")
+		}
+		if c.Network.Receive.WebhookPath[0] != '/' {
+			c.Network.Receive.WebhookPath = "/" + c.Network.Receive.WebhookPath
+		}
+	}
+	if c.Bridge.CommandPrefix == "" {
+		c.Bridge.CommandPrefix = "!wx"
+	}
+	if c.Bridge.CommandPrefix[0] != '!' {
+		c.Bridge.CommandPrefix = "!" + c.Bridge.CommandPrefix
 	}
 	return nil
 }

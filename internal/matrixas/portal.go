@@ -171,6 +171,27 @@ func (ps *portalStore) pendingList() []pendingPortal {
 	return out
 }
 
+func (s *Server) portalRoomName(ctx context.Context, chat remoteapi.Chat) string {
+	chatID := string(chat.ID)
+	if !chat.IsGroup && chat.ID != "" && s.api != nil {
+		if ct, err := s.api.GetContact(ctx, remoteapi.UserID(chat.ID)); err == nil {
+			if ct.Remark != "" {
+				return ct.Remark
+			}
+			if ct.Name != "" {
+				return ct.Name
+			}
+		}
+	}
+	if chat.Name != "" && chat.Name != chatID {
+		return chat.Name
+	}
+	if chat.Name != "" {
+		return chat.Name
+	}
+	return chatID
+}
+
 // ensurePortal returns the Matrix room for a remote chat, creating it if needed.
 func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (portalRecord, error) {
 	if rec, ok := s.portals.get(chatID); ok && rec.RoomID != "" {
@@ -183,17 +204,14 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 		// Some APIs don't expose metadata reliably; still create a room.
 		chat = remoteapi.Chat{ID: chatID, Name: string(chatID), IsGroup: strings.HasSuffix(string(chatID), "@chatroom")}
 	}
-	name := chat.Name
-	if name == "" {
-		name = string(chatID)
-	}
+	name := s.portalRoomName(ctx, chat)
 
 	invite := []id.UserID{}
 	if owner := s.portals.owner(); owner != "" {
 		invite = append(invite, owner)
 	}
 	resp, err := s.as.BotIntent().CreateRoom(ctx, &mautrix.ReqCreateRoom{
-		Name:   name + " (WeChat)",
+		Name:   name,
 		Topic:  fmt.Sprintf("WeChat portal for %s", chatID),
 		Invite: invite,
 		Preset: "private_chat",
@@ -224,6 +242,10 @@ func (s *Server) puppetIntent(ctx context.Context, user remoteapi.UserID) *mautr
 	// Best effort profile update. Avoid doing expensive contact lookup here.
 	_ = intent.SetDisplayName(ctx, string(user))
 	return intent.Client
+}
+
+func shouldJoinPuppet(account, sender remoteapi.UserID) bool {
+	return sender != "" && sender != account
 }
 
 func (s *Server) ensurePuppetJoined(ctx context.Context, user remoteapi.UserID, room id.RoomID) *mautrix.Client {

@@ -59,9 +59,10 @@ func main() {
 	}
 
 	apiCfg := remoteapi.Config{
-		BaseURL: cfg.Network.BaseURL,
-		Token:   cfg.Network.Token,
-		Extra:   cfg.Network.Extra,
+		BaseURL:     cfg.Network.BaseURL,
+		Token:       cfg.Network.Token,
+		ReceiveMode: cfg.Network.Receive.Mode,
+		Extra:       cfg.Network.Extra,
 	}
 	if session, err := os.ReadFile(cfg.Bridge.SessionFile); err == nil {
 		apiCfg.Session = session

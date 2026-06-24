@@ -7,7 +7,7 @@ implementation. To switch to QQ — or any other backend — you implement the s
 interface and change one line of config.
 
 The current Matrix layer is a mautrix appservice bridge MVP:
-invite/chat with `@wechatbot:<domain>`, send `login`, scan the QR, then inbound
+invite/chat with `@wechatbot:<domain>`, send `!wx login`, scan the QR, then inbound
 WeChat chats automatically create Matrix portal rooms. In those rooms, virtual
 users like `@wechat_<encoded-id>:<domain>` represent WeChat senders, and Matrix
 text messages are sent back to WeChat. The login model follows
@@ -50,7 +50,7 @@ support:
 
 Inbound events (messages, recalls, receipts, connect/disconnect) all arrive on
 the single `Events()` channel, hiding whether the backend *polls* (WeChat
-`/Msg/Sync` long-poll) or *pushes* (webhook).
+`/Msg/QueryLocal`, default) or *pushes* to `network.receive.webhook_path`.
 
 ## Login (bridgev2 / mautrix-telegram style)
 
@@ -88,14 +88,14 @@ go run ./cmd/bridge -c config.yaml -r registration.yaml
 ```
 
 In Matrix, invite `@wechatbot:<your-domain>` to an unencrypted room or start a
-DM with encryption disabled, then send `help`. Use `login` to list WeChat login
-protocols (iPad/Windows/Mac/etc), then e.g. `login ipad` or `login win`. Saved
-accounts can be listed with `accounts`. `account <wxid>` calls the WeChat
+DM with encryption disabled, then send `!wx help`. Use `!wx login` to list WeChat login
+protocols (iPad/Windows/Mac/etc), then e.g. `!wx login ipad` or `!wx login win`. Saved
+accounts can be listed with `!wx accounts`. `!wx account <wxid>` calls the WeChat
 `/Login/GetCacheInfo?wxid=...` API and, if cached login data exists, activates
 that wxid as the current logged-in account. Locally saved accounts can also be
-switched with `use <wxid>`. After login/activation, portal rooms are created for WeChat chats. Creation can
-be automatic or manually confirmed via bot commands (`portal-mode manual`,
-`pending`, `create <chat>`), similar to mautrix-telegram.
+switched with `!wx use <wxid>`. After login/activation, portal rooms are created for WeChat chats. Creation can
+be automatic or manually confirmed via bot commands (`!wx portal-mode manual`,
+`!wx pending`, `!wx create <chat>`), similar to mautrix-telegram.
 
 ## Docker (mautrix-telegram-style deployment)
 

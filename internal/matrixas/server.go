@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -88,6 +89,9 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	}
 	s.conn = conn
 	s.api = conn.API()
+	if cfg.Network.Receive.Mode == "push" {
+		as.Router.HandleFunc("POST "+cfg.Network.Receive.WebhookPath, s.handleWebhook)
+	}
 	return s, nil
 }
 
@@ -116,6 +120,29 @@ func (s *Server) Run(ctx context.Context) error {
 	s.as.Stop()
 	s.stopRemote()
 	return ctx.Err()
+}
+
+func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	receiver, ok := s.api.(remoteapi.WebhookReceiver)
+	if !ok {
+		http.Error(w, "backend does not support webhooks", http.StatusNotImplemented)
+		return
+	}
+	payload, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil {
+		http.Error(w, "read request body", http.StatusBadRequest)
+		return
+	}
+	if err := receiver.HandleWebhook(r.Context(), payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 func (s *Server) matrixLoop(ctx context.Context) {
@@ -275,7 +302,10 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	if sender == "" {
 		sender = remoteapi.UserID(m.Chat)
 	}
-	client := s.ensurePuppetJoined(ctx, sender, rec.RoomID)
+	client := s.as.BotIntent().Client
+	if shouldJoinPuppet(s.currentAccountID(ctx), sender) {
+		client = s.ensurePuppetJoined(ctx, sender, rec.RoomID)
+	}
 	content := matrixContentFromRemote(m)
 	_, err := client.SendMessageEvent(ctx, rec.RoomID, event.EventMessage, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
 	if err != nil {

@@ -21,11 +21,16 @@ func (Factory) New(cfg remoteapi.Config) (remoteapi.PuppetAPI, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("wechat: BaseURL is required")
 	}
+	mode := cfg.ReceiveMode
+	if mode == "" {
+		mode = "poll"
+	}
 	c := &Client{
-		t:         newTransport(cfg.BaseURL),
-		events:    make(chan remoteapi.Event, 64),
-		done:      make(chan struct{}),
-		localSeen: map[string]struct{}{},
+		t:           newTransport(cfg.BaseURL),
+		events:      make(chan remoteapi.Event, 64),
+		done:        make(chan struct{}),
+		receiveMode: mode,
+		localSeen:   map[string]struct{}{},
 	}
 	if len(cfg.Session) > 0 {
 		var s sessionState
@@ -55,6 +60,7 @@ type Client struct {
 	wxid    string
 	syncKey string
 
+	receiveMode string
 	localCursor int64
 	localSeen   map[string]struct{}
 
@@ -65,6 +71,7 @@ type Client struct {
 // compile-time interface checks
 var (
 	_ remoteapi.PuppetAPI            = (*Client)(nil)
+	_ remoteapi.WebhookReceiver      = (*Client)(nil)
 	_ remoteapi.MediaUploader        = (*Client)(nil)
 	_ remoteapi.Pinger               = (*Client)(nil)
 	_ remoteapi.LoginInfoProvider    = (*Client)(nil)
@@ -83,7 +90,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	if !loggedIn {
 		return fmt.Errorf("wechat: not logged in; call Login first")
 	}
-	go c.syncLoop()
+	if c.receiveMode != "push" {
+		go c.syncLoop()
+	}
 	c.emit(remoteapi.Event{Kind: remoteapi.EventConnected})
 	return nil
 }
@@ -96,6 +105,37 @@ func (c *Client) Disconnect() {
 }
 
 func (c *Client) Events() <-chan remoteapi.Event { return c.events }
+
+func (c *Client) HandleWebhook(ctx context.Context, payload []byte) error {
+	var resp syncResponse
+	var env Envelope
+	if err := json.Unmarshal(payload, &env); err == nil && (len(env.Data) > 0 || env.Code != 0 || env.Message != "") {
+		if !env.Success && env.Code != 0 {
+			return &APIError{Code: env.Code, Message: env.Message, Path: "webhook"}
+		}
+		if len(env.Data) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(env.Data, &resp); err != nil {
+			return fmt.Errorf("decode webhook data: %w", err)
+		}
+	} else if err := json.Unmarshal(payload, &resp); err != nil {
+		return fmt.Errorf("decode webhook payload: %w", err)
+	}
+	if resp.SyncKey != "" {
+		c.mu.Lock()
+		c.syncKey = resp.SyncKey
+		c.mu.Unlock()
+	}
+	msgs := append(resp.AddMsgs, resp.Messages...)
+	for _, m := range msgs {
+		if ev, ok := c.convertInbound(m); ok {
+			c.emit(ev)
+		}
+	}
+	_ = ctx
+	return nil
+}
 
 func (c *Client) emit(e remoteapi.Event) {
 	select {
