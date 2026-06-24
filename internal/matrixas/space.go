@@ -133,6 +133,12 @@ func (s *Server) ensureAccountSpaceFolders(ctx context.Context, account remoteap
 			log.Printf("created account folder space: account=%s folder=%s room=%s", account, folder.Key, roomID)
 		}
 		out[folder.Key] = roomID
+		if _, err := s.as.BotIntent().SetRoomName(ctx, roomID, folder.Name); err != nil {
+			log.Printf("failed to update account folder space name: account=%s folder=%s room=%s: %v", account, folder.Key, roomID, err)
+		}
+		if _, err := s.as.BotIntent().SetRoomTopic(ctx, roomID, folder.Topic); err != nil {
+			log.Printf("failed to update account folder space topic: account=%s folder=%s room=%s: %v", account, folder.Key, roomID, err)
+		}
 		s.addSpaceChild(ctx, parent, roomID, true)
 		s.setSpaceParent(ctx, roomID, parent, false)
 	}
@@ -145,7 +151,7 @@ func (s *Server) createAccountFolderSpace(ctx context.Context, account remoteapi
 		invite = append(invite, owner)
 	}
 	resp, err := s.as.BotIntent().CreateRoom(ctx, &mautrix.ReqCreateRoom{
-		Name:   fmt.Sprintf("WeChat %s · %s", account, folder.Name),
+		Name:   folder.Name,
 		Topic:  folder.Topic,
 		Invite: invite,
 		Preset: "private_chat",
