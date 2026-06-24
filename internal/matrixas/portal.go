@@ -489,6 +489,37 @@ func (s *Server) updatePuppetProfile(ctx context.Context, user remoteapi.UserID,
 	return name, mxc
 }
 
+func extraMemberContacts(v any) []remoteapi.Contact {
+	switch contacts := v.(type) {
+	case []remoteapi.Contact:
+		return contacts
+	case []any:
+		out := []remoteapi.Contact{}
+		for _, item := range contacts {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			id := remoteapi.UserID(fmt.Sprint(m["ID"]))
+			if id == "" || id == "<nil>" {
+				id = remoteapi.UserID(fmt.Sprint(m["id"]))
+			}
+			if id == "" || id == "<nil>" {
+				continue
+			}
+			out = append(out, remoteapi.Contact{
+				ID:        id,
+				Name:      fmt.Sprint(m["Name"]),
+				Remark:    fmt.Sprint(m["Remark"]),
+				AvatarURL: fmt.Sprint(m["AvatarURL"]),
+			})
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func (s *Server) syncPortalMembers(ctx context.Context, rec portalRecord, chat remoteapi.Chat, force bool) (joined, failed int) {
 	if rec.RoomID == "" {
 		return 0, 0
@@ -497,8 +528,9 @@ func (s *Server) syncPortalMembers(ctx context.Context, rec portalRecord, chat r
 	account := s.currentAccountID(ctx)
 	hasMemberContacts := false
 	if account != "" && s.contacts != nil && chat.Extra != nil {
-		if contacts, ok := chat.Extra["member_contacts"].([]remoteapi.Contact); ok {
-			hasMemberContacts = len(contacts) > 0
+		contacts := extraMemberContacts(chat.Extra["member_contacts"])
+		if len(contacts) > 0 {
+			hasMemberContacts = true
 			for _, ct := range contacts {
 				s.contacts.put(account, ct)
 			}

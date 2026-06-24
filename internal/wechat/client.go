@@ -599,6 +599,9 @@ func contactFromMap(m map[string]any, fallback remoteapi.UserID) remoteapi.Conta
 		extra["description"] = description
 		extra["official_account"] = true
 	}
+	if members := chatMemberIDsFromContactMap(m); len(members) > 0 {
+		extra["member_list"] = members
+	}
 	if alias := firstString(m, "Alias", "alias"); alias != "" {
 		extra["alias"] = alias
 	}
@@ -607,7 +610,7 @@ func contactFromMap(m map[string]any, fallback remoteapi.UserID) remoteapi.Conta
 	}
 	return remoteapi.Contact{
 		ID:        remoteapi.UserID(id),
-		Name:      firstString(m, "NickName", "nickname", "Name", "name", "VerifyInfo"),
+		Name:      firstString(m, "NickName", "nickname", "Name", "name", "DisplayName", "displayname", "VerifyInfo"),
 		Remark:    firstString(m, "Remark", "remark", "RemarkName"),
 		AvatarURL: avatar,
 		Extra:     extra,
@@ -671,19 +674,27 @@ func appendContact(out []remoteapi.Contact, item any) []remoteapi.Contact {
 }
 
 func nestedString(m map[string]any, path ...string) (string, bool) {
+	v, ok := nestedAny(m, path...)
+	if !ok {
+		return "", false
+	}
+	return anyString(v), true
+}
+
+func nestedAny(m map[string]any, path ...string) (any, bool) {
 	var cur any = m
 	for _, key := range path {
 		mm, ok := cur.(map[string]any)
 		if !ok {
-			return "", false
+			return nil, false
 		}
 		v, exists := mm[key]
 		if !exists {
-			return "", false
+			return nil, false
 		}
 		cur = v
 	}
-	return anyString(cur), true
+	return cur, true
 }
 
 func firstString(m map[string]any, keys ...string) string {
@@ -736,56 +747,213 @@ func (c *Client) GetChat(ctx context.Context, id remoteapi.ChatID) (remoteapi.Ch
 	c.mu.RLock()
 	wxid := c.wxid
 	c.mu.RUnlock()
+
+	// Rails parity: chatroom member wxid list primarily comes from contact detail
+	// NewChatroomData.ChatRoomMember, not from Group/GetChatRoomInfo.
+	chat := remoteapi.Chat{ID: id, Name: string(id), IsGroup: true, Extra: map[string]any{}}
 	var raw any
-	if err := c.t.post(ctx, "/Group/GetChatRoomInfo",
-		map[string]any{"Wxid": wxid, "QID": string(id)}, nil, &raw); err != nil {
-		return remoteapi.Chat{}, err
+	if err := c.t.post(ctx, "/Friend/GetContractDetail",
+		map[string]any{"Wxid": wxid, "Towxids": string(id)}, nil, &raw); err == nil {
+		if contactMap, ok := firstContactMap(raw); ok {
+			ct := contactFromMap(contactMap, remoteapi.UserID(id))
+			chat.Name = pick(ct.Remark, ct.Name, string(id))
+			chat.Avatar = ct.AvatarURL
+			for k, v := range ct.Extra {
+				chat.Extra[k] = v
+			}
+			chat.Members = chatMemberIDsFromContactMap(contactMap)
+		}
+	} else {
+		log.Printf("failed to fetch chatroom contact detail chat=%s: %v", id, err)
 	}
-	m, _ := raw.(map[string]any)
-	members, memberContacts := parseChatMembers(m)
-	extra := map[string]any{}
-	if len(memberContacts) > 0 {
-		extra["member_contacts"] = memberContacts
+
+	// Fallback/merge for APIs that return room metadata/member list from Group/GetChatRoomInfo.
+	if chat.Name == string(id) || chat.Avatar == "" || len(chat.Members) == 0 {
+		var groupRaw any
+		if err := c.t.post(ctx, "/Group/GetChatRoomInfo",
+			map[string]any{"Wxid": wxid, "QID": string(id)}, nil, &groupRaw); err == nil {
+			m, _ := groupRaw.(map[string]any)
+			if name := pick(firstString(m, "Remark", "RemarkName"), firstString(m, "NickName", "Name")); name != "" {
+				chat.Name = name
+			}
+			if avatar := firstString(m, "ChatRoomHeadImgUrl", "BigHeadImgUrl", "HeadImgUrl", "SmallHeadImgUrl"); avatar != "" {
+				chat.Avatar = avatar
+			}
+			members, memberContacts := parseChatMembers(m)
+			if len(chat.Members) == 0 {
+				chat.Members = members
+			}
+			if len(memberContacts) > 0 {
+				chat.Extra["member_contacts"] = memberContacts
+			}
+		} else {
+			log.Printf("failed to fetch chatroom group info chat=%s: %v", id, err)
+		}
 	}
-	return remoteapi.Chat{
-		ID:      id,
-		Name:    pick(firstString(m, "Remark", "RemarkName"), firstString(m, "NickName", "Name")),
-		IsGroup: true,
-		Members: members,
-		Avatar:  firstString(m, "ChatRoomHeadImgUrl", "BigHeadImgUrl", "HeadImgUrl", "SmallHeadImgUrl"),
-		Extra:   extra,
-	}, nil
+	chat.Members = dedupeUserIDs(chat.Members)
+	if len(chat.Members) > 0 {
+		chat.Extra["member_count"] = len(chat.Members)
+		if _, ok := chat.Extra["member_contacts"]; !ok {
+			contacts := c.fetchChatMemberContacts(ctx, wxid, id, chat.Members)
+			if len(contacts) > 0 {
+				chat.Extra["member_contacts"] = contacts
+			}
+		}
+	}
+	return chat, nil
+}
+
+func firstContactMap(raw any) (map[string]any, bool) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if list, ok := m["ContactList"].([]any); ok && len(list) > 0 {
+		item, ok := list[0].(map[string]any)
+		return item, ok
+	}
+	return m, true
+}
+
+func contactListFromDetail(raw any) []remoteapi.Contact {
+	out := []remoteapi.Contact{}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return out
+	}
+	if list, ok := m["ContactList"].([]any); ok {
+		for _, item := range list {
+			if mm, ok := item.(map[string]any); ok {
+				ct := contactFromMap(mm, "")
+				if ct.ID != "" {
+					out = append(out, ct)
+				}
+			}
+		}
+		return out
+	}
+	ct := contactFromMap(m, "")
+	if ct.ID != "" {
+		out = append(out, ct)
+	}
+	return out
+}
+
+func chatMemberIDsFromContactMap(m map[string]any) []remoteapi.UserID {
+	for _, path := range [][]string{
+		{"NewChatroomData", "ChatRoomMember"},
+		{"NewChatRoomData", "ChatRoomMember"},
+		{"ChatRoomMember"},
+		{"MemberList"},
+		{"Members"},
+	} {
+		if v, ok := nestedAny(m, path...); ok {
+			if members := parseChatMemberIDs(v); len(members) > 0 {
+				return dedupeUserIDs(members)
+			}
+		}
+	}
+	return nil
 }
 
 func parseChatMembers(m map[string]any) ([]remoteapi.UserID, []remoteapi.Contact) {
 	members := []remoteapi.UserID{}
 	contacts := []remoteapi.Contact{}
 	for _, key := range []string{"MemberList", "Members", "member_list", "ChatRoomMember"} {
-		list, ok := m[key].([]any)
+		v, ok := m[key]
 		if !ok {
 			continue
 		}
-		for _, item := range list {
-			mm, ok := item.(map[string]any)
-			if !ok {
-				id := remoteapi.UserID(anyString(item))
-				if id != "" {
-					members = append(members, id)
+		members = append(members, parseChatMemberIDs(v)...)
+		if list, ok := v.([]any); ok {
+			for _, item := range list {
+				if mm, ok := item.(map[string]any); ok {
+					ct := contactFromMap(mm, "")
+					if ct.ID != "" && (ct.Name != "" || ct.Remark != "" || ct.AvatarURL != "") {
+						contacts = append(contacts, ct)
+					}
 				}
-				continue
-			}
-			ct := contactFromMap(mm, "")
-			if ct.ID == "" {
-				continue
-			}
-			members = append(members, ct.ID)
-			if ct.Name != "" || ct.Remark != "" || ct.AvatarURL != "" {
-				contacts = append(contacts, ct)
 			}
 		}
 		break
 	}
-	return members, contacts
+	return dedupeUserIDs(members), contacts
+}
+
+func parseChatMemberIDs(v any) []remoteapi.UserID {
+	members := []remoteapi.UserID{}
+	switch val := v.(type) {
+	case []any:
+		for _, item := range val {
+			members = append(members, parseChatMemberIDs(item)...)
+		}
+	case map[string]any:
+		if id := firstString(val, "UserName", "Wxid", "wxid", "Username", "userName"); id != "" {
+			members = append(members, remoteapi.UserID(id))
+			return members
+		}
+		for _, key := range []string{"ChatRoomMember", "MemberList", "Members", "List", "list"} {
+			if nested, ok := val[key]; ok {
+				members = append(members, parseChatMemberIDs(nested)...)
+			}
+		}
+	case string:
+		s := strings.TrimSpace(val)
+		if s == "" {
+			return members
+		}
+		var decoded any
+		if json.Unmarshal([]byte(s), &decoded) == nil {
+			return parseChatMemberIDs(decoded)
+		}
+		for _, part := range strings.Split(s, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				members = append(members, remoteapi.UserID(part))
+			}
+		}
+	default:
+		if id := anyString(val); id != "" {
+			members = append(members, remoteapi.UserID(id))
+		}
+	}
+	return members
+}
+
+func dedupeUserIDs(in []remoteapi.UserID) []remoteapi.UserID {
+	seen := map[remoteapi.UserID]bool{}
+	out := make([]remoteapi.UserID, 0, len(in))
+	for _, id := range in {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func (c *Client) fetchChatMemberContacts(ctx context.Context, wxid string, chatroom remoteapi.ChatID, members []remoteapi.UserID) []remoteapi.Contact {
+	contacts := []remoteapi.Contact{}
+	const chunkSize = 20
+	for start := 0; start < len(members); start += chunkSize {
+		end := start + chunkSize
+		if end > len(members) {
+			end = len(members)
+		}
+		ids := userIDs(members[start:end])
+		var raw any
+		if err := c.t.post(ctx, "/Friend/GetContractDetail", map[string]any{
+			"Wxid":     wxid,
+			"ChatRoom": string(chatroom),
+			"Towxids":  strings.Join(ids, ","),
+		}, nil, &raw); err != nil {
+			log.Printf("failed to fetch chatroom member details chat=%s members=%d: %v", chatroom, len(ids), err)
+			continue
+		}
+		contacts = append(contacts, contactListFromDetail(raw)...)
+	}
+	return contacts
 }
 
 // ---------------------------------------------------------------------------
