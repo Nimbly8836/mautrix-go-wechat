@@ -203,7 +203,11 @@ func (s *Server) contactDisplayName(ctx context.Context, user remoteapi.UserID) 
 	account := s.currentAccountID(ctx)
 	if account != "" && s.contacts != nil {
 		if ct, ok := s.contacts.get(account, user); ok {
-			return matrixPick(ct.Remark, ct.Name)
+			if name := matrixPick(ct.Remark, ct.Name); name != "" && name != string(user) {
+				return name
+			}
+			// Cached contact only contains the raw wxid/gh id. Treat it as incomplete
+			// and fall through to GetContact so invitations can show real names.
 		}
 	}
 	ct, err := s.api.GetContact(ctx, user)
@@ -250,10 +254,18 @@ func (s *Server) applyPortalMetadata(ctx context.Context, rec portalRecord, chat
 	if rec.RoomID == "" {
 		return
 	}
-	if name := s.portalRoomName(ctx, chat); name != "" && name != rec.Name {
+	name := s.portalRoomName(ctx, chat)
+	if name != "" && name != rec.Name {
 		rec.Name = name
 		s.portals.set(rec)
 		_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomName, "", map[string]any{"name": name})
+	}
+	if name != "" {
+		topic := fmt.Sprintf("WeChat portal for %s", chat.ID)
+		if name != string(chat.ID) {
+			topic = fmt.Sprintf("WeChat portal for %s (%s)", name, chat.ID)
+		}
+		_, _ = s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateTopic, "", map[string]any{"topic": topic})
 	}
 	if avatar := strings.TrimSpace(chat.Avatar); avatar != "" {
 		if mxc, err := s.roomAvatarFromURL(ctx, avatar); err == nil && mxc != "" {
@@ -280,9 +292,13 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 	if owner := s.portals.owner(); owner != "" {
 		invite = append(invite, owner)
 	}
+	topic := fmt.Sprintf("WeChat portal for %s", chatID)
+	if name != "" && name != string(chatID) {
+		topic = fmt.Sprintf("WeChat portal for %s (%s)", name, chatID)
+	}
 	resp, err := s.as.BotIntent().CreateRoom(ctx, &mautrix.ReqCreateRoom{
 		Name:   name,
-		Topic:  fmt.Sprintf("WeChat portal for %s", chatID),
+		Topic:  topic,
 		Invite: invite,
 		Preset: "private_chat",
 		// Do not set is_direct here. Some Matrix clients then display the
