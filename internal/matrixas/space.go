@@ -158,10 +158,12 @@ func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.
 	if folderSpace == "" {
 		folderSpace = space
 	}
-	// Remove legacy direct child link from account root, then add the portal to
-	// the category folder. Empty content makes the child link invalid in clients.
-	s.removeSpaceChild(ctx, space, portal.RoomID)
-	s.removeSpaceParent(ctx, portal.RoomID, space)
+	// Keep every portal directly under the account root space, and also add it
+	// to the category subspace. The root parent is non-canonical so clients can
+	// still prefer the category as the primary parent while the room remains
+	// visible under the account space.
+	s.addSpaceChild(ctx, space, portal.RoomID, true)
+	s.setSpaceParent(ctx, portal.RoomID, space, false)
 	s.addPortalToSpace(ctx, folderSpace, portal)
 }
 
