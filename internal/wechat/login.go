@@ -3,6 +3,7 @@ package wechat
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
@@ -123,16 +124,19 @@ func (l *qrLogin) Wait(ctx context.Context) (*remoteapi.LoginStep, error) {
 
 		var chk checkQRResp
 		if err := l.c.t.post(ctx, "/Login/LoginCheckQR", nil, q("uuid", l.uuid), &chk); err != nil {
+			log.Printf("wechat login: check qr failed uuid=%s err=%v", l.uuid, err)
 			continue // transient; keep polling
 		}
+		log.Printf("wechat login: check qr uuid=%s status=%d wxid=%s nickname=%s", l.uuid, chk.Status, chk.Wxid, chk.NickName)
 
 		if chk.Status >= 2 && chk.Wxid != "" {
 			l.c.mu.Lock()
 			l.c.wxid = chk.Wxid
 			l.c.mu.Unlock()
 
-			// prime the sync key for the message loop.
-			_ = l.c.t.post(ctx, "/Login/Newinit", nil, q("wxid", chk.Wxid), nil)
+			if err := l.c.enablePostLoginHooks(ctx, chk.Wxid); err != nil {
+				log.Printf("wechat login: post-login hooks failed wxid=%s err=%v", chk.Wxid, err)
+			}
 
 			return &remoteapi.LoginStep{
 				Type:         remoteapi.LoginComplete,
@@ -143,6 +147,20 @@ func (l *qrLogin) Wait(ctx context.Context) (*remoteapi.LoginStep, error) {
 		}
 		// chk.Status == 1 means "scanned, awaiting confirm"; keep waiting.
 	}
+}
+
+func (c *Client) enablePostLoginHooks(ctx context.Context, wxid string) error {
+	if err := c.t.post(ctx, "/Login/LoginTwiceAutoAuth", nil, q("wxid", wxid), nil); err != nil {
+		return err
+	}
+	if err := c.t.post(ctx, "/Login/Newinit", nil, q("wxid", wxid), nil); err != nil {
+		return err
+	}
+	if err := c.t.post(ctx, "/Login/AutoHeartBeat", nil, q("wxid", wxid), nil); err != nil {
+		return err
+	}
+	log.Printf("wechat login: enabled post-login hooks for %s", wxid)
+	return nil
 }
 
 func (l *qrLogin) Cancel() {}
