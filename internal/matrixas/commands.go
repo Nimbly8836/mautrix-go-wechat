@@ -85,7 +85,9 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 %[1]s use <wxid>          切换到已保存账号
 %[1]s logout              退出 WeChat
 %[1]s space               创建/查看当前微信账号的 Matrix Space，并挂载已有 portal
-%[1]s contacts refresh    强制刷新联系人缓存，并更新一对一 portal 房间名
+%[1]s stickers add <shortcode> <mxc-or-image-url> [label]  添加 sticker 到当前微信账号 Space
+%[1]s contacts refresh    后台刷新联系人缓存，并更新一对一 portal 房间名
+%[1]s contacts refresh <wxid/chatroom>  只刷新指定 portal/联系人
 %[1]s portal-mode         查看/切换 portal 创建模式(auto/manual)
 %[1]s pending             列出等待确认创建的会话
 %[1]s create <chat|all>   手动创建 pending portal
@@ -165,6 +167,8 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 		s.notice(ctx, room, "已退出 WeChat。")
 	case "contacts", "联系人":
 		s.handleContactsCommand(ctx, room, rest)
+	case "stickers", "sticker", "贴纸", "表情":
+		s.handleStickersCommand(ctx, room, sender, rest)
 	case "portal-mode":
 		mode := strings.TrimSpace(strings.ToLower(rest))
 		if mode == "" {
@@ -234,14 +238,34 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 	}
 }
 
+func (s *Server) beginContactRefresh(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.contactRefresh == nil {
+		s.contactRefresh = map[string]bool{}
+	}
+	if s.contactRefresh[key] {
+		return false
+	}
+	s.contactRefresh[key] = true
+	return true
+}
+
+func (s *Server) finishContactRefresh(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.contactRefresh, key)
+}
+
 func (s *Server) handleContactsCommand(ctx context.Context, room id.RoomID, rest string) {
-	action := strings.TrimSpace(strings.ToLower(rest))
-	if action == "" {
-		s.notice(ctx, room, fmt.Sprintf("用法: %s contacts refresh", s.commandPrefix()))
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		s.notice(ctx, room, fmt.Sprintf("用法: %s contacts refresh [wxid/chatroom]", s.commandPrefix()))
 		return
 	}
+	action := strings.ToLower(fields[0])
 	if action != "refresh" && action != "刷新" {
-		s.notice(ctx, room, fmt.Sprintf("未知 contacts 命令。用法: %s contacts refresh", s.commandPrefix()))
+		s.notice(ctx, room, fmt.Sprintf("未知 contacts 命令。用法: %s contacts refresh [wxid/chatroom]", s.commandPrefix()))
 		return
 	}
 	account := s.currentAccountID(ctx)
@@ -249,13 +273,67 @@ func (s *Server) handleContactsCommand(ctx context.Context, room id.RoomID, rest
 		s.notice(ctx, room, fmt.Sprintf("当前没有选择/登录微信账号。先使用 `%s account <wxid>` 或 `%s login <flow>`。", s.commandPrefix(), s.commandPrefix()))
 		return
 	}
-	count, err := s.refreshContactCache(ctx, account)
-	if err != nil {
-		s.notice(ctx, room, fmt.Sprintf("刷新联系人缓存失败: %v", err))
+	if len(fields) > 1 {
+		s.startSingleContactRefresh(ctx, room, account, remoteapi.ChatID(fields[1]))
 		return
 	}
-	updated, failed, members, memberFailed := s.syncPortalMetadata(ctx, account)
-	s.notice(ctx, room, fmt.Sprintf("已刷新联系人缓存: %d 个联系人。已同步 %d 个 portal 元数据，失败 %d 个；已同步 %d 个成员/puppet，失败 %d 个。", count, updated, failed, members, memberFailed))
+	s.startFullContactRefresh(ctx, room, account)
+}
+
+func (s *Server) startFullContactRefresh(ctx context.Context, room id.RoomID, account remoteapi.UserID) {
+	key := "full:" + string(account)
+	if !s.beginContactRefresh(key) {
+		s.notice(ctx, room, fmt.Sprintf("账号 %s 的联系人缓存正在后台刷新中，请稍后再试。", account))
+		return
+	}
+	s.notice(ctx, room, fmt.Sprintf("已开始后台刷新账号 %s 的联系人缓存。完成后会在这里通知。", account))
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		defer s.finishContactRefresh(key)
+		count, err := s.refreshContactCache(bg, account)
+		if err != nil {
+			s.notice(ctx, room, fmt.Sprintf("刷新联系人缓存失败: %v", err))
+			return
+		}
+		updated, failed, members, memberFailed := s.syncPortalMetadata(bg, account)
+		s.notice(ctx, room, fmt.Sprintf("已刷新联系人缓存: %d 个联系人。已同步 %d 个 portal 元数据，失败 %d 个；已同步 %d 个成员/puppet，失败 %d 个。", count, updated, failed, members, memberFailed))
+	}()
+}
+
+func (s *Server) startSingleContactRefresh(ctx context.Context, room id.RoomID, account remoteapi.UserID, chatID remoteapi.ChatID) {
+	if strings.TrimSpace(string(chatID)) == "" {
+		s.notice(ctx, room, fmt.Sprintf("用法: %s contacts refresh <wxid/chatroom>", s.commandPrefix()))
+		return
+	}
+	key := "single:" + string(account) + ":" + string(chatID)
+	if !s.beginContactRefresh(key) {
+		s.notice(ctx, room, fmt.Sprintf("%s 正在后台刷新中，请稍后再试。", chatID))
+		return
+	}
+	s.notice(ctx, room, fmt.Sprintf("已开始后台刷新 %s。完成后会在这里通知。", chatID))
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		defer s.finishContactRefresh(key)
+		if rec, ok := s.portals.get(chatID); ok && rec.RoomID != "" {
+			chat, err := s.api.GetChat(bg, rec.ChatID)
+			if err != nil {
+				s.notice(ctx, room, fmt.Sprintf("刷新 %s 失败: %v", chatID, err))
+				return
+			}
+			chat = normalizePortalChat(rec, chat)
+			s.applyPortalMetadata(bg, rec, chat)
+			joined, failed := s.syncPortalMembers(bg, rec, chat, true)
+			s.addPortalToAccountSpace(bg, account, rec)
+			s.notice(ctx, room, fmt.Sprintf("已刷新 %s。%s", chatID, s.portalRefreshDebug(chat, joined, failed)))
+			return
+		}
+		ct, ok := s.contactForRemote(bg, remoteapi.UserID(chatID), true)
+		if !ok {
+			s.notice(ctx, room, fmt.Sprintf("刷新联系人 %s 失败。", chatID))
+			return
+		}
+		s.notice(ctx, room, fmt.Sprintf("已刷新联系人 %s: %s", chatID, matrixPick(ct.Remark, ct.Name, string(ct.ID))))
+	}()
 }
 
 func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserID) (updated, failed, members, memberFailed int) {

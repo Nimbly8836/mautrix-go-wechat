@@ -40,11 +40,12 @@ type Server struct {
 	accounts    *accountStore
 	contacts    *contactStore
 
-	mu         sync.Mutex
-	rooms      map[id.RoomID]bool
-	remoteRun  bool
-	remoteCtx  context.Context
-	remoteStop context.CancelFunc
+	mu              sync.Mutex
+	rooms           map[id.RoomID]bool
+	remoteRun       bool
+	remoteCtx       context.Context
+	remoteStop      context.CancelFunc
+	contactRefresh  map[string]bool
 }
 
 // New creates the appservice and remote connector from config + registration.
@@ -69,7 +70,7 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	as.Log = zerolog.New(os.Stdout).With().Timestamp().Str("component", "appservice").Logger()
 	as.QueryHandler = queryHandler{bot: id.NewUserID(reg.SenderLocalpart, cfg.Homeserver.Domain), domain: cfg.Homeserver.Domain, prefix: reg.ID + "_"}
 
-	s := &Server{cfg: cfg, as: as, apiCfg: apiCfg, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}}
+	s := &Server{cfg: cfg, as: as, apiCfg: apiCfg, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}, contactRefresh: map[string]bool{}}
 	if s.sessionFile == "" {
 		s.sessionFile = "/data/session.json"
 	}

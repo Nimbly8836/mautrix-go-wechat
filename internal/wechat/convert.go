@@ -183,7 +183,15 @@ func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push
 		base.Type = remoteapi.MsgText
 	case wxImage:
 		base.Type = remoteapi.MsgImage
-		base.Media = &remoteapi.Media{MimeType: "image/jpeg"}
+		base.Media = &remoteapi.Media{MimeType: "image/jpeg", FileName: string(base.ID) + ".jpg"}
+		if isXMLMessage(base.Text) {
+			if aesKey := xmlAttr(base.Text, "aeskey"); aesKey != "" {
+				base.Extra["image_aeskey"] = aesKey
+			}
+			if fileNo := firstNonEmpty(xmlAttr(base.Text, "cdnmidimgurl"), xmlAttr(base.Text, "cdnthumburl")); fileNo != "" {
+				base.Extra["image_file_no"] = fileNo
+			}
+		}
 		if base.Text == "" || isXMLMessage(base.Text) {
 			base.Text = firstNonEmpty(push, "[image]")
 		}
@@ -262,6 +270,23 @@ func parseAppMessage(content, push string) (remoteapi.MessageType, string) {
 func isXMLMessage(content string) bool {
 	content = strings.TrimSpace(content)
 	return strings.HasPrefix(content, "<msg") || strings.HasPrefix(content, "<?xml")
+}
+
+func xmlAttr(raw, attr string) string {
+	for _, quote := range []string{"\"", "'"} {
+		needle := attr + "=" + quote
+		start := strings.Index(raw, needle)
+		if start < 0 {
+			continue
+		}
+		start += len(needle)
+		end := strings.Index(raw[start:], quote)
+		if end < 0 {
+			return ""
+		}
+		return strings.TrimSpace(html.UnescapeString(raw[start : start+end]))
+	}
+	return ""
 }
 
 func xmlTag(raw, tag string) string {
