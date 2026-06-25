@@ -77,6 +77,7 @@ var (
 	_ remoteapi.Pinger               = (*Client)(nil)
 	_ remoteapi.LoginInfoProvider    = (*Client)(nil)
 	_ remoteapi.CachedLoginActivator = (*Client)(nil)
+	_ remoteapi.LoginRefresher       = (*Client)(nil)
 )
 
 // ---------------------------------------------------------------------------

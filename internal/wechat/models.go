@@ -24,10 +24,11 @@ type getQRReq struct {
 // getQRResp is the Data of /Login/LoginGetQR. Field names are tolerant; the
 // service returns at least a UUID and a base64/URL QR payload.
 type getQRResp struct {
-	Uuid    string `json:"Uuid"`
-	QRCode  string `json:"QrCode"` // sometimes "QRCodeURL" / base64
-	QRBase  string `json:"QrBase64"`
-	BaseUrl string `json:"BaseUrl"`
+	Uuid        string `json:"Uuid"`
+	QRCode      string `json:"QrCode"` // sometimes "QRCodeURL" / base64
+	QRBase      string `json:"QrBase64"`
+	BaseUrl     string `json:"BaseUrl"`
+	ExpiredTime int64  `json:"ExpiredTime"`
 }
 
 // checkQRResp is the Data of /Login/LoginCheckQR.

@@ -60,6 +60,12 @@ func findQRFlow(flowID string) (qrFlow, bool) {
 	return qrFlow{}, false
 }
 
+var (
+	qrPollInterval                = 2 * time.Second
+	qrFallbackTimeout             = 4 * time.Minute
+	qrMaxConsecutiveCheckFailures = 3
+)
+
 // qrLogin implements remoteapi.LoginProcess as a state machine:
 //
 //	Start -> display_and_wait(QR)
@@ -68,9 +74,10 @@ func findQRFlow(flowID string) (qrFlow, bool) {
 // This matches bridgev2's display-and-wait QR flow: the bot shows the QR and
 // then blocks in Wait until the backend confirms the scan.
 type qrLogin struct {
-	c    *Client
-	flow qrFlow
-	uuid string
+	c         *Client
+	flow      qrFlow
+	uuid      string
+	expiresAt time.Time
 }
 
 var _ remoteapi.LoginProcess = (*qrLogin)(nil)
@@ -85,6 +92,7 @@ func (l *qrLogin) Start(ctx context.Context) (*remoteapi.LoginStep, error) {
 		return nil, fmt.Errorf("wechat: empty UUID from %s", l.flow.Endpoint)
 	}
 	l.uuid = qr.Uuid
+	l.expiresAt = qrExpiryDeadline(qr.ExpiredTime, time.Now())
 
 	return &remoteapi.LoginStep{
 		Type:         remoteapi.LoginDisplayAndWait,
@@ -108,24 +116,42 @@ func (l *qrLogin) Wait(ctx context.Context) (*remoteapi.LoginStep, error) {
 	if l.uuid == "" {
 		return nil, fmt.Errorf("wechat: Wait called before Start")
 	}
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(qrPollInterval)
 	defer ticker.Stop()
-	deadline := time.After(4 * time.Minute)
+	if l.expiresAt.IsZero() {
+		l.expiresAt = time.Now().Add(qrFallbackTimeout)
+	}
+	deadline := time.NewTimer(time.Until(l.expiresAt))
+	defer deadline.Stop()
+	failures := 0
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-deadline:
+		case <-deadline.C:
 			return &remoteapi.LoginStep{Type: remoteapi.LoginError, StepID: "wechat." + l.flow.ID,
-				Err: fmt.Errorf("wechat: QR login timed out")}, nil
+				Err: fmt.Errorf("wechat: QR login expired")}, nil
 		case <-ticker.C:
 		}
 
 		var chk checkQRResp
 		if err := l.c.t.post(ctx, "/Login/LoginCheckQR", nil, q("uuid", l.uuid), &chk); err != nil {
-			log.Printf("wechat login: check qr failed uuid=%s err=%v", l.uuid, err)
-			continue // transient; keep polling
+			log.Printf("wechat login: check qr failed uuid=%s failures=%d err=%v", l.uuid, failures+1, err)
+			if isFatalQRCheckError(err) {
+				return &remoteapi.LoginStep{Type: remoteapi.LoginError, StepID: "wechat." + l.flow.ID, Err: err}, nil
+			}
+			failures++
+			if failures >= qrMaxConsecutiveCheckFailures {
+				return &remoteapi.LoginStep{Type: remoteapi.LoginError, StepID: "wechat." + l.flow.ID,
+					Err: fmt.Errorf("wechat: QR status check failed %d times: %w", failures, err)}, nil
+			}
+			continue
+		}
+		failures = 0
+		if chk.ExpiredTime > 0 {
+			l.expiresAt = qrExpiryDeadline(int64(chk.ExpiredTime), time.Now())
+			resetTimer(deadline, time.Until(l.expiresAt))
 		}
 		log.Printf("wechat login: check qr uuid=%s status=%d wxid=%s nickname=%s", l.uuid, chk.Status, chk.Wxid, chk.NickName)
 
@@ -149,6 +175,22 @@ func (l *qrLogin) Wait(ctx context.Context) (*remoteapi.LoginStep, error) {
 	}
 }
 
+func (c *Client) RefreshLogin(ctx context.Context, id remoteapi.UserID) error {
+	wxid := string(id)
+	if wxid == "" {
+		c.mu.RLock()
+		wxid = c.wxid
+		c.mu.RUnlock()
+	}
+	if wxid == "" {
+		return fmt.Errorf("wechat: no account selected for twice login")
+	}
+	c.mu.Lock()
+	c.wxid = wxid
+	c.mu.Unlock()
+	return c.enablePostLoginHooks(ctx, wxid)
+}
+
 func (c *Client) enablePostLoginHooks(ctx context.Context, wxid string) error {
 	if err := c.t.post(ctx, "/Login/LoginTwiceAutoAuth", nil, q("wxid", wxid), nil); err != nil {
 		return err
@@ -161,6 +203,41 @@ func (c *Client) enablePostLoginHooks(ctx context.Context, wxid string) error {
 	}
 	log.Printf("wechat login: enabled post-login hooks for %s", wxid)
 	return nil
+}
+
+func qrExpiryDeadline(expiredTime int64, now time.Time) time.Time {
+	if expiredTime <= 0 {
+		return now.Add(qrFallbackTimeout)
+	}
+	// Large values are Unix timestamps. Small values are durations in seconds.
+	if expiredTime > 1_000_000_000 {
+		return time.Unix(expiredTime, 0)
+	}
+	return now.Add(time.Duration(expiredTime) * time.Second)
+}
+
+func resetTimer(t *time.Timer, d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
+}
+
+func isFatalQRCheckError(err error) bool {
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		return false
+	}
+	if apiErr.Code == -8 {
+		return true
+	}
+	return false
 }
 
 func (l *qrLogin) Cancel() {}

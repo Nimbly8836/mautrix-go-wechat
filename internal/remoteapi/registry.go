@@ -86,3 +86,9 @@ type LoginInfo struct {
 type CachedLoginActivator interface {
 	ActivateCachedLogin(ctx context.Context, id UserID) (LoginInfo, error)
 }
+
+// LoginRefresher is an OPTIONAL capability for backends that can refresh an
+// existing cached login without a new interactive QR scan.
+type LoginRefresher interface {
+	RefreshLogin(ctx context.Context, id UserID) error
+}

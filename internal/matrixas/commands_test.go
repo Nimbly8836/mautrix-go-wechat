@@ -30,6 +30,13 @@ func TestParseBridgeCommandKeepsBareCompatibility(t *testing.T) {
 	}
 }
 
+func TestParseBridgeCommandRelogin(t *testing.T) {
+	cmd, rest, ok := parseBridgeCommand("!wx relogin wxid_me", "!wx")
+	if !ok || cmd != "relogin" || rest != "wxid_me" {
+		t.Fatalf("expected relogin command, got cmd=%q rest=%q ok=%v", cmd, rest, ok)
+	}
+}
+
 func TestParsePortalCommandRequiresWxPrefix(t *testing.T) {
 	cmd, rest, ok := parsePortalCommand("!wx sync", "!wx")
 	if !ok || cmd != "sync" || rest != "" {
