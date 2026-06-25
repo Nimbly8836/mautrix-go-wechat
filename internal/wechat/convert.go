@@ -184,7 +184,7 @@ func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push
 	case wxImage:
 		base.Type = remoteapi.MsgImage
 		base.Media = &remoteapi.Media{MimeType: "image/jpeg"}
-		if base.Text == "" || strings.HasPrefix(base.Text, "<msg") {
+		if base.Text == "" || isXMLMessage(base.Text) {
 			base.Text = firstNonEmpty(push, "[image]")
 		}
 	case wxVoice:
@@ -257,6 +257,11 @@ func parseAppMessage(content, push string) (remoteapi.MessageType, string) {
 		return typ, fallback
 	}
 	return typ, strings.Join(parts, "\n")
+}
+
+func isXMLMessage(content string) bool {
+	content = strings.TrimSpace(content)
+	return strings.HasPrefix(content, "<msg") || strings.HasPrefix(content, "<?xml")
 }
 
 func xmlTag(raw, tag string) string {

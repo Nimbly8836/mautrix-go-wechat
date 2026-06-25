@@ -2,6 +2,7 @@ package wechat
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
@@ -117,5 +118,31 @@ func TestHandleWebhookDeduplicatesSameMessage(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+func TestHandleWebhookImageXMLDoesNotLeakAsBody(t *testing.T) {
+	c := &Client{events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
+	imageXML := `<?xml version="1.0"?>
+<msg>
+    <img aeskey="2c5b695f08c0921a5e58539172b3a14c" cdnmidimgurl="305f020100044b" length="398191" md5="60c9d0aff18afffb4478f948c96b661b" />
+</msg>`
+	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":3,"ContentText":` + strconv.Quote(imageXML) + `,"PushContent":"","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
+	if err := c.HandleWebhook(context.Background(), payload); err != nil {
+		t.Fatalf("HandleWebhook returned error: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		if ev.Message == nil {
+			t.Fatalf("expected message event, got %#v", ev)
+		}
+		if ev.Message.Type != remoteapi.MsgImage {
+			t.Fatalf("expected image message, got type=%d event=%#v", ev.Message.Type, ev)
+		}
+		if ev.Message.Text != "[image]" {
+			t.Fatalf("expected image placeholder instead of raw XML, got %q", ev.Message.Text)
+		}
+	default:
+		t.Fatalf("expected webhook to emit image message")
 	}
 }
