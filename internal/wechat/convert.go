@@ -1,6 +1,8 @@
 package wechat
 
 import (
+	"context"
+	"encoding/xml"
 	"html"
 	"strings"
 	"time"
@@ -32,7 +34,7 @@ func shouldDropLocal(m localMessage) bool {
 	return false
 }
 
-func (c *Client) convertLocal(m localMessage) (remoteapi.Event, bool) {
+func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Event, bool) {
 	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content, m.PushContent))
 	if content == "" {
 		return remoteapi.Event{}, false
@@ -71,12 +73,15 @@ func (c *Client) convertLocal(m localMessage) (remoteapi.Event, bool) {
 		},
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	if m.MsgType == wxEmoji {
+		c.attachEmojiMedia(ctx, &base, content)
+	}
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
 }
 
 // convertInbound maps a raw WeChat message into a neutral remoteapi.Event.
 // Returns ok=false for messages the bridge should drop (system noise).
-func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
+func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Event, bool) {
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
 	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent))
@@ -141,18 +146,28 @@ func (c *Client) convertInbound(m rawMessage) (remoteapi.Event, bool) {
 	}
 
 	if m.MsgType == wxRevoke {
-		// A recall notification, not a message.
+		rev := parseRevokeMessage(content)
+		if rev.Chat != "" {
+			chat = rev.Chat
+		}
+		if rev.By != "" {
+			sender = rev.By
+		}
 		return remoteapi.Event{
 			Kind: remoteapi.EventRedaction,
 			Redaction: &remoteapi.Redaction{
 				Chat:      remoteapi.ChatID(chat),
 				By:        remoteapi.UserID(sender),
+				Target:    remoteapi.MessageID(firstNonEmpty(rev.MsgID, rev.OldMsgID)),
+				Text:      rev.Text,
 				Timestamp: time.Unix(m.CreateTime, 0),
-				// Target id is embedded in the revoke XML; parse in caller.
 			},
 		}, true
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	if m.MsgType == wxEmoji {
+		c.attachEmojiMedia(ctx, &base, content)
+	}
 
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
 }
@@ -287,6 +302,50 @@ func xmlAttr(raw, attr string) string {
 		return strings.TrimSpace(html.UnescapeString(raw[start : start+end]))
 	}
 	return ""
+}
+
+type revokeInfo struct {
+	Chat     string
+	By       string
+	MsgID    string
+	OldMsgID string
+	Text     string
+}
+
+func parseRevokeMessage(raw string) revokeInfo {
+	dec := xml.NewDecoder(strings.NewReader(raw))
+	var info revokeInfo
+	var current string
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			current = strings.ToLower(t.Name.Local)
+		case xml.CharData:
+			value := strings.TrimSpace(html.UnescapeString(string(t)))
+			if value == "" {
+				continue
+			}
+			switch current {
+			case "session":
+				info.Chat = value
+			case "fromusername":
+				info.By = value
+			case "msgid":
+				info.MsgID = value
+			case "oldmsgid":
+				info.OldMsgID = value
+			case "replacemsg":
+				info.Text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "<![CDATA["), "]]>"))
+			}
+		case xml.EndElement:
+			current = ""
+		}
+	}
+	return info
 }
 
 func xmlTag(raw, tag string) string {

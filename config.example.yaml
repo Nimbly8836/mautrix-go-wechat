@@ -52,8 +52,8 @@ bridge:
     portal_file: /data/portals.json
     # Saved login sessions for multiple WeChat accounts.
     account_file: /data/accounts.json
-    # Cached WeChat contact metadata, used for room and puppet names.
-    contact_file: /data/contacts.json
+    # Shared WeChat emoji/sticker cache directory. All accounts reuse files here.
+    emoji_dir: /data/emojis
     # Bridge command prefix for management and portal-local commands.
     command_prefix: "!wx"
     # New chat portal creation mode:

@@ -26,11 +26,18 @@ func (Factory) New(cfg remoteapi.Config) (remoteapi.PuppetAPI, error) {
 	if mode == "" {
 		mode = "poll"
 	}
+	emojiDir := "/data/emojis"
+	if cfg.Extra != nil {
+		if v, ok := cfg.Extra["emoji_dir"].(string); ok && strings.TrimSpace(v) != "" {
+			emojiDir = strings.TrimSpace(v)
+		}
+	}
 	c := &Client{
 		t:           newTransport(cfg.BaseURL),
 		events:      make(chan remoteapi.Event, 64),
 		done:        make(chan struct{}),
 		receiveMode: mode,
+		emojiDir:    emojiDir,
 		localSeen:   map[string]struct{}{},
 	}
 	if len(cfg.Session) > 0 {
@@ -62,6 +69,7 @@ type Client struct {
 	syncKey string
 
 	receiveMode string
+	emojiDir    string
 	localCursor int64
 	localSeen   map[string]struct{}
 
@@ -77,6 +85,7 @@ var (
 	_ remoteapi.Pinger               = (*Client)(nil)
 	_ remoteapi.LoginInfoProvider    = (*Client)(nil)
 	_ remoteapi.CachedLoginActivator = (*Client)(nil)
+	_ remoteapi.LoginRefresher       = (*Client)(nil)
 )
 
 // ---------------------------------------------------------------------------
@@ -138,7 +147,7 @@ func (c *Client) HandleWebhook(ctx context.Context, payload []byte) error {
 				continue
 			}
 		}
-		if ev, ok := c.convertInbound(m); ok {
+		if ev, ok := c.convertInbound(ctx, m); ok {
 			if ev.Message != nil {
 				log.Printf("wechat webhook: emit chat=%s sender=%s type=%d text=%q", ev.Message.Chat, ev.Message.Sender, ev.Message.Type, webhookPreview(ev.Message.Text))
 			}
@@ -267,9 +276,9 @@ func (c *Client) syncLoop() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
 		msgs, err := c.queryLocal(ctx)
-		cancel()
 
 		if err != nil {
+			cancel()
 			c.emit(remoteapi.Event{Kind: remoteapi.EventDisconnected, Error: err})
 			select {
 			case <-time.After(backoff):
@@ -284,10 +293,11 @@ func (c *Client) syncLoop() {
 		backoff = time.Second
 
 		for _, m := range msgs {
-			if ev, ok := c.convertLocal(m); ok {
+			if ev, ok := c.convertLocal(ctx, m); ok {
 				c.emit(ev)
 			}
 		}
+		cancel()
 		select {
 		case <-time.After(3 * time.Second):
 		case <-c.done:
@@ -508,6 +518,30 @@ func (c *Client) SendMessage(ctx context.Context, chat remoteapi.ChatID, msg rem
 		req := uploadImgReq{Wxid: wxid, ToWxid: to, Base64: base64.StdEncoding.EncodeToString(msg.Media.Data)}
 		var r sendResp
 		if err := c.t.post(ctx, "/Msg/UploadImg", req, nil, &r); err != nil {
+			return "", err
+		}
+		return msgID(r), nil
+
+	case remoteapi.MsgEmoji:
+		if msg.Media == nil || len(msg.Media.Data) == 0 {
+			return "", fmt.Errorf("wechat: emoji message without media")
+		}
+		if !isGIF(msg.Media.Data) {
+			return "", fmt.Errorf("wechat: emoji sending requires GIF media")
+		}
+		fileMD5 := contentMD5(msg.Media.Data)
+		if err := c.writeOutgoingEmojiCache(fileMD5, msg.Media.Data); err != nil {
+			return "", err
+		}
+		req := sendEmojiReq{
+			Wxid:     wxid,
+			ToWxid:   to,
+			Md5:      fileMD5,
+			Base64:   base64.StdEncoding.EncodeToString(msg.Media.Data),
+			TotalLen: len(msg.Media.Data),
+		}
+		var r sendResp
+		if err := c.t.post(ctx, "/Msg/SendEmoji", req, nil, &r); err != nil {
 			return "", err
 		}
 		return msgID(r), nil

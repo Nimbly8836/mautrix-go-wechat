@@ -8,6 +8,13 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
 
+func matrixEventTypeFromRemote(m *remoteapi.InboundMessage) event.Type {
+	if m.Type == remoteapi.MsgEmoji && m.Media != nil && len(m.Media.Data) > 0 {
+		return event.EventSticker
+	}
+	return event.EventMessage
+}
+
 func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventContent {
 	body := m.Text
 	if body == "" {
@@ -17,7 +24,10 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 	case remoteapi.MsgText:
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgImage:
-		return &event.MessageEventContent{MsgType: event.MsgImage, Body: body}
+		if m.Media != nil && len(m.Media.Data) > 0 {
+			return &event.MessageEventContent{MsgType: event.MsgImage, Body: body}
+		}
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgVideo:
 		return &event.MessageEventContent{MsgType: event.MsgVideo, Body: body}
 	case remoteapi.MsgAudio:
@@ -26,7 +36,12 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 		return &event.MessageEventContent{MsgType: event.MsgFile, Body: body}
 	case remoteapi.MsgLocation:
 		return &event.MessageEventContent{MsgType: event.MsgLocation, Body: body}
-	case remoteapi.MsgLink, remoteapi.MsgApp, remoteapi.MsgContactCard, remoteapi.MsgEmoji:
+	case remoteapi.MsgLink, remoteapi.MsgApp, remoteapi.MsgContactCard:
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
+	case remoteapi.MsgEmoji:
+		if m.Media != nil && len(m.Media.Data) > 0 {
+			return &event.MessageEventContent{MsgType: event.CapMsgSticker, Body: body}
+		}
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	default:
 		return &event.MessageEventContent{MsgType: event.MsgNotice, Body: body}

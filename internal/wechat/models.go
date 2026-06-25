@@ -24,10 +24,11 @@ type getQRReq struct {
 // getQRResp is the Data of /Login/LoginGetQR. Field names are tolerant; the
 // service returns at least a UUID and a base64/URL QR payload.
 type getQRResp struct {
-	Uuid    string `json:"Uuid"`
-	QRCode  string `json:"QrCode"` // sometimes "QRCodeURL" / base64
-	QRBase  string `json:"QrBase64"`
-	BaseUrl string `json:"BaseUrl"`
+	Uuid        string `json:"Uuid"`
+	QRCode      string `json:"QrCode"` // sometimes "QRCodeURL" / base64
+	QRBase      string `json:"QrBase64"`
+	BaseUrl     string `json:"BaseUrl"`
+	ExpiredTime int64  `json:"ExpiredTime"`
 }
 
 // checkQRResp is the Data of /Login/LoginCheckQR.
@@ -63,6 +64,16 @@ type uploadImgReq struct {
 	Wxid   string `json:"Wxid"`
 	ToWxid string `json:"ToWxid"`
 	Base64 string `json:"Base64"` // base64 image bytes
+}
+
+// sendEmojiReq -> /Msg/SendEmoji
+// The backend only accepts GIF emoji payloads.
+type sendEmojiReq struct {
+	Wxid     string `json:"Wxid"`
+	ToWxid   string `json:"ToWxid"`
+	Md5      string `json:"Md5"`
+	Base64   string `json:"Base64"`
+	TotalLen int    `json:"TotalLen"`
 }
 
 // revokeReq -> /Msg/Revoke

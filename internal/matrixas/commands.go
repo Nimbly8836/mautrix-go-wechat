@@ -88,6 +88,7 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 %[1]s stickers add <shortcode> <mxc-or-image-url> [label]  添加 sticker 到当前微信账号 Space
 %[1]s contacts refresh    后台刷新联系人缓存，并更新一对一 portal 房间名
 %[1]s contacts refresh <wxid/chatroom>  只刷新指定 portal/联系人
+%[1]s relogin [wxid]      对当前或指定账号执行二次登录，并开启自动心跳
 %[1]s portal-mode         查看/切换 portal 创建模式(auto/manual)
 %[1]s pending             列出等待确认创建的会话
 %[1]s create <chat|all>   手动创建 pending portal
@@ -169,6 +170,8 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 		s.handleContactsCommand(ctx, room, rest)
 	case "stickers", "sticker", "贴纸", "表情":
 		s.handleStickersCommand(ctx, room, sender, rest)
+	case "relogin", "twice-auth", "twice", "二次登录":
+		go s.handleRefreshLoginCommand(ctx, room, rest)
 	case "portal-mode":
 		mode := strings.TrimSpace(strings.ToLower(rest))
 		if mode == "" {
@@ -255,6 +258,32 @@ func (s *Server) finishContactRefresh(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.contactRefresh, key)
+}
+
+func (s *Server) handleRefreshLoginCommand(ctx context.Context, room id.RoomID, rest string) {
+	wxid := remoteapi.UserID(strings.TrimSpace(rest))
+	if wxid == "" {
+		wxid = s.currentAccountID(ctx)
+	}
+	if wxid == "" {
+		s.notice(ctx, room, fmt.Sprintf("用法: %s relogin [wxid]。先使用 `%s account <wxid>` 或 `%s login <flow>` 选择账号。", s.commandPrefix(), s.commandPrefix(), s.commandPrefix()))
+		return
+	}
+	refresher, ok := s.api.(remoteapi.LoginRefresher)
+	if !ok {
+		s.notice(ctx, room, "当前后端不支持二次登录。")
+		return
+	}
+	if err := refresher.RefreshLogin(ctx, wxid); err != nil {
+		s.notice(ctx, room, fmt.Sprintf("二次登录失败: %v", err))
+		return
+	}
+	s.saveSession("twice")
+	if _, err := s.ensureAccountSpace(ctx, wxid); err != nil {
+		s.notice(ctx, room, fmt.Sprintf("二次登录成功，但创建 Space 失败: %v", err))
+	}
+	s.startRemote(ctx)
+	s.notice(ctx, room, fmt.Sprintf("已对 %s 完成二次登录并开启自动心跳。", wxid))
 }
 
 func (s *Server) handleContactsCommand(ctx context.Context, room id.RoomID, rest string) {

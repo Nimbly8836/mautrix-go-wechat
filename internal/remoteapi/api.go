@@ -288,6 +288,7 @@ type Redaction struct {
 	Chat      ChatID
 	Target    MessageID
 	By        UserID
+	Text      string
 	Timestamp time.Time
 }
 
