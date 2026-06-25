@@ -58,6 +58,12 @@ func main() {
 		cfg.Bridge.PortalCreation = "auto"
 	}
 
+	if cfg.Network.Extra == nil {
+		cfg.Network.Extra = map[string]any{}
+	}
+	if _, ok := cfg.Network.Extra["emoji_dir"]; !ok {
+		cfg.Network.Extra["emoji_dir"] = cfg.Bridge.EmojiDir
+	}
 	apiCfg := remoteapi.Config{
 		BaseURL:     cfg.Network.BaseURL,
 		Token:       cfg.Network.Token,

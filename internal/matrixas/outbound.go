@@ -4,11 +4,71 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
+	"strings"
 
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
+
+func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord, sender id.UserID, msg *event.MessageEventContent, eventType event.Type) {
+	if !s.allowed(sender) {
+		s.sendPortalNotice(ctx, rec.RoomID, "你没有使用此 bridge 的权限。")
+		return
+	}
+	if eventType != event.EventSticker && msg.MsgType != event.MsgImage && msg.MsgType != event.CapMsgSticker {
+		return
+	}
+	if msg.URL == "" {
+		s.sendPortalNotice(ctx, rec.RoomID, "发送到 WeChat 失败: Matrix 媒体缺少 URL。")
+		return
+	}
+	contentURI, err := msg.URL.Parse()
+	if err != nil {
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: Matrix 媒体 URL 无效: %v", err))
+		return
+	}
+	data, err := s.as.BotIntent().Client.DownloadBytes(ctx, contentURI)
+	if err != nil {
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: 下载 Matrix 媒体失败: %v", err))
+		return
+	}
+	mimeType := ""
+	if msg.Info != nil {
+		mimeType = msg.Info.MimeType
+	}
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	if !isGIFMedia(data, mimeType, msg.GetFileName()) {
+		s.sendPortalNotice(ctx, rec.RoomID, "发送到 WeChat 失败: 微信 emoji/sticker 只能发送 GIF。")
+		return
+	}
+	body := strings.TrimSpace(msg.Body)
+	if body == "" {
+		body = "[emoji]"
+	}
+	msgID, err := s.api.SendMessage(ctx, rec.ChatID, remoteapi.OutgoingMessage{
+		Type:  remoteapi.MsgEmoji,
+		Text:  body,
+		Media: &remoteapi.Media{Data: data, MimeType: "image/gif", FileName: msg.GetFileName(), Size: int64(len(data))},
+	})
+	if err != nil {
+		log.Printf("failed to send Matrix sticker to WeChat chat=%s sender=%s: %v", rec.ChatID, sender, err)
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
+		return
+	}
+	log.Printf("sent Matrix sticker to WeChat: room=%s chat=%s sender=%s msg_id=%s", rec.RoomID, rec.ChatID, sender, msgID)
+}
+
+func isGIFMedia(data []byte, mimeType, fileName string) bool {
+	if len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a") {
+		return true
+	}
+	return strings.EqualFold(strings.Split(mimeType, ";")[0], "image/gif") || strings.HasSuffix(strings.ToLower(fileName), ".gif")
+}
 
 func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, sender id.UserID, body string) {
 	if body == "" {

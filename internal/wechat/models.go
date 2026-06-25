@@ -66,6 +66,16 @@ type uploadImgReq struct {
 	Base64 string `json:"Base64"` // base64 image bytes
 }
 
+// sendEmojiReq -> /Msg/SendEmoji
+// The backend only accepts GIF emoji payloads.
+type sendEmojiReq struct {
+	Wxid     string `json:"Wxid"`
+	ToWxid   string `json:"ToWxid"`
+	Md5      string `json:"Md5"`
+	Base64   string `json:"Base64"`
+	TotalLen int    `json:"TotalLen"`
+}
+
 // revokeReq -> /Msg/Revoke
 type revokeReq struct {
 	Wxid        string `json:"Wxid"`

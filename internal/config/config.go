@@ -72,6 +72,8 @@ type Bridge struct {
 	AccountFile string `yaml:"account_file"`
 	// ContactFile stores cached backend contact metadata per account.
 	ContactFile string `yaml:"contact_file"`
+	// EmojiDir stores shared WeChat emoji/sticker files across all accounts.
+	EmojiDir string `yaml:"emoji_dir"`
 	// PortalCreation controls how new remote chats become Matrix portal rooms.
 	// Values: "auto" (default) or "manual".
 	PortalCreation string `yaml:"portal_creation"`
@@ -138,6 +140,9 @@ func (c *Config) validate() error {
 	}
 	if c.Bridge.ContactFile == "" {
 		c.Bridge.ContactFile = "/data/contacts.json"
+	}
+	if c.Bridge.EmojiDir == "" {
+		c.Bridge.EmojiDir = "/data/emojis"
 	}
 	if c.Bridge.CommandPrefix[0] != '!' {
 		c.Bridge.CommandPrefix = "!" + c.Bridge.CommandPrefix

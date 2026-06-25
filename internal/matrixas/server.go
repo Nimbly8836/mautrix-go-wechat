@@ -40,11 +40,12 @@ type Server struct {
 	accounts    *accountStore
 	contacts    *contactStore
 
-	mu         sync.Mutex
-	rooms      map[id.RoomID]bool
-	remoteRun  bool
-	remoteCtx  context.Context
-	remoteStop context.CancelFunc
+	mu            sync.Mutex
+	rooms         map[id.RoomID]bool
+	messageEvents map[string]id.EventID
+	remoteRun     bool
+	remoteCtx     context.Context
+	remoteStop    context.CancelFunc
 }
 
 // New creates the appservice and remote connector from config + registration.
@@ -69,7 +70,7 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	as.Log = zerolog.New(os.Stdout).With().Timestamp().Str("component", "appservice").Logger()
 	as.QueryHandler = queryHandler{bot: id.NewUserID(reg.SenderLocalpart, cfg.Homeserver.Domain), domain: cfg.Homeserver.Domain, prefix: reg.ID + "_"}
 
-	s := &Server{cfg: cfg, as: as, apiCfg: apiCfg, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}}
+	s := &Server{cfg: cfg, as: as, apiCfg: apiCfg, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}, messageEvents: map[string]id.EventID{}}
 	if s.sessionFile == "" {
 		s.sessionFile = "/data/session.json"
 	}
@@ -144,6 +145,12 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read request body", http.StatusBadRequest)
 		return
 	}
+	if len(payload) == 0 {
+		log.Printf("webhook request ignored empty body: path=%s", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
 	log.Printf("webhook request: path=%s bytes=%d", r.URL.Path, len(payload))
 	if err := receiver.HandleWebhook(r.Context(), payload); err != nil {
 		log.Printf("webhook request failed: path=%s bytes=%d error=%v", r.URL.Path, len(payload), err)
@@ -199,19 +206,26 @@ func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 		return
 	}
 
-	if evt.Type != event.EventMessage || evt.RoomID == "" {
+	if evt.Type != event.EventMessage && evt.Type != event.EventSticker || evt.RoomID == "" {
 		return
 	}
 	msg := evt.Content.AsMessage()
-	log.Printf("matrix message: room=%s sender=%s msgtype=%s body=%q", evt.RoomID, evt.Sender, msg.MsgType, msg.Body)
+	log.Printf("matrix message: room=%s sender=%s eventtype=%s msgtype=%s body=%q", evt.RoomID, evt.Sender, evt.Type.String(), msg.MsgType, msg.Body)
+	if rec, ok := s.portals.byRoom(evt.RoomID); ok {
+		if evt.Type == event.EventSticker || msg.MsgType.IsMedia() {
+			s.handlePortalMediaMessage(ctx, rec, evt.Sender, msg, evt.Type)
+			return
+		}
+		if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
+			return
+		}
+		s.handlePortalMessage(ctx, rec, evt.Sender, strings.TrimSpace(msg.Body))
+		return
+	}
 	if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
 		return
 	}
 	body := strings.TrimSpace(msg.Body)
-	if rec, ok := s.portals.byRoom(evt.RoomID); ok {
-		s.handlePortalMessage(ctx, rec, evt.Sender, body)
-		return
-	}
 	s.addRoom(evt.RoomID)
 	s.handleCommand(ctx, evt.RoomID, evt.Sender, body)
 }
@@ -317,10 +331,72 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 		client = s.ensurePuppetJoined(ctx, sender, rec.RoomID)
 	}
 	content := matrixContentFromRemote(m)
-	_, err := client.SendMessageEvent(ctx, rec.RoomID, event.EventMessage, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
+	eventType := matrixEventTypeFromRemote(m)
+	if m.Media != nil && len(m.Media.Data) > 0 && content.MsgType.IsMedia() {
+		mimeType := m.Media.MimeType
+		if mimeType == "" {
+			mimeType = http.DetectContentType(m.Media.Data)
+		}
+		fileName := m.Media.FileName
+		if fileName == "" {
+			fileName = "wechat-media"
+		}
+		resp, err := s.as.BotIntent().UploadBytesWithName(ctx, m.Media.Data, mimeType, fileName)
+		if err != nil {
+			log.Printf("failed to upload remote media %s to Matrix room %s: %v", m.ID, rec.RoomID, err)
+			content = &event.MessageEventContent{MsgType: event.MsgText, Body: fmt.Sprintf("%s（媒体上传失败: %v）", m.Text, err)}
+			eventType = event.EventMessage
+		} else {
+			content.URL = resp.ContentURI.CUString()
+			content.Info = &event.FileInfo{MimeType: mimeType, Size: len(m.Media.Data), Width: intFromExtra(m.Extra, "width"), Height: intFromExtra(m.Extra, "height")}
+		}
+	}
+	resp, err := client.SendMessageEvent(ctx, rec.RoomID, eventType, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
 	if err != nil {
 		log.Printf("failed to bridge remote msg %s to %s: %v", m.ID, rec.RoomID, err)
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("桥接消息失败: %v", err))
+		return
+	}
+	if m.ID != "" && resp != nil && resp.EventID != "" {
+		s.rememberMessageEvent(m.Chat, m.ID, resp.EventID)
+	}
+}
+
+func messageEventKey(chat remoteapi.ChatID, msg remoteapi.MessageID) string {
+	return string(chat) + "\x00" + string(msg)
+}
+
+func (s *Server) rememberMessageEvent(chat remoteapi.ChatID, msg remoteapi.MessageID, eventID id.EventID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.messageEvents == nil {
+		s.messageEvents = map[string]id.EventID{}
+	}
+	s.messageEvents[messageEventKey(chat, msg)] = eventID
+	if len(s.messageEvents) > 5000 {
+		s.messageEvents = map[string]id.EventID{messageEventKey(chat, msg): eventID}
+	}
+}
+
+func (s *Server) getMessageEvent(chat remoteapi.ChatID, msg remoteapi.MessageID) id.EventID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.messageEvents[messageEventKey(chat, msg)]
+}
+
+func intFromExtra(extra map[string]any, key string) int {
+	if extra == nil {
+		return 0
+	}
+	switch v := extra[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
 	}
 }
 
@@ -344,7 +420,29 @@ func (s *Server) addPendingPortal(ctx context.Context, m *remoteapi.InboundMessa
 }
 func (s *Server) OnRedaction(ctx context.Context, r *remoteapi.Redaction) {
 	if rec, ok := s.portals.get(r.Chat); ok {
-		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("消息被撤回: %s", r.Target))
+		body := strings.TrimSpace(r.Text)
+		if body == "" {
+			who := string(r.By)
+			if display := s.contactDisplayName(ctx, r.By); display != "" {
+				who = display
+			}
+			if who == "" {
+				who = "有人"
+			}
+			body = fmt.Sprintf("%s 撤回了一条消息", who)
+		}
+		if r.Target != "" {
+			if target := s.getMessageEvent(r.Chat, r.Target); target != "" {
+				content := &event.MessageEventContent{MsgType: event.MsgNotice, Body: body}
+				content.RelatesTo = (&event.RelatesTo{}).SetReplyTo(target)
+				if _, err := s.as.BotIntent().SendMessageEvent(ctx, rec.RoomID, event.EventMessage, content); err != nil {
+					log.Printf("failed to send revoke reply to %s: %v", rec.RoomID, err)
+				}
+				return
+			}
+			body = fmt.Sprintf("%s（消息ID: %s）", body, r.Target)
+		}
+		s.sendPortalNotice(ctx, rec.RoomID, body)
 	}
 }
 func (s *Server) OnReceipt(context.Context, *remoteapi.Receipt)       {}

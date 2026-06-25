@@ -100,6 +100,31 @@ func TestHandleWebhookStripsLastMessageOpsAroundText(t *testing.T) {
 	}
 }
 
+func TestHandleWebhookParsesRevokeMessage(t *testing.T) {
+	c := &Client{events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
+	payload := []byte(`{"MsgID":10,"NewMsgID":11,"MsgType":10002,"ContentText":"<sysmsg type=\"revokemsg\"><revokemsg><session>wxid_friend</session><oldmsgid>123</oldmsgid><msgid>456</msgid><replacemsg><![CDATA[\"Alice\" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
+	if err := c.HandleWebhook(context.Background(), payload); err != nil {
+		t.Fatalf("HandleWebhook returned error: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		if ev.Kind != remoteapi.EventRedaction || ev.Redaction == nil {
+			t.Fatalf("expected redaction event, got %#v", ev)
+		}
+		if ev.Redaction.Chat != "wxid_friend" || ev.Redaction.By != "wxid_friend" {
+			t.Fatalf("unexpected redaction source: %#v", ev.Redaction)
+		}
+		if ev.Redaction.Target != "456" {
+			t.Fatalf("expected target msgid 456, got %q", ev.Redaction.Target)
+		}
+		if ev.Redaction.Text != `"Alice" 撤回了一条消息` {
+			t.Fatalf("expected replacemsg text, got %q", ev.Redaction.Text)
+		}
+	default:
+		t.Fatalf("expected webhook to emit redaction")
+	}
+}
+
 func TestHandleWebhookDeduplicatesSameMessage(t *testing.T) {
 	c := &Client{events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
 	payload := []byte(`{"Code":0,"Success":true,"Data":{"AddMsgs":[{"MsgID":1,"NewMsgID":2,"MsgType":1,"ContentText":"dup","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}],"Messages":[{"MsgID":1,"NewMsgID":2,"MsgType":1,"ContentText":"dup","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}]}}`)
