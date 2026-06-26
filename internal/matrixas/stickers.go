@@ -132,6 +132,14 @@ func (s *Server) resolveStickerMXC(ctx context.Context, source string) (id.Conte
 	return "", fmt.Errorf("只支持 mxc://、http:// 或 https:// 图片 URL")
 }
 
+func imagePackAccountDataTypes() []string {
+	return []string{event.AccountDataImagePackRooms.Type, event.AccountDataUnstableImagePackRooms.Type}
+}
+
+func imagePackStateEventTypes() []event.Type {
+	return []event.Type{event.StateImagePack, event.StateUnstableImagePack}
+}
+
 func addImagePackRoomSource(content *event.ImagePackRoomsEventContent, room id.RoomID, stateKey string) {
 	if content.Rooms == nil {
 		content.Rooms = map[id.RoomID]map[string]struct{}{}
@@ -176,13 +184,17 @@ func (s *Server) ensureUserSeesImagePackRoom(ctx context.Context, user id.UserID
 		log.Printf("cannot register image pack room for %s: %v", user, err)
 		return
 	}
-	var content event.ImagePackRoomsEventContent
-	if err := client.GetAccountData(ctx, event.AccountDataImagePackRooms.Type, &content); err != nil {
-		log.Printf("creating image pack rooms account data for %s: %v", user, err)
-	}
-	addImagePackRoomSource(&content, room, stateKey)
-	if err := client.SetAccountData(ctx, event.AccountDataImagePackRooms.Type, &content); err != nil {
-		log.Printf("failed to register image pack room for %s room=%s state_key=%s: %v", user, room, stateKey, err)
+	for _, eventType := range imagePackAccountDataTypes() {
+		var content event.ImagePackRoomsEventContent
+		if err := client.GetAccountData(ctx, eventType, &content); err != nil {
+			log.Printf("creating image pack rooms account data type=%s for %s: %v", eventType, user, err)
+		}
+		addImagePackRoomSource(&content, room, stateKey)
+		if err := client.SetAccountData(ctx, eventType, &content); err != nil {
+			log.Printf("failed to register image pack room type=%s for %s room=%s state_key=%s: %v", eventType, user, room, stateKey, err)
+		} else {
+			log.Printf("registered image pack room type=%s for %s room=%s state_key=%s", eventType, user, room, stateKey)
+		}
 	}
 }
 
@@ -203,8 +215,10 @@ func (s *Server) addStickerToAccountSpace(ctx context.Context, account remoteapi
 	metadata := buildWechatStickerPackContent(account, nil).Metadata
 	content.Metadata = metadata
 	content.Images[sticker.Shortcode] = &event.ImagePackImage{URL: sticker.URL, Body: sticker.Body}
-	if _, err := s.as.BotIntent().SendStateEvent(ctx, space, event.StateImagePack, stateKey, content); err != nil {
-		return 0, err
+	for _, eventType := range imagePackStateEventTypes() {
+		if _, err := s.as.BotIntent().SendStateEvent(ctx, space, eventType, stateKey, content); err != nil {
+			return 0, err
+		}
 	}
 	return len(content.Images), nil
 }

@@ -18,6 +18,20 @@ func TestAddImagePackRoomSourceAddsStateKey(t *testing.T) {
 	}
 }
 
+func TestImagePackAccountDataTypesIncludesStableAndUnstable(t *testing.T) {
+	types := imagePackAccountDataTypes()
+	if len(types) != 2 || types[0] != "m.image_pack.rooms" || types[1] != "im.ponies.emote_rooms" {
+		t.Fatalf("unexpected account data types: %#v", types)
+	}
+}
+
+func TestImagePackStateEventTypesIncludesStableAndUnstable(t *testing.T) {
+	types := imagePackStateEventTypes()
+	if len(types) != 2 || types[0].Type != "m.room.image_pack" || types[1].Type != "im.ponies.room_emotes" {
+		t.Fatalf("unexpected state event types: %#v", types)
+	}
+}
+
 func TestPersonalStickerAccessTokenForUser(t *testing.T) {
 	s := &Server{cfg: &config.Config{Bridge: config.Bridge{PersonalStickerUserID: "@leat:example.com", PersonalStickerAccessToken: "token"}}}
 	if got := s.personalStickerAccessTokenForUser("@leat:example.com"); got != "token" {
