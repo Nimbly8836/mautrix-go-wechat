@@ -3,6 +3,7 @@ package wechat
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -153,16 +154,26 @@ func TestHandleWebhookFileXMLDownloadsFileMedia(t *testing.T) {
 	fileBytes := []byte("zip-bytes")
 	var requested bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/Tools/DownloadFileMessage" {
+		if r.URL.Path != "/Tools/DownloadFile" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		requested = true
+		var req downloadFileReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode download request: %v", err)
+		}
+		if req.Wxid != "wxid_self" || req.AppID != "app-123" || req.AttachId != "attach-id" || req.DataLen != 9 || req.UserName != "wxid_friend" {
+			t.Fatalf("unexpected download request: %#v", req)
+		}
+		if req.Section.StartPos != 0 || req.Section.DataLen != 9 {
+			t.Fatalf("unexpected section: %#v", req.Section)
+		}
 		_, _ = w.Write([]byte(`{"Code":0,"Success":true,"Data":"` + base64.StdEncoding.EncodeToString(fileBytes) + `"}`))
 	}))
 	defer server.Close()
 
 	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
-	fileXML := `<msg><appmsg><type>6</type><title>xcodemap-idea-1.26.2.final.signed.zip</title><fileext>zip</fileext><appattach><totallen>9</totallen><attachid>attach-id</attachid></appattach></appmsg></msg>`
+	fileXML := `<msg><appmsg appid="app-123"><type>6</type><title>xcodemap-idea-1.26.2.final.signed.zip</title><fileext>zip</fileext><appattach><totallen>9</totallen><attachid>attach-id</attachid></appattach></appmsg><fromusername>wxid_friend</fromusername></msg>`
 	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":49,"ContentText":` + strconv.Quote(fileXML) + `,"Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
 	if err := c.HandleWebhook(context.Background(), payload); err != nil {
 		t.Fatalf("HandleWebhook returned error: %v", err)

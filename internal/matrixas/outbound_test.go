@@ -22,6 +22,20 @@ func TestPortalMediaToRemoteMessageSendsMatrixImageAsWechatImage(t *testing.T) {
 	}
 }
 
+func TestPortalMediaToRemoteMessageSendsMatrixFileAsWechatFile(t *testing.T) {
+	data := []byte("zip-bytes")
+	msg, err := portalMediaToRemoteMessage(data, "application/zip", "archive.zip", "archive.zip", event.MsgFile, event.EventMessage)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if msg.Type != remoteapi.MsgFile {
+		t.Fatalf("expected Matrix file to become WeChat file, got %v", msg.Type)
+	}
+	if msg.Media == nil || string(msg.Media.Data) != string(data) || msg.Media.MimeType != "application/zip" || msg.Media.FileName != "archive.zip" {
+		t.Fatalf("unexpected media: %#v", msg.Media)
+	}
+}
+
 func TestPortalMediaToRemoteMessageRequiresGIFOnlyForStickers(t *testing.T) {
 	_, err := portalMediaToRemoteMessage([]byte{0xff, 0xd8}, "image/jpeg", "sticker.jpg", "sticker", event.CapMsgSticker, event.EventSticker)
 	if err == nil {

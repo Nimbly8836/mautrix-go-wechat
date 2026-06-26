@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"strings"
 	"sync"
@@ -522,6 +523,35 @@ func (c *Client) SendMessage(ctx context.Context, chat remoteapi.ChatID, msg rem
 		}
 		return msgID(r), nil
 
+	case remoteapi.MsgFile:
+		if msg.Media == nil || len(msg.Media.Data) == 0 {
+			return "", fmt.Errorf("wechat: file message without media")
+		}
+		fileName := strings.TrimSpace(msg.Media.FileName)
+		if fileName == "" {
+			fileName = strings.TrimSpace(msg.Text)
+		}
+		if fileName == "" {
+			fileName = "file"
+		}
+		uploaded, err := c.uploadFileBinary(ctx, wxid, fileName, msg.Media.Data)
+		if err != nil {
+			return "", err
+		}
+		totalLen := uploaded.TotalLen
+		if totalLen == 0 {
+			totalLen = msg.Media.Size
+		}
+		if totalLen == 0 {
+			totalLen = int64(len(msg.Media.Data))
+		}
+		req := sendAppReq{Wxid: wxid, ToWxid: to, Type: 6, Xml: buildFileAppXML(fileName, uploaded.MediaID, totalLen)}
+		var r sendResp
+		if err := c.t.post(ctx, "/Msg/SendApp", req, nil, &r); err != nil {
+			return "", err
+		}
+		return msgID(r), nil
+
 	case remoteapi.MsgEmoji:
 		if msg.Media == nil || len(msg.Media.Data) == 0 {
 			return "", fmt.Errorf("wechat: emoji message without media")
@@ -556,6 +586,30 @@ func (c *Client) SendMessage(ctx context.Context, chat remoteapi.ChatID, msg rem
 		}
 		return msgID(r), nil
 	}
+}
+
+func (c *Client) uploadFileBinary(ctx context.Context, wxid, fileName string, data []byte) (uploadFileResp, error) {
+	var uploaded uploadFileResp
+	if err := c.t.postMultipartFile(ctx, "/Tools/UploadFileBinary", "file", fileName, data, map[string]string{"wxid": wxid}, &uploaded); err != nil {
+		return uploadFileResp{}, err
+	}
+	if uploaded.MediaID == "" {
+		return uploadFileResp{}, fmt.Errorf("wechat: upload file response missing mediaId")
+	}
+	return uploaded, nil
+}
+
+func buildFileAppXML(fileName, mediaID string, totalLen int64) string {
+	return fmt.Sprintf("<appmsg appid='' sdkver=''><title>%s</title><type>6</type><appattach><totallen>%d</totallen><attachid>%s</attachid><fileext>%s</fileext></appattach></appmsg>",
+		html.EscapeString(fileName), totalLen, html.EscapeString(mediaID), html.EscapeString(fileExt(fileName)))
+}
+
+func fileExt(fileName string) string {
+	idx := strings.LastIndex(fileName, ".")
+	if idx < 0 || idx == len(fileName)-1 {
+		return ""
+	}
+	return fileName[idx+1:]
 }
 
 func (c *Client) RedactMessage(ctx context.Context, chat remoteapi.ChatID, id remoteapi.MessageID) error {

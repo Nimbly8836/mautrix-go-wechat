@@ -18,7 +18,7 @@ func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord,
 		s.sendPortalNotice(ctx, rec.RoomID, "你没有使用此 bridge 的权限。")
 		return
 	}
-	if eventType != event.EventSticker && msg.MsgType != event.MsgImage && msg.MsgType != event.CapMsgSticker {
+	if eventType != event.EventSticker && msg.MsgType != event.MsgImage && msg.MsgType != event.MsgFile && msg.MsgType != event.CapMsgSticker {
 		return
 	}
 	if msg.URL == "" {
@@ -77,6 +77,19 @@ func portalMediaToRemoteMessage(data []byte, mimeType, fileName, body string, ms
 		}
 		return remoteapi.OutgoingMessage{
 			Type:  remoteapi.MsgImage,
+			Text:  body,
+			Media: &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))},
+		}, nil
+	}
+	if msgType == event.MsgFile {
+		if body == "" {
+			body = fileName
+		}
+		if body == "" {
+			body = "[file]"
+		}
+		return remoteapi.OutgoingMessage{
+			Type:  remoteapi.MsgFile,
 			Text:  body,
 			Media: &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))},
 		}, nil

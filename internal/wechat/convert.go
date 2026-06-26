@@ -194,31 +194,79 @@ func (c *Client) attachFileMedia(ctx context.Context, base *remoteapi.InboundMes
 	if c == nil || c.t == nil || base == nil {
 		return
 	}
-	data, mimeType, err := c.downloadFileMessage(ctx, req)
+	payload := parseFileAttachmentPayload(base.Text, req.SourceXml, req.SenderUserName, req.Talker)
+	data, mimeType, err := c.downloadFile(ctx, payload)
 	if err != nil {
 		log.Printf("failed to download WeChat file %s: %v", base.ID, err)
 		return
 	}
-	fileName := fileNameFromFileMessage(base.Text, req.SourceXml)
+	fileName := payload.Title
+	if fileName == "" {
+		fileName = fileNameFromFileMessage(base.Text, req.SourceXml)
+	}
 	if mimeType == "" {
 		mimeType = mimeTypeForFile(fileName, data)
 	}
 	base.Media = &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))}
 }
 
-func (c *Client) downloadFileMessage(ctx context.Context, req fileMessageDownloadReq) ([]byte, string, error) {
+type fileAttachmentPayload struct {
+	Title    string
+	AppID    string
+	AttachID string
+	TotalLen int64
+	FileExt  string
+	UserName string
+}
+
+func parseFileAttachmentPayload(text, sourceXML, sender, talker string) fileAttachmentPayload {
+	payload := fileAttachmentPayload{
+		Title:    fileNameFromFileMessage(text, sourceXML),
+		AppID:    firstNonEmpty(xmlAttr(sourceXML, "appid"), xmlTag(sourceXML, "appid")),
+		AttachID: firstNonEmpty(xmlTag(sourceXML, "attachid"), xmlTag(sourceXML, "cdnattachid")),
+		TotalLen: int64Value(xmlTag(sourceXML, "totallen")),
+		FileExt:  xmlTag(sourceXML, "fileext"),
+		UserName: firstNonEmpty(xmlTag(sourceXML, "fromusername"), xmlTag(sourceXML, "fromuser"), sender, talker),
+	}
+	return payload
+}
+
+func (c *Client) downloadFile(ctx context.Context, payload fileAttachmentPayload) ([]byte, string, error) {
 	c.mu.RLock()
 	wxid := c.wxid
 	c.mu.RUnlock()
 	if wxid == "" {
 		return nil, "", fmt.Errorf("missing wxid")
 	}
-	req.Wxid = wxid
-	env, err := c.t.postEnvelope(ctx, "/Tools/DownloadFileMessage", req, nil)
-	if err != nil {
-		return nil, "", err
+	if payload.AttachID == "" || payload.TotalLen <= 0 {
+		return nil, "", fmt.Errorf("missing file attach_id or total length")
 	}
-	return mediaBytesFromEnvelope(env)
+	const chunkSize int64 = 65536
+	var out []byte
+	for start := int64(0); start < payload.TotalLen; start += chunkSize {
+		n := chunkSize
+		if remaining := payload.TotalLen - start; remaining < n {
+			n = remaining
+		}
+		req := downloadFileReq{
+			Wxid:     wxid,
+			AppID:    payload.AppID,
+			AttachId: payload.AttachID,
+			DataLen:  payload.TotalLen,
+			UserName: payload.UserName,
+			Section:  downloadSectionReq{StartPos: start, DataLen: n},
+		}
+		env, err := c.t.postEnvelope(ctx, "/Tools/DownloadFile", req, nil)
+		if err != nil {
+			return nil, "", err
+		}
+		chunk, _, err := mediaBytesFromEnvelope(env)
+		if err != nil {
+			return nil, "", err
+		}
+		out = append(out, chunk...)
+	}
+	return out, mimeTypeForFile(payload.Title, out), nil
 }
 
 func fileNameFromFileMessage(text, sourceXML string) string {

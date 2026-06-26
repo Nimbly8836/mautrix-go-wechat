@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -111,6 +112,57 @@ func (t *transport) postEnvelope(ctx context.Context, path string, body any, que
 		return nil, &APIError{Code: env.Code, Message: env.Message, Path: path}
 	}
 	return &env, nil
+}
+
+func (t *transport) postMultipartFile(ctx context.Context, path, fieldName, fileName string, data []byte, fields map[string]string, out any) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for key, value := range fields {
+		if err := mw.WriteField(key, value); err != nil {
+			return fmt.Errorf("multipart field %s: %w", key, err)
+		}
+	}
+	part, err := mw.CreateFormFile(fieldName, fileName)
+	if err != nil {
+		return fmt.Errorf("multipart file %s: %w", fieldName, err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return fmt.Errorf("write multipart file %s: %w", fieldName, err)
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.base+path, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := t.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("http %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("http %s: status %d: %s", path, resp.StatusCode, snippet(raw))
+	}
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("decode envelope %s: %w (%s)", path, err, snippet(raw))
+	}
+	if !env.Success {
+		return &APIError{Code: env.Code, Message: env.Message, Path: path}
+	}
+	if out != nil && len(env.Data) > 0 {
+		if err := json.Unmarshal(env.Data, out); err != nil {
+			return fmt.Errorf("decode data %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func snippet(b []byte) string {

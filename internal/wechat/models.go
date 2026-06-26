@@ -1,6 +1,9 @@
 package wechat
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strconv"
+)
 
 // API request/response structs, mirroring the subset of swagger.json the
 // bridge uses. Field names match the WeChat API JSON exactly.
@@ -64,6 +67,70 @@ type uploadImgReq struct {
 	Wxid   string `json:"Wxid"`
 	ToWxid string `json:"ToWxid"`
 	Base64 string `json:"Base64"` // base64 image bytes
+}
+
+type sendAppReq struct {
+	Wxid   string `json:"Wxid"`
+	ToWxid string `json:"ToWxid"`
+	Type   int    `json:"Type"`
+	Xml    string `json:"Xml"`
+}
+
+type uploadFileResp struct {
+	MediaID  string
+	TotalLen int64
+}
+
+func (r *uploadFileResp) UnmarshalJSON(data []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	r.MediaID = firstString(raw, "mediaId", "MediaId", "media_id", "MediaID", "AttachId", "attachid")
+	r.TotalLen = int64Value(firstValue(raw, "totalLen", "TotalLen", "total_len", "DataLen", "length"))
+	return nil
+}
+
+func firstValue(m map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if v, ok := m[key]; ok {
+			return v
+		}
+	}
+	return nil
+}
+
+func int64Value(v any) int64 {
+	switch val := v.(type) {
+	case int:
+		return int64(val)
+	case int64:
+		return val
+	case float64:
+		return int64(val)
+	case json.Number:
+		i, _ := val.Int64()
+		return i
+	case string:
+		i, _ := strconv.ParseInt(val, 10, 64)
+		return i
+	default:
+		return 0
+	}
+}
+
+type downloadSectionReq struct {
+	StartPos int64 `json:"StartPos"`
+	DataLen  int64 `json:"DataLen"`
+}
+
+type downloadFileReq struct {
+	Wxid     string             `json:"Wxid,omitempty"`
+	AppID    string             `json:"AppID,omitempty"`
+	AttachId string             `json:"AttachId"`
+	DataLen  int64              `json:"DataLen"`
+	Section  downloadSectionReq `json:"Section"`
+	UserName string             `json:"UserName,omitempty"`
 }
 
 type cdnDownloadImageReq struct {
