@@ -131,6 +131,35 @@ func (s *Server) resolveStickerMXC(ctx context.Context, source string) (id.Conte
 	return "", fmt.Errorf("只支持 mxc://、http:// 或 https:// 图片 URL")
 }
 
+func addImagePackRoomSource(content *event.ImagePackRoomsEventContent, room id.RoomID, stateKey string) {
+	if content.Rooms == nil {
+		content.Rooms = map[id.RoomID]map[string]struct{}{}
+	}
+	if content.Rooms[room] == nil {
+		content.Rooms[room] = map[string]struct{}{}
+	}
+	content.Rooms[room][stateKey] = struct{}{}
+}
+
+func (s *Server) ensureUserSeesImagePackRoom(ctx context.Context, user id.UserID, room id.RoomID, stateKey string) {
+	if user == "" || room == "" || stateKey == "" || s == nil || s.as == nil {
+		return
+	}
+	intent := s.as.Intent(user)
+	if intent == nil || intent.Client == nil {
+		log.Printf("cannot register image pack room for %s: no Matrix intent", user)
+		return
+	}
+	var content event.ImagePackRoomsEventContent
+	if err := intent.Client.GetAccountData(ctx, event.AccountDataImagePackRooms.Type, &content); err != nil {
+		log.Printf("creating image pack rooms account data for %s: %v", user, err)
+	}
+	addImagePackRoomSource(&content, room, stateKey)
+	if err := intent.Client.SetAccountData(ctx, event.AccountDataImagePackRooms.Type, &content); err != nil {
+		log.Printf("failed to register image pack room for %s room=%s state_key=%s: %v", user, room, stateKey, err)
+	}
+}
+
 func (s *Server) addStickerToAccountSpace(ctx context.Context, account remoteapi.UserID, space id.RoomID, sticker wechatStickerImage) (int, error) {
 	stateKey := wechatStickerPackStateKey(account)
 	content := buildWechatStickerPackContent(account, nil)

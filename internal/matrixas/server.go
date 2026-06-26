@@ -393,8 +393,13 @@ func (s *Server) addRemoteEmojiToStickerPacks(ctx context.Context, portal id.Roo
 		log.Printf("failed to ensure account Space for WeChat emoji sticker %s account=%s: %v", m.ID, account, err)
 		return
 	}
+	stateKey := wechatStickerPackStateKey(account)
+	owner := s.portals.owner()
 	for _, room := range stickerPackTargetRooms(space, portal) {
 		count, err := s.addStickerToAccountSpace(ctx, account, room, sticker)
+		if owner != "" {
+			s.ensureUserSeesImagePackRoom(ctx, owner, room, stateKey)
+		}
 		if err != nil {
 			log.Printf("failed to add WeChat emoji sticker %s to sticker pack account=%s room=%s: %v", m.ID, account, room, err)
 			continue
