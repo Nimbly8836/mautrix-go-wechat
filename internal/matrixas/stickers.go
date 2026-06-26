@@ -150,6 +150,19 @@ func addImagePackRoomSource(content *event.ImagePackRoomsEventContent, room id.R
 	content.Rooms[room][stateKey] = struct{}{}
 }
 
+func setSingleImagePackRoomSource(content *event.ImagePackRoomsEventContent, room id.RoomID, stateKey string) {
+	if content.Rooms == nil {
+		content.Rooms = map[id.RoomID]map[string]struct{}{}
+	}
+	for existingRoom, keys := range content.Rooms {
+		delete(keys, stateKey)
+		if len(keys) == 0 {
+			delete(content.Rooms, existingRoom)
+		}
+	}
+	addImagePackRoomSource(content, room, stateKey)
+}
+
 func (s *Server) personalStickerAccessTokenForUser(user id.UserID) string {
 	if s == nil || s.cfg == nil || s.cfg.Bridge.PersonalStickerAccessToken == "" {
 		return ""
@@ -189,7 +202,7 @@ func (s *Server) ensureUserSeesImagePackRoom(ctx context.Context, user id.UserID
 		if err := client.GetAccountData(ctx, eventType, &content); err != nil {
 			log.Printf("creating image pack rooms account data type=%s for %s: %v", eventType, user, err)
 		}
-		addImagePackRoomSource(&content, room, stateKey)
+		setSingleImagePackRoomSource(&content, room, stateKey)
 		if err := client.SetAccountData(ctx, eventType, &content); err != nil {
 			log.Printf("failed to register image pack room type=%s for %s room=%s state_key=%s: %v", eventType, user, room, stateKey, err)
 		} else {

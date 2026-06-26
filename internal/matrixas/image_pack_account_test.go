@@ -42,6 +42,23 @@ func TestPersonalStickerAccessTokenForUser(t *testing.T) {
 	}
 }
 
+func TestSetSingleImagePackRoomSourceRemovesDuplicatePackSources(t *testing.T) {
+	content := event.ImagePackRoomsEventContent{Rooms: map[id.RoomID]map[string]struct{}{
+		id.RoomID("!space:example.com"):  {"other": {}},
+		id.RoomID("!portal:example.com"): {"wechat.wxid_self": {}},
+	}}
+	setSingleImagePackRoomSource(&content, id.RoomID("!space:example.com"), "wechat.wxid_self")
+	if _, ok := content.Rooms[id.RoomID("!portal:example.com")]["wechat.wxid_self"]; ok {
+		t.Fatalf("expected duplicate portal source to be removed, got %#v", content.Rooms)
+	}
+	if _, ok := content.Rooms[id.RoomID("!space:example.com")]["wechat.wxid_self"]; !ok {
+		t.Fatalf("expected root space source, got %#v", content.Rooms)
+	}
+	if _, ok := content.Rooms[id.RoomID("!space:example.com")]["other"]; !ok {
+		t.Fatalf("expected unrelated source to be preserved, got %#v", content.Rooms)
+	}
+}
+
 func TestAddImagePackRoomSourcePreservesExisting(t *testing.T) {
 	content := event.ImagePackRoomsEventContent{Rooms: map[id.RoomID]map[string]struct{}{
 		id.RoomID("!existing:example.com"): {"old": {}},

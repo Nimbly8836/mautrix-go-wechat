@@ -41,6 +41,7 @@ type Server struct {
 	contacts    *contactStore
 
 	mu             sync.Mutex
+	spaceMu        sync.Mutex
 	rooms          map[id.RoomID]bool
 	messageEvents  map[string]id.EventID
 	remoteRun      bool
@@ -397,7 +398,7 @@ func (s *Server) addRemoteEmojiToStickerPacks(ctx context.Context, portal id.Roo
 	owner := s.portals.owner()
 	for _, room := range stickerPackTargetRooms(space, portal) {
 		count, err := s.addStickerToAccountSpace(ctx, account, room, sticker)
-		if owner != "" {
+		if owner != "" && room == space {
 			s.ensureUserSeesImagePackRoom(ctx, owner, room, stateKey)
 		}
 		if err != nil {

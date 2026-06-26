@@ -35,12 +35,18 @@ var accountSpaceFolders = []accountSpaceFolder{
 // account. The account space contains child spaces (folders) for contacts,
 // official accounts and group chats.
 func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserID) (id.RoomID, error) {
+	s.spaceMu.Lock()
+	defer s.spaceMu.Unlock()
+	return s.ensureAccountSpaceLocked(ctx, account)
+}
+
+func (s *Server) ensureAccountSpaceLocked(ctx context.Context, account remoteapi.UserID) (id.RoomID, error) {
 	if account == "" {
 		return "", fmt.Errorf("empty account id")
 	}
 	if acc, ok := s.accounts.get(account); ok && acc.SpaceRoom != "" {
 		space := id.RoomID(acc.SpaceRoom)
-		if _, err := s.ensureAccountSpaceFolders(ctx, account, space); err != nil {
+		if _, err := s.ensureAccountSpaceFoldersLocked(ctx, account, space); err != nil {
 			return "", err
 		}
 		if owner := s.portals.owner(); owner != "" {
@@ -71,7 +77,7 @@ func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserI
 	}
 	log.Printf("created account space: account=%s room=%s", account, resp.RoomID)
 	s.notifyManagement(ctx, fmt.Sprintf("已创建微信账号 Space:\n- account: %s\n- space: %s", account, resp.RoomID))
-	if _, err := s.ensureAccountSpaceFolders(ctx, account, resp.RoomID); err != nil {
+	if _, err := s.ensureAccountSpaceFoldersLocked(ctx, account, resp.RoomID); err != nil {
 		return resp.RoomID, err
 	}
 	return resp.RoomID, nil
@@ -131,11 +137,13 @@ func (s *Server) ensureRoomAdminPower(ctx context.Context, user id.UserID, room 
 }
 
 func (s *Server) ensureAccountSpaceVisibleTo(ctx context.Context, account remoteapi.UserID, user id.UserID) (id.RoomID, map[string]id.RoomID, error) {
-	space, err := s.ensureAccountSpace(ctx, account)
+	s.spaceMu.Lock()
+	defer s.spaceMu.Unlock()
+	space, err := s.ensureAccountSpaceLocked(ctx, account)
 	if err != nil {
 		return "", nil, err
 	}
-	folders, err := s.ensureAccountSpaceFolders(ctx, account, space)
+	folders, err := s.ensureAccountSpaceFoldersLocked(ctx, account, space)
 	if err != nil {
 		return space, folders, err
 	}
@@ -149,6 +157,12 @@ func (s *Server) ensureAccountSpaceVisibleTo(ctx context.Context, account remote
 }
 
 func (s *Server) ensureAccountSpaceFolders(ctx context.Context, account remoteapi.UserID, parent id.RoomID) (map[string]id.RoomID, error) {
+	s.spaceMu.Lock()
+	defer s.spaceMu.Unlock()
+	return s.ensureAccountSpaceFoldersLocked(ctx, account, parent)
+}
+
+func (s *Server) ensureAccountSpaceFoldersLocked(ctx context.Context, account remoteapi.UserID, parent id.RoomID) (map[string]id.RoomID, error) {
 	out := map[string]id.RoomID{}
 	if parent == "" {
 		return out, fmt.Errorf("empty account space")
