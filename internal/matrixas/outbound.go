@@ -42,25 +42,46 @@ func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord,
 	if mimeType == "" {
 		mimeType = http.DetectContentType(data)
 	}
-	if !isGIFMedia(data, mimeType, msg.GetFileName()) {
-		s.sendPortalNotice(ctx, rec.RoomID, "发送到 WeChat 失败: 微信 emoji/sticker 只能发送 GIF。")
+	outgoing, err := portalMediaToRemoteMessage(data, mimeType, msg.GetFileName(), msg.Body, msg.MsgType, eventType)
+	if err != nil {
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
 		return
 	}
-	body := strings.TrimSpace(msg.Body)
-	if body == "" {
-		body = "[emoji]"
-	}
-	msgID, err := s.api.SendMessage(ctx, rec.ChatID, remoteapi.OutgoingMessage{
-		Type:  remoteapi.MsgEmoji,
-		Text:  body,
-		Media: &remoteapi.Media{Data: data, MimeType: "image/gif", FileName: msg.GetFileName(), Size: int64(len(data))},
-	})
+	msgID, err := s.api.SendMessage(ctx, rec.ChatID, outgoing)
 	if err != nil {
 		log.Printf("failed to send Matrix sticker to WeChat chat=%s sender=%s: %v", rec.ChatID, sender, err)
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
 		return
 	}
 	log.Printf("sent Matrix sticker to WeChat: room=%s chat=%s sender=%s msg_id=%s", rec.RoomID, rec.ChatID, sender, msgID)
+}
+
+func portalMediaToRemoteMessage(data []byte, mimeType, fileName, body string, msgType event.MessageType, eventType event.Type) (remoteapi.OutgoingMessage, error) {
+	body = strings.TrimSpace(body)
+	if eventType == event.EventSticker || msgType == event.CapMsgSticker {
+		if !isGIFMedia(data, mimeType, fileName) {
+			return remoteapi.OutgoingMessage{}, fmt.Errorf("微信 emoji/sticker 只能发送 GIF。")
+		}
+		if body == "" {
+			body = "[emoji]"
+		}
+		return remoteapi.OutgoingMessage{
+			Type:  remoteapi.MsgEmoji,
+			Text:  body,
+			Media: &remoteapi.Media{Data: data, MimeType: "image/gif", FileName: fileName, Size: int64(len(data))},
+		}, nil
+	}
+	if msgType == event.MsgImage {
+		if body == "" {
+			body = "[image]"
+		}
+		return remoteapi.OutgoingMessage{
+			Type:  remoteapi.MsgImage,
+			Text:  body,
+			Media: &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))},
+		}, nil
+	}
+	return remoteapi.OutgoingMessage{}, fmt.Errorf("暂不支持的 Matrix 媒体类型: %s", msgType)
 }
 
 func isGIFMedia(data []byte, mimeType, fileName string) bool {

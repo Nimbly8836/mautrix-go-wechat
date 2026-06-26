@@ -2,6 +2,9 @@ package wechat
 
 import (
 	"context"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 
@@ -143,6 +146,43 @@ func TestHandleWebhookDeduplicatesSameMessage(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+func TestHandleWebhookImageXMLDownloadsCDNImageMedia(t *testing.T) {
+	imageBytes := []byte{0xff, 0xd8, 0xff, 0xdb}
+	var requested bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Tools/CdnDownloadImage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		requested = true
+		_, _ = w.Write([]byte(`{"Code":0,"Success":true,"Data":"` + base64.StdEncoding.EncodeToString(imageBytes) + `"}`))
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
+	imageXML := `<?xml version="1.0"?>
+<msg>
+    <img aeskey="2c5b695f08c0921a5e58539172b3a14c" cdnmidimgurl="305f020100044b" length="398191" md5="60c9d0aff18afffb4478f948c96b661b" />
+</msg>`
+	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":3,"ContentText":` + strconv.Quote(imageXML) + `,"PushContent":"","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
+	if err := c.HandleWebhook(context.Background(), payload); err != nil {
+		t.Fatalf("HandleWebhook returned error: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		if !requested {
+			t.Fatalf("expected CDN image download request")
+		}
+		if ev.Message == nil || ev.Message.Media == nil {
+			t.Fatalf("expected image media, got %#v", ev)
+		}
+		if string(ev.Message.Media.Data) != string(imageBytes) {
+			t.Fatalf("unexpected image bytes: %#v", ev.Message.Media.Data)
+		}
+	default:
+		t.Fatalf("expected webhook to emit image message")
 	}
 }
 

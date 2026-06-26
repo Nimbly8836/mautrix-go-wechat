@@ -350,6 +350,9 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 		} else {
 			content.URL = resp.ContentURI.CUString()
 			content.Info = &event.FileInfo{MimeType: mimeType, Size: len(m.Media.Data), Width: intFromExtra(m.Extra, "width"), Height: intFromExtra(m.Extra, "height")}
+			if m.Type == remoteapi.MsgEmoji {
+				s.addRemoteEmojiToSpaceStickerPack(ctx, m, content.URL)
+			}
 		}
 	}
 	resp, err := client.SendMessageEvent(ctx, rec.RoomID, eventType, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
@@ -360,6 +363,26 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	}
 	if m.ID != "" && resp != nil && resp.EventID != "" {
 		s.rememberMessageEvent(m.Chat, m.ID, resp.EventID)
+	}
+}
+
+func (s *Server) addRemoteEmojiToSpaceStickerPack(ctx context.Context, m *remoteapi.InboundMessage, mxcURL id.ContentURIString) {
+	sticker, ok := wechatStickerImageFromRemoteEmoji(m, mxcURL)
+	if !ok {
+		return
+	}
+	account := s.currentAccountID(ctx)
+	if account == "" {
+		log.Printf("skip adding WeChat emoji sticker %s to Space pack: current account is unknown", m.ID)
+		return
+	}
+	space, err := s.ensureAccountSpace(ctx, account)
+	if err != nil {
+		log.Printf("failed to ensure account Space for WeChat emoji sticker %s account=%s: %v", m.ID, account, err)
+		return
+	}
+	if _, err := s.addStickerToAccountSpace(ctx, account, space, sticker); err != nil {
+		log.Printf("failed to add WeChat emoji sticker %s to Space pack account=%s space=%s: %v", m.ID, account, space, err)
 	}
 }
 

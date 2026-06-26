@@ -56,11 +56,24 @@ func newTransport(baseURL string) *transport {
 // post calls path with a JSON body and optional query params, unwraps the
 // envelope, and decodes Data into out (out may be nil).
 func (t *transport) post(ctx context.Context, path string, body any, query url.Values, out any) error {
+	env, err := t.postEnvelope(ctx, path, body, query)
+	if err != nil {
+		return err
+	}
+	if out != nil && len(env.Data) > 0 {
+		if err := json.Unmarshal(env.Data, out); err != nil {
+			return fmt.Errorf("decode data %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func (t *transport) postEnvelope(ctx context.Context, path string, body any, query url.Values) (*Envelope, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("marshal %s: %w", path, err)
+			return nil, fmt.Errorf("marshal %s: %w", path, err)
 		}
 		rdr = bytes.NewReader(b)
 	}
@@ -72,37 +85,32 @@ func (t *transport) post(ctx context.Context, path string, body any, query url.V
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, rdr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := t.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("http %s: %w", path, err)
+		return nil, fmt.Errorf("http %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http %s: status %d: %s", path, resp.StatusCode, snippet(raw))
+		return nil, fmt.Errorf("http %s: status %d: %s", path, resp.StatusCode, snippet(raw))
 	}
 
 	var env Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("decode envelope %s: %w (%s)", path, err, snippet(raw))
+		return nil, fmt.Errorf("decode envelope %s: %w (%s)", path, err, snippet(raw))
 	}
 	if !env.Success {
-		return &APIError{Code: env.Code, Message: env.Message, Path: path}
+		return nil, &APIError{Code: env.Code, Message: env.Message, Path: path}
 	}
-	if out != nil && len(env.Data) > 0 {
-		if err := json.Unmarshal(env.Data, out); err != nil {
-			return fmt.Errorf("decode data %s: %w", path, err)
-		}
-	}
-	return nil
+	return &env, nil
 }
 
 func snippet(b []byte) string {

@@ -2,8 +2,13 @@ package wechat
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"html"
+	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -73,6 +78,9 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		},
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	if m.MsgType == wxImage {
+		c.attachImageMedia(ctx, &base)
+	}
 	if m.MsgType == wxEmoji {
 		c.attachEmojiMedia(ctx, &base, content)
 	}
@@ -165,11 +173,111 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		}, true
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	if m.MsgType == wxImage {
+		c.attachImageMedia(ctx, &base)
+	}
 	if m.MsgType == wxEmoji {
 		c.attachEmojiMedia(ctx, &base, content)
 	}
 
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+}
+
+func (c *Client) attachImageMedia(ctx context.Context, base *remoteapi.InboundMessage) {
+	if c == nil || c.t == nil || base == nil || base.Media == nil {
+		return
+	}
+	aesKey := extraString(base.Extra, "image_aeskey")
+	fileNo := extraString(base.Extra, "image_file_no")
+	if aesKey == "" || fileNo == "" {
+		return
+	}
+	data, mimeType, err := c.downloadCDNImage(ctx, aesKey, fileNo)
+	if err != nil {
+		log.Printf("failed to download WeChat image %s file_no=%s: %v", base.ID, fileNo, err)
+		return
+	}
+	base.Media.Data = data
+	base.Media.Size = int64(len(data))
+	if mimeType != "" {
+		base.Media.MimeType = mimeType
+	}
+}
+
+func (c *Client) downloadCDNImage(ctx context.Context, aesKey, fileNo string) ([]byte, string, error) {
+	c.mu.RLock()
+	wxid := c.wxid
+	c.mu.RUnlock()
+	if wxid == "" {
+		return nil, "", fmt.Errorf("missing wxid")
+	}
+	env, err := c.t.postEnvelope(ctx, "/Tools/CdnDownloadImage", cdnDownloadImageReq{Wxid: wxid, FileAesKey: aesKey, FileNo: fileNo}, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	return mediaBytesFromEnvelope(env)
+}
+
+func mediaBytesFromEnvelope(env *Envelope) ([]byte, string, error) {
+	if env == nil {
+		return nil, "", fmt.Errorf("empty response")
+	}
+	if strings.TrimSpace(env.Data62) != "" {
+		return decodeMediaString(env.Data62)
+	}
+	return mediaBytesFromJSON(env.Data)
+}
+
+func mediaBytesFromJSON(raw json.RawMessage) ([]byte, string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, "", fmt.Errorf("response has no media data")
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return decodeMediaString(s)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		for _, key := range []string{"Base64", "Data", "ImageBase64", "FileData", "Buffer", "Content"} {
+			if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
+				return decodeMediaString(v)
+			}
+		}
+	}
+	return nil, "", fmt.Errorf("unsupported media response shape")
+}
+
+func decodeMediaString(s string) ([]byte, string, error) {
+	s = strings.TrimSpace(s)
+	mimeType := ""
+	if idx := strings.Index(s, ","); strings.HasPrefix(s, "data:") && idx > 0 {
+		meta := s[len("data:"):idx]
+		if semi := strings.Index(meta, ";"); semi >= 0 {
+			mimeType = meta[:semi]
+		} else {
+			mimeType = meta
+		}
+		s = s[idx+1:]
+	}
+	data, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, "", err
+	}
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	return data, mimeType, nil
+}
+
+func extraString(extra map[string]any, key string) string {
+	if extra == nil {
+		return ""
+	}
+	v := extra[key]
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
 }
 
 func shouldDropWebhookNoise(m rawMessage, content string) bool {

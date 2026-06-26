@@ -66,6 +66,12 @@ type uploadImgReq struct {
 	Base64 string `json:"Base64"` // base64 image bytes
 }
 
+type cdnDownloadImageReq struct {
+	Wxid       string `json:"Wxid"`
+	FileAesKey string `json:"FileAesKey"`
+	FileNo     string `json:"FileNo"`
+}
+
 // sendEmojiReq -> /Msg/SendEmoji
 // The backend only accepts GIF emoji payloads.
 type sendEmojiReq struct {

@@ -2,8 +2,10 @@ package matrixas
 
 import (
 	"fmt"
+	"strings"
 
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
@@ -46,6 +48,39 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 	default:
 		return &event.MessageEventContent{MsgType: event.MsgNotice, Body: body}
 	}
+}
+
+func wechatStickerImageFromRemoteEmoji(m *remoteapi.InboundMessage, mxcURL id.ContentURIString) (wechatStickerImage, bool) {
+	if m == nil || m.Type != remoteapi.MsgEmoji || mxcURL == "" {
+		return wechatStickerImage{}, false
+	}
+	key := remoteExtraString(m.Extra, "file_md5")
+	if key == "" {
+		key = remoteExtraString(m.Extra, "emoji_md5")
+	}
+	if key == "" {
+		key = string(m.ID)
+	}
+	shortcode := normalizeStickerShortcode("wechat_" + key)
+	if shortcode == "" {
+		return wechatStickerImage{}, false
+	}
+	body := strings.TrimSpace(m.Text)
+	if body == "" {
+		body = shortcode
+	}
+	return wechatStickerImage{Shortcode: shortcode, Body: body, URL: mxcURL}, true
+}
+
+func remoteExtraString(extra map[string]any, key string) string {
+	if extra == nil {
+		return ""
+	}
+	v := extra[key]
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
 }
 
 func remoteTypeName(t remoteapi.MessageType) string {
