@@ -125,6 +125,20 @@ func (as *accountStore) setSpaceFolder(id remoteapi.UserID, folder, roomID strin
 	as.saveLocked()
 }
 
+func (as *accountStore) replaceSpace(id remoteapi.UserID, roomID string, folders map[string]string) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	acc, ok := as.data.Accounts[string(id)]
+	if !ok {
+		acc = savedAccount{ID: id}
+	}
+	acc.SpaceRoom = roomID
+	acc.SpaceFolders = folders
+	acc.UpdatedAt = time.Now()
+	as.data.Accounts[string(id)] = acc
+	as.saveLocked()
+}
+
 func (as *accountStore) setCurrent(id remoteapi.UserID) bool {
 	as.mu.Lock()
 	defer as.mu.Unlock()

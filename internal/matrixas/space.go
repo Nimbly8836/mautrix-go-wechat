@@ -198,6 +198,27 @@ func (s *Server) ensureAccountSpaceFoldersLocked(ctx context.Context, account re
 	return out, nil
 }
 
+func (s *Server) createAccountRootSpace(ctx context.Context, account remoteapi.UserID, owner id.UserID) (id.RoomID, error) {
+	invite := []id.UserID{}
+	if owner != "" {
+		invite = append(invite, owner)
+	}
+	name := fmt.Sprintf("WeChat %s", account)
+	resp, err := s.as.BotIntent().CreateRoom(ctx, &mautrix.ReqCreateRoom{
+		Name:   name,
+		Topic:  fmt.Sprintf("WeChat bridge space for account %s", account),
+		Invite: invite,
+		Preset: "private_chat",
+		CreationContent: map[string]any{
+			"type": event.RoomTypeSpace,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("create account space for %s: %w", account, err)
+	}
+	return resp.RoomID, nil
+}
+
 func (s *Server) createAccountFolderSpace(ctx context.Context, account remoteapi.UserID, folder accountSpaceFolder) (id.RoomID, error) {
 	invite := []id.UserID{}
 	if owner := s.portals.owner(); owner != "" {
@@ -225,6 +246,56 @@ func (s *Server) attachExistingPortalsToAccountSpace(ctx context.Context, accoun
 	for _, portal := range s.portals.list() {
 		s.addPortalToAccountSpace(ctx, account, portal)
 	}
+}
+
+func (s *Server) rebuildAccountSpace(ctx context.Context, account remoteapi.UserID, owner id.UserID) (id.RoomID, map[string]id.RoomID, int, error) {
+	s.spaceMu.Lock()
+	oldAcc, _ := s.accounts.get(account)
+	oldSpace := id.RoomID(oldAcc.SpaceRoom)
+	oldFolders := map[string]id.RoomID{}
+	for key, room := range oldAcc.SpaceFolders {
+		oldFolders[key] = id.RoomID(room)
+	}
+	space, err := s.createAccountRootSpace(ctx, account, owner)
+	if err != nil {
+		s.spaceMu.Unlock()
+		return "", nil, 0, err
+	}
+	folders := map[string]id.RoomID{}
+	folderStrings := map[string]string{}
+	for _, folder := range accountSpaceFolders {
+		room, err := s.createAccountFolderSpace(ctx, account, folder)
+		if err != nil {
+			s.spaceMu.Unlock()
+			return space, folders, 0, err
+		}
+		folders[folder.Key] = room
+		folderStrings[folder.Key] = room.String()
+		s.addSpaceChild(ctx, space, room, true)
+		s.setSpaceParent(ctx, room, space, false)
+		s.ensureRoomAdminPower(ctx, owner, room)
+	}
+	s.accounts.replaceSpace(account, space.String(), folderStrings)
+	s.ensureRoomAdminPower(ctx, owner, space)
+	s.spaceMu.Unlock()
+
+	for _, folder := range oldFolders {
+		s.removeSpaceChild(ctx, oldSpace, folder)
+		s.removeSpaceParent(ctx, folder, oldSpace)
+	}
+	count := 0
+	for _, portal := range s.portals.list() {
+		s.removeSpaceChild(ctx, oldSpace, portal.RoomID)
+		s.removeSpaceParent(ctx, portal.RoomID, oldSpace)
+		for _, oldFolder := range oldFolders {
+			s.removeSpaceChild(ctx, oldFolder, portal.RoomID)
+			s.removeSpaceParent(ctx, portal.RoomID, oldFolder)
+		}
+		s.addPortalToAccountSpace(ctx, account, portal)
+		s.ensureRoomAdminPower(ctx, owner, portal.RoomID)
+		count++
+	}
+	return space, folders, count, nil
 }
 
 func (s *Server) repairAccountSpace(ctx context.Context, account remoteapi.UserID, owner id.UserID) int {

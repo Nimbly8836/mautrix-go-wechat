@@ -86,6 +86,7 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 %[1]s logout              退出 WeChat
 %[1]s space               创建/查看当前微信账号的 Matrix Space，并挂载已有 portal
 %[1]s space repair        修复 Space/分类/portal 挂载和你的管理员权限
+%[1]s space rebuild       重建账号 Space 和三个分类，并重新挂载已有 portal
 %[1]s officials status    查看公众号处理策略
 %[1]s officials mode invite|mute|reject  设置公众号策略
 %[1]s stickers add <shortcode> <mxc-or-image-url> [label]  添加 sticker 到当前微信账号 Space
@@ -205,12 +206,22 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			return
 		}
 		s.portals.setOwner(sender)
+		subcmd := strings.TrimSpace(strings.ToLower(rest))
+		if subcmd == "rebuild" || subcmd == "重建" {
+			newSpace, newFolders, fixed, err := s.rebuildAccountSpace(ctx, account, sender)
+			if err != nil {
+				s.notice(ctx, room, fmt.Sprintf("重建 Space 失败: %v", err))
+				return
+			}
+			s.notice(ctx, room, fmt.Sprintf("已重建当前账号 Space，并重新挂载已有 portal。处理 portal: %d\n新 Space: %s\n新分类:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s\n\n旧 Space/分类已从桥配置中替换，并尽量移除了旧 child/parent 关系；旧房间本身不会被 Matrix 立即删除。", fixed, newSpace, newFolders[spaceFolderContacts], newFolders[spaceFolderOfficial], newFolders[spaceFolderGroups]))
+			return
+		}
 		space, folders, err := s.ensureAccountSpaceVisibleTo(ctx, account, sender)
 		if err != nil {
 			s.notice(ctx, room, fmt.Sprintf("创建/获取 Space 失败: %v", err))
 			return
 		}
-		if strings.TrimSpace(strings.ToLower(rest)) == "repair" || strings.TrimSpace(rest) == "修复" {
+		if subcmd == "repair" || subcmd == "修复" {
 			fixed := s.repairAccountSpace(ctx, account, sender)
 			s.notice(ctx, room, fmt.Sprintf("已修复当前账号 Space/分类/portal 挂载和权限。处理 portal: %d\nSpace: %s\n分类:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s", fixed, space, folders[spaceFolderContacts], folders[spaceFolderOfficial], folders[spaceFolderGroups]))
 			return
