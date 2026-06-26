@@ -114,6 +114,39 @@ func (t *transport) postEnvelope(ctx context.Context, path string, body any, que
 	return &env, nil
 }
 
+func (t *transport) postRaw(ctx context.Context, path string, body any, query url.Values) ([]byte, string, error) {
+	var rdr io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, "", fmt.Errorf("marshal %s: %w", path, err)
+		}
+		rdr = bytes.NewReader(b)
+	}
+	u := t.base + path
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, rdr)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := t.hc.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("http %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("http %s: status %d: %s", path, resp.StatusCode, snippet(raw))
+	}
+	return raw, resp.Header.Get("Content-Type"), nil
+}
+
 func (t *transport) postMultipartFile(ctx context.Context, path, fieldName, fileName string, data []byte, fields map[string]string, out any) error {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)

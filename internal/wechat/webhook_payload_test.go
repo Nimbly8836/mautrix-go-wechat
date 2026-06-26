@@ -150,6 +150,36 @@ func TestHandleWebhookDeduplicatesSameMessage(t *testing.T) {
 	}
 }
 
+func TestHandleWebhookFileXMLDownloadsRawBinaryFileMedia(t *testing.T) {
+	fileBytes := []byte("raw-file-bytes")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Tools/DownloadFile" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(fileBytes)
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
+	fileXML := `<msg><appmsg appid="app-123"><type>6</type><title>Knife4j.txt</title><appattach><totallen>14</totallen><attachid>attach-id</attachid><fileext>txt</fileext></appattach></appmsg><fromusername>wxid_friend</fromusername></msg>`
+	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":49,"ContentText":` + strconv.Quote(fileXML) + `,"Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
+	if err := c.HandleWebhook(context.Background(), payload); err != nil {
+		t.Fatalf("HandleWebhook returned error: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		if ev.Message == nil || ev.Message.Media == nil {
+			t.Fatalf("expected file media, got %#v", ev)
+		}
+		if string(ev.Message.Media.Data) != string(fileBytes) {
+			t.Fatalf("unexpected file bytes: %#v", ev.Message.Media.Data)
+		}
+	default:
+		t.Fatalf("expected webhook to emit file message")
+	}
+}
+
 func TestHandleWebhookFileXMLDownloadsFileMedia(t *testing.T) {
 	fileBytes := []byte("zip-bytes")
 	var requested bool

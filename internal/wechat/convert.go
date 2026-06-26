@@ -197,7 +197,7 @@ func (c *Client) attachFileMedia(ctx context.Context, base *remoteapi.InboundMes
 	payload := parseFileAttachmentPayload(base.Text, req.SourceXml, req.SenderUserName, req.Talker)
 	data, mimeType, err := c.downloadFile(ctx, payload)
 	if err != nil {
-		log.Printf("failed to download WeChat file %s: %v", base.ID, err)
+		log.Printf("failed to download WeChat file %s title=%q app_id=%q attach_id_set=%t total_len=%d user=%q: %v", base.ID, payload.Title, payload.AppID, payload.AttachID != "", payload.TotalLen, payload.UserName, err)
 		return
 	}
 	fileName := payload.Title
@@ -256,17 +256,28 @@ func (c *Client) downloadFile(ctx context.Context, payload fileAttachmentPayload
 			UserName: payload.UserName,
 			Section:  downloadSectionReq{StartPos: start, DataLen: n},
 		}
-		env, err := c.t.postEnvelope(ctx, "/Tools/DownloadFile", req, nil)
-		if err != nil {
-			return nil, "", err
-		}
-		chunk, _, err := mediaBytesFromEnvelope(env)
+		chunk, _, err := c.downloadFileChunk(ctx, req)
 		if err != nil {
 			return nil, "", err
 		}
 		out = append(out, chunk...)
 	}
 	return out, mimeTypeForFile(payload.Title, out), nil
+}
+
+func (c *Client) downloadFileChunk(ctx context.Context, req downloadFileReq) ([]byte, string, error) {
+	raw, contentType, err := c.t.postRaw(ctx, "/Tools/DownloadFile", req, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	var env Envelope
+	if json.Unmarshal(raw, &env) == nil && (env.Success || env.Code != 0 || env.Message != "" || len(env.Data) > 0 || env.Data62 != "") {
+		if !env.Success {
+			return nil, "", &APIError{Code: env.Code, Message: env.Message, Path: "/Tools/DownloadFile"}
+		}
+		return mediaBytesFromEnvelope(&env)
+	}
+	return raw, strings.Split(contentType, ";")[0], nil
 }
 
 func fileNameFromFileMessage(text, sourceXML string) string {
@@ -299,6 +310,7 @@ func (c *Client) attachImageMedia(ctx context.Context, base *remoteapi.InboundMe
 	aesKey := extraString(base.Extra, "image_aeskey")
 	fileNo := extraString(base.Extra, "image_file_no")
 	if aesKey == "" || fileNo == "" {
+		log.Printf("skip downloading WeChat image %s: missing aeskey/file_no aeskey_set=%t file_no_set=%t text=%q", base.ID, aesKey != "", fileNo != "", trimLog(base.Text, 160))
 		return
 	}
 	data, mimeType, err := c.downloadCDNImage(ctx, aesKey, fileNo)
@@ -347,7 +359,7 @@ func mediaBytesFromJSON(raw json.RawMessage) ([]byte, string, error) {
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err == nil {
-		for _, key := range []string{"Base64", "Data", "ImageBase64", "FileData", "Buffer", "Content"} {
+		for _, key := range []string{"Base64", "base64", "Data", "data", "Data62", "data62", "ImageBase64", "imageBase64", "FileData", "fileData", "file_data", "Buffer", "buffer", "Content", "content"} {
 			if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
 				return decodeMediaString(v)
 			}
@@ -387,6 +399,15 @@ func extraString(extra map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(v))
+}
+
+func trimLog(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len([]rune(s)) <= max {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:max]) + "…"
 }
 
 func shouldDropWebhookNoise(m rawMessage, content string) bool {
