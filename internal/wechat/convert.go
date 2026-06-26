@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -80,6 +81,9 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
 	if m.MsgType == wxImage {
 		c.attachImageMedia(ctx, &base)
+	}
+	if base.Type == remoteapi.MsgFile {
+		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: m.MsgID, NewMsgID: m.NewMsgID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
 	}
 	if m.MsgType == wxEmoji {
 		c.attachEmojiMedia(ctx, &base, content)
@@ -176,11 +180,68 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	if m.MsgType == wxImage {
 		c.attachImageMedia(ctx, &base)
 	}
+	if base.Type == remoteapi.MsgFile {
+		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: rawID, NewMsgID: messageID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
+	}
 	if m.MsgType == wxEmoji {
 		c.attachEmojiMedia(ctx, &base, content)
 	}
 
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+}
+
+func (c *Client) attachFileMedia(ctx context.Context, base *remoteapi.InboundMessage, req fileMessageDownloadReq) {
+	if c == nil || c.t == nil || base == nil {
+		return
+	}
+	data, mimeType, err := c.downloadFileMessage(ctx, req)
+	if err != nil {
+		log.Printf("failed to download WeChat file %s: %v", base.ID, err)
+		return
+	}
+	fileName := fileNameFromFileMessage(base.Text, req.SourceXml)
+	if mimeType == "" {
+		mimeType = mimeTypeForFile(fileName, data)
+	}
+	base.Media = &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))}
+}
+
+func (c *Client) downloadFileMessage(ctx context.Context, req fileMessageDownloadReq) ([]byte, string, error) {
+	c.mu.RLock()
+	wxid := c.wxid
+	c.mu.RUnlock()
+	if wxid == "" {
+		return nil, "", fmt.Errorf("missing wxid")
+	}
+	req.Wxid = wxid
+	env, err := c.t.postEnvelope(ctx, "/Tools/DownloadFileMessage", req, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	return mediaBytesFromEnvelope(env)
+}
+
+func fileNameFromFileMessage(text, sourceXML string) string {
+	if title := strings.TrimSpace(xmlTag(sourceXML, "title")); title != "" {
+		return title
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	if line != "" {
+		return line
+	}
+	return "wechat-file"
+}
+
+func mimeTypeForFile(fileName string, data []byte) string {
+	if idx := strings.LastIndex(fileName, "."); idx >= 0 {
+		if mt := mime.TypeByExtension(fileName[idx:]); mt != "" {
+			return mt
+		}
+	}
+	if len(data) > 0 {
+		return http.DetectContentType(data)
+	}
+	return "application/octet-stream"
 }
 
 func (c *Client) attachImageMedia(ctx context.Context, base *remoteapi.InboundMessage) {

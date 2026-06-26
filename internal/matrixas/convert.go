@@ -35,7 +35,10 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 	case remoteapi.MsgAudio:
 		return &event.MessageEventContent{MsgType: event.MsgAudio, Body: body}
 	case remoteapi.MsgFile:
-		return &event.MessageEventContent{MsgType: event.MsgFile, Body: body}
+		if m.Media != nil && len(m.Media.Data) > 0 {
+			return &event.MessageEventContent{MsgType: event.MsgFile, Body: body}
+		}
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgLocation:
 		return &event.MessageEventContent{MsgType: event.MsgLocation, Body: body}
 	case remoteapi.MsgLink, remoteapi.MsgApp, remoteapi.MsgContactCard:
@@ -81,6 +84,19 @@ func remoteExtraString(extra map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(v))
+}
+
+func stickerPackTargetRooms(space, portal id.RoomID) []id.RoomID {
+	rooms := make([]id.RoomID, 0, 2)
+	seen := map[id.RoomID]bool{}
+	for _, room := range []id.RoomID{space, portal} {
+		if room == "" || seen[room] {
+			continue
+		}
+		seen[room] = true
+		rooms = append(rooms, room)
+	}
+	return rooms
 }
 
 func remoteTypeName(t remoteapi.MessageType) string {

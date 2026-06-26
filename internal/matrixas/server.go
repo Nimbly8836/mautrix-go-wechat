@@ -351,7 +351,7 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 			content.URL = resp.ContentURI.CUString()
 			content.Info = &event.FileInfo{MimeType: mimeType, Size: len(m.Media.Data), Width: intFromExtra(m.Extra, "width"), Height: intFromExtra(m.Extra, "height")}
 			if m.Type == remoteapi.MsgEmoji {
-				s.addRemoteEmojiToSpaceStickerPack(ctx, m, content.URL)
+				s.addRemoteEmojiToStickerPacks(ctx, rec.RoomID, m, content.URL)
 			}
 		}
 	}
@@ -366,23 +366,34 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	}
 }
 
-func (s *Server) addRemoteEmojiToSpaceStickerPack(ctx context.Context, m *remoteapi.InboundMessage, mxcURL id.ContentURIString) {
+func (s *Server) addRemoteEmojiToStickerPacks(ctx context.Context, portal id.RoomID, m *remoteapi.InboundMessage, mxcURL id.ContentURIString) {
 	sticker, ok := wechatStickerImageFromRemoteEmoji(m, mxcURL)
 	if !ok {
 		return
 	}
 	account := s.currentAccountID(ctx)
 	if account == "" {
-		log.Printf("skip adding WeChat emoji sticker %s to Space pack: current account is unknown", m.ID)
+		log.Printf("skip adding WeChat emoji sticker %s to sticker packs: current account is unknown", m.ID)
 		return
 	}
-	space, err := s.ensureAccountSpace(ctx, account)
+	var space id.RoomID
+	var err error
+	if owner := s.portals.owner(); owner != "" {
+		space, _, err = s.ensureAccountSpaceVisibleTo(ctx, account, owner)
+	} else {
+		space, err = s.ensureAccountSpace(ctx, account)
+	}
 	if err != nil {
 		log.Printf("failed to ensure account Space for WeChat emoji sticker %s account=%s: %v", m.ID, account, err)
 		return
 	}
-	if _, err := s.addStickerToAccountSpace(ctx, account, space, sticker); err != nil {
-		log.Printf("failed to add WeChat emoji sticker %s to Space pack account=%s space=%s: %v", m.ID, account, space, err)
+	for _, room := range stickerPackTargetRooms(space, portal) {
+		count, err := s.addStickerToAccountSpace(ctx, account, room, sticker)
+		if err != nil {
+			log.Printf("failed to add WeChat emoji sticker %s to sticker pack account=%s room=%s: %v", m.ID, account, room, err)
+			continue
+		}
+		log.Printf("added WeChat emoji sticker %s to sticker pack account=%s room=%s count=%d shortcode=%s", m.ID, account, room, count, sticker.Shortcode)
 	}
 }
 

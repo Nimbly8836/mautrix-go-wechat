@@ -37,3 +37,38 @@ func TestWechatStickerImageFromRemoteEmojiRejectsNonEmoji(t *testing.T) {
 		t.Fatalf("expected non-emoji message to be ignored")
 	}
 }
+
+func TestStickerPackTargetRoomsIncludesSpaceAndPortal(t *testing.T) {
+	targets := stickerPackTargetRooms(id.RoomID("!space:example.com"), id.RoomID("!portal:example.com"))
+	if len(targets) != 2 || targets[0] != "!space:example.com" || targets[1] != "!portal:example.com" {
+		t.Fatalf("unexpected targets: %#v", targets)
+	}
+}
+
+func TestStickerPackTargetRoomsDeduplicatesPortalSpace(t *testing.T) {
+	targets := stickerPackTargetRooms(id.RoomID("!same:example.com"), id.RoomID("!same:example.com"))
+	if len(targets) != 1 || targets[0] != "!same:example.com" {
+		t.Fatalf("unexpected targets: %#v", targets)
+	}
+}
+
+func TestMatrixContentFromRemoteFileWithoutMediaFallsBackToText(t *testing.T) {
+	content := matrixContentFromRemote(&remoteapi.InboundMessage{
+		Type: remoteapi.MsgFile,
+		Text: "xcodemap-idea-1.26.2.final.signed.zip\nfile type: zip",
+	})
+	if content.MsgType != "m.text" {
+		t.Fatalf("expected file without media to be text, got %s", content.MsgType)
+	}
+}
+
+func TestMatrixContentFromRemoteFileWithMediaUsesFile(t *testing.T) {
+	content := matrixContentFromRemote(&remoteapi.InboundMessage{
+		Type:  remoteapi.MsgFile,
+		Text:  "archive.zip",
+		Media: &remoteapi.Media{Data: []byte("zip")},
+	})
+	if content.MsgType != "m.file" {
+		t.Fatalf("expected file with media to be m.file, got %s", content.MsgType)
+	}
+}
