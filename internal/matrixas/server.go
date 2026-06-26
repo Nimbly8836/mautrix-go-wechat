@@ -305,6 +305,10 @@ func (s *Server) OnMessage(ctx context.Context, m *remoteapi.InboundMessage) {
 		s.bridgeRemoteToPortal(ctx, rec, m)
 		return
 	}
+	if s.shouldRejectOfficialAccount(ctx, m.Chat) {
+		log.Printf("dropping official account message because official_account_mode=reject: chat=%s sender=%s text=%q", m.Chat, m.Sender, trimPreview(m.Text))
+		return
+	}
 	if s.portalCreationMode() == "manual" {
 		s.addPendingPortal(ctx, m)
 		return

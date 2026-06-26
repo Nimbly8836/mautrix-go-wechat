@@ -372,9 +372,14 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 		chat = remoteapi.Chat{ID: chatID, Name: string(chatID), IsGroup: strings.HasSuffix(string(chatID), "@chatroom")}
 	}
 	name := s.portalRoomName(ctx, chat)
+	official := isOfficialChat(chat)
+	if !officialAccountModeCreatesPortal(s.officialAccountMode(), official) {
+		return portalRecord{}, errOfficialAccountRejected
+	}
 
 	invite := []id.UserID{}
-	if owner := s.portals.owner(); owner != "" {
+	owner := s.portals.owner()
+	if owner != "" && officialAccountModeInvitesOwner(s.officialAccountMode(), official) {
 		invite = append(invite, owner)
 	}
 	topic := portalTopic(name, chat)
@@ -392,6 +397,9 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 	}
 	rec := portalRecord{ChatID: chatID, RoomID: resp.RoomID, Name: name, IsGroup: chat.IsGroup}
 	s.portals.set(rec)
+	if owner != "" {
+		s.ensureRoomAdminPower(ctx, owner, resp.RoomID)
+	}
 	s.applyPortalMetadata(ctx, rec, chat)
 	s.syncPortalMembers(ctx, rec, chat, true)
 	log.Printf("created portal room: chat=%s room=%s", chatID, resp.RoomID)

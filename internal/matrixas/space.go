@@ -43,6 +43,9 @@ func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserI
 		if _, err := s.ensureAccountSpaceFolders(ctx, account, space); err != nil {
 			return "", err
 		}
+		if owner := s.portals.owner(); owner != "" {
+			s.ensureRoomAdminPower(ctx, owner, space)
+		}
 		return space, nil
 	}
 	invite := []id.UserID{}
@@ -63,6 +66,9 @@ func (s *Server) ensureAccountSpace(ctx context.Context, account remoteapi.UserI
 		return "", fmt.Errorf("create account space for %s: %w", account, err)
 	}
 	s.accounts.setSpace(account, resp.RoomID.String())
+	if owner := s.portals.owner(); owner != "" {
+		s.ensureRoomAdminPower(ctx, owner, resp.RoomID)
+	}
 	log.Printf("created account space: account=%s room=%s", account, resp.RoomID)
 	s.notifyManagement(ctx, fmt.Sprintf("已创建微信账号 Space:\n- account: %s\n- space: %s", account, resp.RoomID))
 	if _, err := s.ensureAccountSpaceFolders(ctx, account, resp.RoomID); err != nil {
@@ -96,6 +102,34 @@ func (s *Server) inviteUserToRoom(ctx context.Context, room id.RoomID, user id.U
 	}
 }
 
+func (s *Server) ensureRoomAdminPower(ctx context.Context, user id.UserID, room id.RoomID) {
+	if user == "" || room == "" || s == nil || s.as == nil || s.as.BotIntent() == nil {
+		return
+	}
+	var pl event.PowerLevelsEventContent
+	if err := s.as.BotIntent().StateEvent(ctx, room, event.StatePowerLevels, "", &pl); err != nil {
+		pl = event.PowerLevelsEventContent{}
+	}
+	if pl.Users == nil {
+		pl.Users = map[id.UserID]int{}
+	}
+	changed := false
+	if pl.Users[user] < 100 {
+		pl.Users[user] = 100
+		changed = true
+	}
+	if bot := s.as.BotMXID(); bot != "" && pl.Users[bot] < 100 {
+		pl.Users[bot] = 100
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if _, err := s.as.BotIntent().SendStateEvent(ctx, room, event.StatePowerLevels, "", &pl); err != nil {
+		log.Printf("failed to set admin power for %s in %s: %v", user, room, err)
+	}
+}
+
 func (s *Server) ensureAccountSpaceVisibleTo(ctx context.Context, account remoteapi.UserID, user id.UserID) (id.RoomID, map[string]id.RoomID, error) {
 	space, err := s.ensureAccountSpace(ctx, account)
 	if err != nil {
@@ -106,8 +140,10 @@ func (s *Server) ensureAccountSpaceVisibleTo(ctx context.Context, account remote
 		return space, folders, err
 	}
 	s.inviteUserToRoom(ctx, space, user)
+	s.ensureRoomAdminPower(ctx, user, space)
 	for _, folder := range folders {
 		s.inviteUserToRoom(ctx, folder, user)
+		s.ensureRoomAdminPower(ctx, user, folder)
 	}
 	return space, folders, nil
 }
@@ -133,6 +169,9 @@ func (s *Server) ensureAccountSpaceFolders(ctx context.Context, account remoteap
 			log.Printf("created account folder space: account=%s folder=%s room=%s", account, folder.Key, roomID)
 		}
 		out[folder.Key] = roomID
+		if owner := s.portals.owner(); owner != "" {
+			s.ensureRoomAdminPower(ctx, owner, roomID)
+		}
 		if _, err := s.as.BotIntent().SetRoomName(ctx, roomID, folder.Name); err != nil {
 			log.Printf("failed to update account folder space name: account=%s folder=%s room=%s: %v", account, folder.Key, roomID, err)
 		}
@@ -174,9 +213,31 @@ func (s *Server) attachExistingPortalsToAccountSpace(ctx context.Context, accoun
 	}
 }
 
+func (s *Server) repairAccountSpace(ctx context.Context, account remoteapi.UserID, owner id.UserID) int {
+	space, folders, err := s.ensureAccountSpaceVisibleTo(ctx, account, owner)
+	if err != nil {
+		log.Printf("failed to repair account space account=%s owner=%s: %v", account, owner, err)
+		return 0
+	}
+	s.ensureRoomAdminPower(ctx, owner, space)
+	for _, folder := range folders {
+		s.ensureRoomAdminPower(ctx, owner, folder)
+	}
+	count := 0
+	for _, portal := range s.portals.list() {
+		s.addPortalToAccountSpace(ctx, account, portal)
+		s.ensureRoomAdminPower(ctx, owner, portal.RoomID)
+		count++
+	}
+	return count
+}
+
 func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.UserID, portal portalRecord) {
 	if account == "" || portal.RoomID == "" {
 		return
+	}
+	if owner := s.portals.owner(); owner != "" {
+		s.ensureRoomAdminPower(ctx, owner, portal.RoomID)
 	}
 	space, err := s.ensureAccountSpace(ctx, account)
 	if err != nil {

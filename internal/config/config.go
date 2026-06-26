@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -77,6 +78,9 @@ type Bridge struct {
 	// PortalCreation controls how new remote chats become Matrix portal rooms.
 	// Values: "auto" (default) or "manual".
 	PortalCreation string `yaml:"portal_creation"`
+	// OfficialAccountMode controls portal handling for WeChat official accounts.
+	// Values: "invite" (default), "mute" (create without inviting owner), or "reject".
+	OfficialAccountMode string `yaml:"official_account_mode"`
 	// CommandPrefix is used for management and portal-local commands.
 	CommandPrefix string `yaml:"command_prefix"`
 }
@@ -138,6 +142,7 @@ func (c *Config) validate() error {
 	if c.Bridge.CommandPrefix == "" {
 		c.Bridge.CommandPrefix = "!wx"
 	}
+	c.Bridge.OfficialAccountMode = normalizeOfficialAccountModeForConfig(c.Bridge.OfficialAccountMode)
 	if c.Bridge.ContactFile == "" {
 		c.Bridge.ContactFile = "/data/contacts.json"
 	}
@@ -148,6 +153,15 @@ func (c *Config) validate() error {
 		c.Bridge.CommandPrefix = "!" + c.Bridge.CommandPrefix
 	}
 	return nil
+}
+
+func normalizeOfficialAccountModeForConfig(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "mute", "reject":
+		return strings.ToLower(strings.TrimSpace(mode))
+	default:
+		return "invite"
+	}
 }
 
 // Registration is the appservice registration file (registration.yaml) that the

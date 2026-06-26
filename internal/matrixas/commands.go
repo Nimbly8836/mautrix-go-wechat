@@ -85,6 +85,9 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 %[1]s use <wxid>          切换到已保存账号
 %[1]s logout              退出 WeChat
 %[1]s space               创建/查看当前微信账号的 Matrix Space，并挂载已有 portal
+%[1]s space repair        修复 Space/分类/portal 挂载和你的管理员权限
+%[1]s officials status    查看公众号处理策略
+%[1]s officials mode invite|mute|reject  设置公众号策略
 %[1]s stickers add <shortcode> <mxc-or-image-url> [label]  添加 sticker 到当前微信账号 Space
 %[1]s contacts refresh    后台刷新联系人缓存，并更新一对一 portal 房间名
 %[1]s contacts refresh <wxid/chatroom>  只刷新指定 portal/联系人
@@ -172,6 +175,8 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 		s.handleStickersCommand(ctx, room, sender, rest)
 	case "relogin", "twice-auth", "twice", "二次登录":
 		go s.handleRefreshLoginCommand(ctx, room, rest)
+	case "officials", "公众号":
+		s.handleOfficialsCommand(ctx, room, rest)
 	case "portal-mode":
 		mode := strings.TrimSpace(strings.ToLower(rest))
 		if mode == "" {
@@ -205,7 +210,16 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			s.notice(ctx, room, fmt.Sprintf("创建/获取 Space 失败: %v", err))
 			return
 		}
+		if strings.TrimSpace(strings.ToLower(rest)) == "repair" || strings.TrimSpace(rest) == "修复" {
+			fixed := s.repairAccountSpace(ctx, account, sender)
+			s.notice(ctx, room, fmt.Sprintf("已修复当前账号 Space/分类/portal 挂载和权限。处理 portal: %d\nSpace: %s\n分类:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s", fixed, space, folders[spaceFolderContacts], folders[spaceFolderOfficial], folders[spaceFolderGroups]))
+			return
+		}
 		s.attachExistingPortalsToAccountSpace(ctx, account, space)
+		s.ensureRoomAdminPower(ctx, sender, space)
+		for _, folder := range folders {
+			s.ensureRoomAdminPower(ctx, sender, folder)
+		}
 		s.notice(ctx, room, fmt.Sprintf("当前微信账号 Space: %s\n分类 Space:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s\n\n已邀请你加入这些 Space，并重新整理已有 portal。", space, folders[spaceFolderContacts], folders[spaceFolderOfficial], folders[spaceFolderGroups]))
 	case "portals":
 		items := s.portals.list()

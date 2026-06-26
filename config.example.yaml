@@ -60,6 +60,11 @@ bridge:
     #   auto   - create rooms immediately and notify management rooms
     #   manual - notify first; create only after `!wx create <chat>` in bot room
     portal_creation: auto
+    # WeChat official account portal handling:
+    #   invite - create portal and invite the owner (default)
+    #   mute   - create portal and attach to Space, but don't invite the owner
+    #   reject - don't create official-account portals automatically
+    official_account_mode: invite
     # Who may use the bridge. Levels: relay < user < admin.
     permissions:
         "example.com": user
