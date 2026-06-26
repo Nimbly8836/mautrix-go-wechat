@@ -81,6 +81,11 @@ type Bridge struct {
 	// OfficialAccountMode controls portal handling for WeChat official accounts.
 	// Values: "invite" (default), "mute" (create without inviting owner), or "reject".
 	OfficialAccountMode string `yaml:"official_account_mode"`
+	// PersonalStickerUserID and PersonalStickerAccessToken optionally allow the bridge
+	// to write m.image_pack.rooms account_data for the real Matrix user, which an
+	// appservice cannot normally masquerade as.
+	PersonalStickerUserID      string `yaml:"personal_sticker_user_id"`
+	PersonalStickerAccessToken string `yaml:"personal_sticker_access_token"`
 	// CommandPrefix is used for management and portal-local commands.
 	CommandPrefix string `yaml:"command_prefix"`
 }

@@ -65,6 +65,11 @@ bridge:
     #   mute   - create portal and attach to Space, but don't invite the owner
     #   reject - don't create official-account portals automatically
     official_account_mode: invite
+    # Optional: allow automatic registration of bridged WeChat stickers in a real
+    # Matrix user's personal sticker picker (`m.image_pack.rooms`). Appservices
+    # cannot write account_data for normal users without that user's access token.
+    personal_sticker_user_id: ""
+    personal_sticker_access_token: ""
     # Who may use the bridge. Levels: relay < user < admin.
     permissions:
         "example.com": user

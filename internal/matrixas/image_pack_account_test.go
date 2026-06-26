@@ -5,6 +5,8 @@ import (
 
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
+
+	"github.com/leat/mautrix-go-wechat/internal/config"
 )
 
 func TestAddImagePackRoomSourceAddsStateKey(t *testing.T) {
@@ -13,6 +15,16 @@ func TestAddImagePackRoomSourceAddsStateKey(t *testing.T) {
 	keys := content.Rooms[id.RoomID("!room:example.com")]
 	if _, ok := keys["wechat.wxid_self"]; !ok {
 		t.Fatalf("expected state key to be registered, got %#v", content.Rooms)
+	}
+}
+
+func TestPersonalStickerAccessTokenForUser(t *testing.T) {
+	s := &Server{cfg: &config.Config{Bridge: config.Bridge{PersonalStickerUserID: "@leat:example.com", PersonalStickerAccessToken: "token"}}}
+	if got := s.personalStickerAccessTokenForUser("@leat:example.com"); got != "token" {
+		t.Fatalf("expected configured token, got %q", got)
+	}
+	if got := s.personalStickerAccessTokenForUser("@other:example.com"); got != "" {
+		t.Fatalf("expected no token for other user, got %q", got)
 	}
 }
 

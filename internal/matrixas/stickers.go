@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -141,21 +142,46 @@ func addImagePackRoomSource(content *event.ImagePackRoomsEventContent, room id.R
 	content.Rooms[room][stateKey] = struct{}{}
 }
 
-func (s *Server) ensureUserSeesImagePackRoom(ctx context.Context, user id.UserID, room id.RoomID, stateKey string) {
-	if user == "" || room == "" || stateKey == "" || s == nil || s.as == nil {
-		return
+func (s *Server) personalStickerAccessTokenForUser(user id.UserID) string {
+	if s == nil || s.cfg == nil || s.cfg.Bridge.PersonalStickerAccessToken == "" {
+		return ""
+	}
+	configuredUser := id.UserID(strings.TrimSpace(s.cfg.Bridge.PersonalStickerUserID))
+	if configuredUser == "" || configuredUser == user {
+		return strings.TrimSpace(s.cfg.Bridge.PersonalStickerAccessToken)
+	}
+	return ""
+}
+
+func (s *Server) imagePackAccountDataClient(user id.UserID) (*mautrix.Client, error) {
+	if token := s.personalStickerAccessTokenForUser(user); token != "" {
+		return mautrix.NewClient(s.cfg.Homeserver.Address, user, token)
+	}
+	if s == nil || s.as == nil {
+		return nil, fmt.Errorf("appservice unavailable")
 	}
 	intent := s.as.Intent(user)
 	if intent == nil || intent.Client == nil {
-		log.Printf("cannot register image pack room for %s: no Matrix intent", user)
+		return nil, fmt.Errorf("no Matrix intent")
+	}
+	return intent.Client, nil
+}
+
+func (s *Server) ensureUserSeesImagePackRoom(ctx context.Context, user id.UserID, room id.RoomID, stateKey string) {
+	if user == "" || room == "" || stateKey == "" || s == nil {
+		return
+	}
+	client, err := s.imagePackAccountDataClient(user)
+	if err != nil {
+		log.Printf("cannot register image pack room for %s: %v", user, err)
 		return
 	}
 	var content event.ImagePackRoomsEventContent
-	if err := intent.Client.GetAccountData(ctx, event.AccountDataImagePackRooms.Type, &content); err != nil {
+	if err := client.GetAccountData(ctx, event.AccountDataImagePackRooms.Type, &content); err != nil {
 		log.Printf("creating image pack rooms account data for %s: %v", user, err)
 	}
 	addImagePackRoomSource(&content, room, stateKey)
-	if err := intent.Client.SetAccountData(ctx, event.AccountDataImagePackRooms.Type, &content); err != nil {
+	if err := client.SetAccountData(ctx, event.AccountDataImagePackRooms.Type, &content); err != nil {
 		log.Printf("failed to register image pack room for %s room=%s state_key=%s: %v", user, room, stateKey, err)
 	}
 }
