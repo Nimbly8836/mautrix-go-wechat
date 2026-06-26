@@ -52,6 +52,18 @@ func TestStickerPackTargetRoomsDeduplicatesPortalSpace(t *testing.T) {
 	}
 }
 
+func TestMessageIDAliasesIncludesRawMessageID(t *testing.T) {
+	aliases := messageIDAliases(&remoteapi.InboundMessage{
+		ID: "new-456",
+		Extra: map[string]any{
+			"raw_msg_id": int64(123),
+		},
+	})
+	if len(aliases) != 2 || aliases[0] != "new-456" || aliases[1] != "123" {
+		t.Fatalf("unexpected aliases: %#v", aliases)
+	}
+}
+
 func TestMatrixContentFromRemoteFileWithoutMediaFallsBackToText(t *testing.T) {
 	content := matrixContentFromRemote(&remoteapi.InboundMessage{
 		Type: remoteapi.MsgFile,

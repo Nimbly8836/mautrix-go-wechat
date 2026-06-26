@@ -86,6 +86,28 @@ func remoteExtraString(extra map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprint(v))
 }
 
+func messageIDAliases(m *remoteapi.InboundMessage) []remoteapi.MessageID {
+	if m == nil {
+		return nil
+	}
+	aliases := make([]remoteapi.MessageID, 0, 2)
+	seen := map[remoteapi.MessageID]bool{}
+	add := func(msg remoteapi.MessageID) {
+		if msg == "" || seen[msg] {
+			return
+		}
+		seen[msg] = true
+		aliases = append(aliases, msg)
+	}
+	add(m.ID)
+	if m.Extra != nil {
+		if raw := remoteExtraString(m.Extra, "raw_msg_id"); raw != "" {
+			add(remoteapi.MessageID(raw))
+		}
+	}
+	return aliases
+}
+
 func stickerPackTargetRooms(space, portal id.RoomID) []id.RoomID {
 	rooms := make([]id.RoomID, 0, 2)
 	seen := map[id.RoomID]bool{}

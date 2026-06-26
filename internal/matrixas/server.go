@@ -361,8 +361,10 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("桥接消息失败: %v", err))
 		return
 	}
-	if m.ID != "" && resp != nil && resp.EventID != "" {
-		s.rememberMessageEvent(m.Chat, m.ID, resp.EventID)
+	if resp != nil && resp.EventID != "" {
+		for _, msgID := range messageIDAliases(m) {
+			s.rememberMessageEvent(m.Chat, msgID, resp.EventID)
+		}
 	}
 }
 

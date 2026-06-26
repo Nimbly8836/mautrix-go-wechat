@@ -105,6 +105,26 @@ func TestHandleWebhookStripsLastMessageOpsAroundText(t *testing.T) {
 	}
 }
 
+func TestHandleWebhookVoIPMessageDoesNotLeakRawXML(t *testing.T) {
+	c := &Client{events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
+	voipXML := `<voipmsg type="VoIPBubbleMsg"><VoIPBubbleMsg><msg><![CDATA[Already answered elsewhere]]></msg><msg_type>101</msg_type></VoIPBubbleMsg></voipmsg>`
+	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":50,"ContentText":` + strconv.Quote(voipXML) + `,"Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
+	if err := c.HandleWebhook(context.Background(), payload); err != nil {
+		t.Fatalf("HandleWebhook returned error: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		if ev.Message == nil {
+			t.Fatalf("expected message event, got %#v", ev)
+		}
+		if ev.Message.Text != "[voip] Already answered elsewhere" {
+			t.Fatalf("expected readable voip text, got %q", ev.Message.Text)
+		}
+	default:
+		t.Fatalf("expected webhook to emit voip message")
+	}
+}
+
 func TestHandleWebhookParsesRevokeMessage(t *testing.T) {
 	c := &Client{events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
 	payload := []byte(`{"MsgID":10,"NewMsgID":11,"MsgType":10002,"ContentText":"<sysmsg type=\"revokemsg\"><revokemsg><session>wxid_friend</session><oldmsgid>123</oldmsgid><msgid>456</msgid><replacemsg><![CDATA[\"Alice\" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
@@ -119,8 +139,8 @@ func TestHandleWebhookParsesRevokeMessage(t *testing.T) {
 		if ev.Redaction.Chat != "wxid_friend" || ev.Redaction.By != "wxid_friend" {
 			t.Fatalf("unexpected redaction source: %#v", ev.Redaction)
 		}
-		if ev.Redaction.Target != "456" {
-			t.Fatalf("expected target msgid 456, got %q", ev.Redaction.Target)
+		if ev.Redaction.Target != "123" {
+			t.Fatalf("expected target oldmsgid 123, got %q", ev.Redaction.Target)
 		}
 		if ev.Redaction.Text != `"Alice" 撤回了一条消息` {
 			t.Fatalf("expected replacemsg text, got %q", ev.Redaction.Text)
@@ -224,6 +244,39 @@ func TestHandleWebhookFileXMLDownloadsFileMedia(t *testing.T) {
 		}
 	default:
 		t.Fatalf("expected webhook to emit file message")
+	}
+}
+
+func TestHandleWebhookImageXMLDownloadsRawBinaryCDNImageMedia(t *testing.T) {
+	imageBytes := []byte{0xff, 0xd8, 0xff, 0xdb}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Tools/CdnDownloadImage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(imageBytes)
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
+	imageXML := `<?xml version="1.0"?>
+<msg>
+    <img aeskey="2c5b695f08c0921a5e58539172b3a14c" cdnmidimgurl="305f020100044b" length="4" md5="60c9d0aff18afffb4478f948c96b661b" />
+</msg>`
+	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":3,"ContentText":` + strconv.Quote(imageXML) + `,"PushContent":"","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
+	if err := c.HandleWebhook(context.Background(), payload); err != nil {
+		t.Fatalf("HandleWebhook returned error: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		if ev.Message == nil || ev.Message.Media == nil {
+			t.Fatalf("expected image media, got %#v", ev)
+		}
+		if string(ev.Message.Media.Data) != string(imageBytes) {
+			t.Fatalf("unexpected image bytes: %#v", ev.Message.Media.Data)
+		}
+	default:
+		t.Fatalf("expected webhook to emit image message")
 	}
 }
 

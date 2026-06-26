@@ -10,6 +10,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -170,7 +171,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 			Redaction: &remoteapi.Redaction{
 				Chat:      remoteapi.ChatID(chat),
 				By:        remoteapi.UserID(sender),
-				Target:    remoteapi.MessageID(firstNonEmpty(rev.MsgID, rev.OldMsgID)),
+				Target:    remoteapi.MessageID(firstNonEmpty(rev.OldMsgID, rev.MsgID)),
 				Text:      rev.Text,
 				Timestamp: time.Unix(m.CreateTime, 0),
 			},
@@ -270,14 +271,7 @@ func (c *Client) downloadFileChunk(ctx context.Context, req downloadFileReq) ([]
 	if err != nil {
 		return nil, "", err
 	}
-	var env Envelope
-	if json.Unmarshal(raw, &env) == nil && (env.Success || env.Code != 0 || env.Message != "" || len(env.Data) > 0 || env.Data62 != "") {
-		if !env.Success {
-			return nil, "", &APIError{Code: env.Code, Message: env.Message, Path: "/Tools/DownloadFile"}
-		}
-		return mediaBytesFromEnvelope(&env)
-	}
-	return raw, strings.Split(contentType, ";")[0], nil
+	return mediaBytesFromRawResponse(raw, contentType, "/Tools/DownloadFile")
 }
 
 func fileNameFromFileMessage(text, sourceXML string) string {
@@ -332,11 +326,22 @@ func (c *Client) downloadCDNImage(ctx context.Context, aesKey, fileNo string) ([
 	if wxid == "" {
 		return nil, "", fmt.Errorf("missing wxid")
 	}
-	env, err := c.t.postEnvelope(ctx, "/Tools/CdnDownloadImage", cdnDownloadImageReq{Wxid: wxid, FileAesKey: aesKey, FileNo: fileNo}, nil)
+	raw, contentType, err := c.t.postRaw(ctx, "/Tools/CdnDownloadImage", cdnDownloadImageReq{Wxid: wxid, FileAesKey: aesKey, FileNo: fileNo}, nil)
 	if err != nil {
 		return nil, "", err
 	}
-	return mediaBytesFromEnvelope(env)
+	return mediaBytesFromRawResponse(raw, contentType, "/Tools/CdnDownloadImage")
+}
+
+func mediaBytesFromRawResponse(raw []byte, contentType, path string) ([]byte, string, error) {
+	var env Envelope
+	if json.Unmarshal(raw, &env) == nil && (env.Success || env.Code != 0 || env.Message != "" || len(env.Data) > 0 || env.Data62 != "") {
+		if !env.Success {
+			return nil, "", &APIError{Code: env.Code, Message: env.Message, Path: path}
+		}
+		return mediaBytesFromEnvelope(&env)
+	}
+	return raw, strings.Split(contentType, ";")[0], nil
 }
 
 func mediaBytesFromEnvelope(env *Envelope) ([]byte, string, error) {
@@ -353,19 +358,103 @@ func mediaBytesFromJSON(raw json.RawMessage) ([]byte, string, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, "", fmt.Errorf("response has no media data")
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return decodeMediaString(s)
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, "", fmt.Errorf("decode media json: %w", err)
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err == nil {
-		for _, key := range []string{"Base64", "base64", "Data", "data", "Data62", "data62", "ImageBase64", "imageBase64", "FileData", "fileData", "file_data", "Buffer", "buffer", "Content", "content"} {
-			if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
-				return decodeMediaString(v)
+	if data, mimeType, ok := mediaBytesFromValue(v); ok {
+		return data, mimeType, nil
+	}
+	return nil, "", fmt.Errorf("unsupported media response shape: %s", mediaResponseShape(v, 0))
+}
+
+func mediaBytesFromValue(v any) ([]byte, string, bool) {
+	switch val := v.(type) {
+	case string:
+		if strings.TrimSpace(val) == "" {
+			return nil, "", false
+		}
+		data, mimeType, err := decodeMediaString(val)
+		return data, mimeType, err == nil && len(data) > 0
+	case []any:
+		if data, ok := numericByteArray(val); ok {
+			return data, http.DetectContentType(data), true
+		}
+		for _, item := range val {
+			if data, mimeType, ok := mediaBytesFromValue(item); ok {
+				return data, mimeType, true
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"Base64", "base64", "Data", "data", "Data62", "data62", "ImageBase64", "imageBase64", "FileData", "fileData", "file_data", "Buffer", "buffer", "Content", "content", "Bytes", "bytes", "ImgBuf", "imgBuf"} {
+			if item, ok := val[key]; ok {
+				if data, mimeType, ok := mediaBytesFromValue(item); ok {
+					return data, mimeType, true
+				}
+			}
+		}
+		for _, item := range val {
+			if data, mimeType, ok := mediaBytesFromValue(item); ok {
+				return data, mimeType, true
 			}
 		}
 	}
-	return nil, "", fmt.Errorf("unsupported media response shape")
+	return nil, "", false
+}
+
+func numericByteArray(items []any) ([]byte, bool) {
+	if len(items) == 0 {
+		return nil, false
+	}
+	out := make([]byte, len(items))
+	for i, item := range items {
+		var n int64
+		switch v := item.(type) {
+		case float64:
+			n = int64(v)
+		case int64:
+			n = v
+		case int:
+			n = int64(v)
+		default:
+			return nil, false
+		}
+		if n < 0 || n > 255 {
+			return nil, false
+		}
+		out[i] = byte(n)
+	}
+	return out, true
+}
+
+func mediaResponseShape(v any, depth int) string {
+	if depth > 2 {
+		return "…"
+	}
+	switch val := v.(type) {
+	case map[string]any:
+		parts := make([]string, 0, len(val))
+		for k, child := range val {
+			parts = append(parts, k+":"+mediaResponseShape(child, depth+1))
+		}
+		sort.Strings(parts)
+		return "{" + strings.Join(parts, ",") + "}"
+	case []any:
+		if len(val) == 0 {
+			return "[]"
+		}
+		return fmt.Sprintf("[%d]%s", len(val), mediaResponseShape(val[0], depth+1))
+	case string:
+		return "string"
+	case float64:
+		return "number"
+	case bool:
+		return "bool"
+	case nil:
+		return "null"
+	default:
+		return fmt.Sprintf("%T", v)
+	}
 }
 
 func decodeMediaString(s string) ([]byte, string, error) {
@@ -380,7 +469,20 @@ func decodeMediaString(s string) ([]byte, string, error) {
 		}
 		s = s[idx+1:]
 	}
-	data, err := base64.StdEncoding.DecodeString(s)
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			return -1
+		}
+		return r
+	}, s)
+	var data []byte
+	var err error
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		data, err = enc.DecodeString(s)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return nil, "", err
 	}
@@ -431,6 +533,11 @@ func stripLastMessageOps(content string) string {
 }
 
 func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push string) {
+	if strings.Contains(content, "<voipmsg") {
+		base.Type = remoteapi.MsgApp
+		base.Text = parseVoIPMessageText(content)
+		return
+	}
 	switch msgType {
 	case wxText:
 		base.Type = remoteapi.MsgText
@@ -470,6 +577,14 @@ func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push
 		base.Type = remoteapi.MsgApp
 		base.Text = firstNonEmpty(base.Text, push, "[message]")
 	}
+}
+
+func parseVoIPMessageText(content string) string {
+	msg := xmlTag(content, "msg")
+	if msg == "" {
+		return "[voip]"
+	}
+	return "[voip] " + msg
 }
 
 func parseAppMessage(content, push string) (remoteapi.MessageType, string) {
