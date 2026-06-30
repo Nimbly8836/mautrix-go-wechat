@@ -31,9 +31,15 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 		}
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgVideo:
-		return &event.MessageEventContent{MsgType: event.MsgVideo, Body: body}
+		if m.Media != nil && len(m.Media.Data) > 0 {
+			return &event.MessageEventContent{MsgType: event.MsgVideo, Body: body}
+		}
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgAudio:
-		return &event.MessageEventContent{MsgType: event.MsgAudio, Body: body}
+		if m.Media != nil && len(m.Media.Data) > 0 {
+			return &event.MessageEventContent{MsgType: event.MsgAudio, Body: body}
+		}
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgFile:
 		if m.Media != nil && len(m.Media.Data) > 0 {
 			return &event.MessageEventContent{MsgType: event.MsgFile, Body: body}
@@ -109,16 +115,17 @@ func messageIDAliases(m *remoteapi.InboundMessage) []remoteapi.MessageID {
 }
 
 func stickerPackTargetRooms(space, portal id.RoomID) []id.RoomID {
-	rooms := make([]id.RoomID, 0, 2)
-	seen := map[id.RoomID]bool{}
-	for _, room := range []id.RoomID{space, portal} {
-		if room == "" || seen[room] {
-			continue
-		}
-		seen[room] = true
-		rooms = append(rooms, room)
+	if space == "" {
+		return nil
 	}
-	return rooms
+	return []id.RoomID{space}
+}
+
+func stickerPackCleanupRooms(space, portal id.RoomID) []id.RoomID {
+	if portal == "" || portal == space {
+		return nil
+	}
+	return []id.RoomID{portal}
 }
 
 func remoteTypeName(t remoteapi.MessageType) string {

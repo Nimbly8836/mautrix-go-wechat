@@ -280,6 +280,51 @@ func TestHandleWebhookImageXMLDownloadsRawBinaryCDNImageMedia(t *testing.T) {
 	}
 }
 
+func TestHandleWebhookVideoXMLUsesDownloadVideoMedia(t *testing.T) {
+	videoBytes := []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}
+	var requested bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Tools/DownloadVideo" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		requested = true
+		var req videoMessageDownloadReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode video download request: %v", err)
+		}
+		if req.Wxid != "wxid_self" || req.DataLen != 12 || req.NewMsgID != 2 || req.MsgType != wxVideo || req.Talker != "wxid_friend" || req.SenderUserName != "wxid_friend" {
+			t.Fatalf("unexpected video download request: %#v", req)
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write(videoBytes)
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
+	videoXML := `<msg><videomsg aeskey="video-aes" cdnvideourl="video-file-no" length="12" playlength="3" /></msg>`
+	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":43,"ContentText":` + strconv.Quote(videoXML) + `,"PushContent":"","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
+	if err := c.HandleWebhook(context.Background(), payload); err != nil {
+		t.Fatalf("HandleWebhook returned error: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		if !requested {
+			t.Fatalf("expected video download request")
+		}
+		if ev.Message == nil || ev.Message.Type != remoteapi.MsgVideo || ev.Message.Media == nil {
+			t.Fatalf("expected video media, got %#v", ev)
+		}
+		if string(ev.Message.Media.Data) != string(videoBytes) {
+			t.Fatalf("unexpected video bytes: %#v", ev.Message.Media.Data)
+		}
+		if ev.Message.Media.MimeType != "video/mp4" {
+			t.Fatalf("unexpected video mime type: %q", ev.Message.Media.MimeType)
+		}
+	default:
+		t.Fatalf("expected webhook to emit video message")
+	}
+}
+
 func TestHandleWebhookImageXMLDownloadsCDNImageMedia(t *testing.T) {
 	imageBytes := []byte{0xff, 0xd8, 0xff, 0xdb}
 	var requested bool

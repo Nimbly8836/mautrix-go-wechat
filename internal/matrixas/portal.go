@@ -401,10 +401,22 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 		s.ensureRoomAdminPower(ctx, owner, resp.RoomID)
 	}
 	s.applyPortalMetadata(ctx, rec, chat)
-	s.syncPortalMembers(ctx, rec, chat, true)
+	s.syncPortalMembers(ctx, rec, chat, true, puppetProfileUpdateAuto)
 	log.Printf("created portal room: chat=%s room=%s", chatID, resp.RoomID)
 	s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
 	return rec, nil
+}
+
+type puppetProfileUpdateMode int
+
+const (
+	puppetProfileUpdateAuto puppetProfileUpdateMode = iota
+	puppetProfileUpdateStartup
+	puppetProfileUpdateCommand
+)
+
+func shouldUpdatePuppetProfile(mode puppetProfileUpdateMode) bool {
+	return mode == puppetProfileUpdateStartup || mode == puppetProfileUpdateCommand
 }
 
 func (s *Server) puppetIntent(ctx context.Context, user remoteapi.UserID) *mautrix.Client {
@@ -412,7 +424,6 @@ func (s *Server) puppetIntent(ctx context.Context, user remoteapi.UserID) *mautr
 	if !ok {
 		return s.as.BotIntent().Client
 	}
-	s.updatePuppetProfile(ctx, user, false)
 	return intent.Client
 }
 
@@ -434,25 +445,29 @@ func shouldJoinPuppet(account, sender remoteapi.UserID) bool {
 }
 
 func (s *Server) ensurePuppetJoined(ctx context.Context, user remoteapi.UserID, room id.RoomID) *mautrix.Client {
-	intent, ok := s.ensurePuppetJoinedWithProfile(ctx, user, room, false)
+	intent, ok := s.ensurePuppetJoinedWithProfile(ctx, user, room, false, puppetProfileUpdateAuto)
 	if !ok {
 		return s.as.BotIntent().Client
 	}
 	return intent.Client
 }
 
-func (s *Server) ensurePuppetJoinedWithProfile(ctx context.Context, user remoteapi.UserID, room id.RoomID, force bool) (*appservice.IntentAPI, bool) {
+func (s *Server) ensurePuppetJoinedWithProfile(ctx context.Context, user remoteapi.UserID, room id.RoomID, force bool, profileMode puppetProfileUpdateMode) (*appservice.IntentAPI, bool) {
 	intent, ok := s.puppetIntentAPI(ctx, user)
 	if !ok {
 		return nil, false
 	}
-	name, avatar := s.updatePuppetProfile(ctx, user, force)
 	extra := map[string]interface{}{}
-	if name != "" {
-		extra["displayname"] = name
-	}
-	if avatar != "" {
-		extra["avatar_url"] = string(avatar)
+	if shouldUpdatePuppetProfile(profileMode) {
+		name, avatar, changed := s.updatePuppetProfile(ctx, user, force)
+		if changed {
+			if name != "" {
+				extra["displayname"] = name
+			}
+			if avatar != "" {
+				extra["avatar_url"] = string(avatar)
+			}
+		}
 	}
 	if _, err := intent.JoinRoomByID(ctx, room, extra); err != nil {
 		log.Printf("failed to join/update puppet %s in %s: %v", user, room, err)
@@ -464,37 +479,65 @@ func (s *Server) ensurePuppetJoinedWithProfile(ctx context.Context, user remotea
 	return intent, true
 }
 
-func (s *Server) updatePuppetProfile(ctx context.Context, user remoteapi.UserID, force bool) (string, id.ContentURIString) {
+func (s *Server) updatePuppetProfile(ctx context.Context, user remoteapi.UserID, force bool) (string, id.ContentURIString, bool) {
 	intent, ok := s.puppetIntentAPI(ctx, user)
 	if !ok {
-		return string(user), ""
+		return string(user), "", false
 	}
 	ct, _ := s.contactForRemote(ctx, user, force)
 	name := matrixPick(ct.Remark, ct.Name)
 	if name == "" {
 		name = string(user)
 	}
+	avatarURL := strings.TrimSpace(ct.AvatarURL)
+	mxc := id.ContentURIString("")
+	if account := s.currentAccountID(ctx); account != "" && s.contacts != nil {
+		if cache, ok := s.contacts.getPuppetProfileCache(account, user); ok {
+			if avatarURL != "" && cache.AvatarSourceURL == avatarURL && cache.AvatarMXC != "" {
+				mxc = cache.AvatarMXC
+			}
+			desired := puppetProfileCache{DisplayName: name, AvatarSourceURL: avatarURL, AvatarMXC: mxc}
+			if samePuppetProfileCache(cache, desired) {
+				return name, mxc, false
+			}
+		}
+	}
+	if avatarURL != "" && mxc == "" {
+		var err error
+		mxc, err = s.roomAvatarFromURL(ctx, avatarURL)
+		if err != nil {
+			log.Printf("failed to upload puppet avatar user=%s url=%s: %v", user, avatarURL, err)
+			return name, "", false
+		}
+	}
 	if err := intent.SetDisplayName(ctx, name); err != nil {
 		log.Printf("failed to set puppet displayname user=%s name=%q: %v", user, name, err)
 	}
-	avatarURL := strings.TrimSpace(ct.AvatarURL)
 	if avatarURL == "" {
-		return name, ""
-	}
-	mxc, err := s.roomAvatarFromURL(ctx, avatarURL)
-	if err != nil {
-		log.Printf("failed to upload puppet avatar user=%s url=%s: %v", user, avatarURL, err)
-		return name, ""
+		s.cachePuppetProfile(ctx, user, puppetProfileCache{DisplayName: name})
+		return name, "", true
 	}
 	parsed, err := mxc.Parse()
 	if err != nil {
 		log.Printf("failed to parse uploaded puppet avatar user=%s mxc=%s: %v", user, mxc, err)
-		return name, ""
+		return name, "", false
 	}
 	if err := intent.SetAvatarURL(ctx, parsed); err != nil {
 		log.Printf("failed to set puppet avatar user=%s mxc=%s: %v", user, mxc, err)
 	}
-	return name, mxc
+	s.cachePuppetProfile(ctx, user, puppetProfileCache{DisplayName: name, AvatarSourceURL: avatarURL, AvatarMXC: mxc})
+	return name, mxc, true
+}
+
+func (s *Server) cachePuppetProfile(ctx context.Context, user remoteapi.UserID, cache puppetProfileCache) {
+	if s == nil || s.contacts == nil || user == "" {
+		return
+	}
+	account := s.currentAccountID(ctx)
+	if account == "" {
+		return
+	}
+	s.contacts.setPuppetProfileCache(account, user, cache)
 }
 
 func extraMemberContacts(v any) []remoteapi.Contact {
@@ -528,7 +571,7 @@ func extraMemberContacts(v any) []remoteapi.Contact {
 	}
 }
 
-func (s *Server) syncPortalMembers(ctx context.Context, rec portalRecord, chat remoteapi.Chat, force bool) (joined, failed int) {
+func (s *Server) syncPortalMembers(ctx context.Context, rec portalRecord, chat remoteapi.Chat, force bool, profileMode puppetProfileUpdateMode) (joined, failed int) {
 	if rec.RoomID == "" {
 		return 0, 0
 	}
@@ -555,7 +598,7 @@ func (s *Server) syncPortalMembers(ctx context.Context, rec portalRecord, chat r
 		}
 		seen[user] = true
 		profileForce := force && !(chat.IsGroup && hasMemberContacts)
-		if _, ok := s.ensurePuppetJoinedWithProfile(ctx, user, rec.RoomID, profileForce); ok {
+		if _, ok := s.ensurePuppetJoinedWithProfile(ctx, user, rec.RoomID, profileForce, profileMode); ok {
 			joined++
 		} else {
 			failed++

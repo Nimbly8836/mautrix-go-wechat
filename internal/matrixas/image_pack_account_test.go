@@ -32,6 +32,39 @@ func TestImagePackStateEventTypesIncludesStableAndUnstable(t *testing.T) {
 	}
 }
 
+func TestImagePackAccountDataTargetsUseEmptyStateKeyForElementLegacy(t *testing.T) {
+	targets := imagePackAccountDataTargets("wechat.wxid_self")
+	if len(targets) != 2 {
+		t.Fatalf("unexpected target count: %#v", targets)
+	}
+	if targets[0].EventType != "m.image_pack.rooms" || targets[0].StateKey != "wechat.wxid_self" {
+		t.Fatalf("unexpected stable target: %#v", targets[0])
+	}
+	if targets[1].EventType != "im.ponies.emote_rooms" || targets[1].StateKey != "" {
+		t.Fatalf("unexpected legacy Element target: %#v", targets[1])
+	}
+}
+
+func TestImagePackStateEventTargetsUseEmptyStateKeyForElementLegacy(t *testing.T) {
+	targets := imagePackStateEventTargets("wechat.wxid_self")
+	if len(targets) != 2 {
+		t.Fatalf("unexpected target count: %#v", targets)
+	}
+	if targets[0].EventType.Type != "m.room.image_pack" || targets[0].StateKey != "wechat.wxid_self" {
+		t.Fatalf("unexpected stable target: %#v", targets[0])
+	}
+	if targets[1].EventType.Type != "im.ponies.room_emotes" || targets[1].StateKey != "" {
+		t.Fatalf("unexpected legacy Element target: %#v", targets[1])
+	}
+}
+
+func TestImagePackPortalMirrorUsesOnlyElementLegacyTarget(t *testing.T) {
+	targets := imagePackPortalMirrorTargets()
+	if len(targets) != 1 || targets[0].EventType.Type != "im.ponies.room_emotes" || targets[0].StateKey != "" {
+		t.Fatalf("unexpected portal mirror targets: %#v", targets)
+	}
+}
+
 func TestPersonalStickerAccessTokenForUser(t *testing.T) {
 	s := &Server{cfg: &config.Config{Bridge: config.Bridge{PersonalStickerUserID: "@leat:example.com", PersonalStickerAccessToken: "token"}}}
 	if got := s.personalStickerAccessTokenForUser("@leat:example.com"); got != "token" {
@@ -56,6 +89,24 @@ func TestSetSingleImagePackRoomSourceRemovesDuplicatePackSources(t *testing.T) {
 	}
 	if _, ok := content.Rooms[id.RoomID("!space:example.com")]["other"]; !ok {
 		t.Fatalf("expected unrelated source to be preserved, got %#v", content.Rooms)
+	}
+}
+
+func TestSetSingleImagePackRoomSourceRemovesAliasKeys(t *testing.T) {
+	content := event.ImagePackRoomsEventContent{Rooms: map[id.RoomID]map[string]struct{}{
+		id.RoomID("!space:example.com"):  {"wechat.wxid_self": {}},
+		id.RoomID("!portal:example.com"): {"wechat.wxid_self": {}, "": {}},
+	}}
+	setSingleImagePackRoomSourceAliases(&content, id.RoomID("!space:example.com"), "", "wechat.wxid_self", "")
+	if _, ok := content.Rooms[id.RoomID("!portal:example.com")]; ok {
+		t.Fatalf("expected old portal aliases to be removed, got %#v", content.Rooms)
+	}
+	keys := content.Rooms[id.RoomID("!space:example.com")]
+	if _, ok := keys[""]; !ok {
+		t.Fatalf("expected empty Element state key source, got %#v", content.Rooms)
+	}
+	if _, ok := keys["wechat.wxid_self"]; ok {
+		t.Fatalf("expected legacy wechat state key source to be removed, got %#v", content.Rooms)
 	}
 }
 

@@ -28,6 +28,24 @@ func TestBuildWechatStickerPackContentMarksImagesAsStickersAndEmoticons(t *testi
 	}
 }
 
+func TestMergeImagePackContentAddsMissingImages(t *testing.T) {
+	dst := buildWechatStickerPackContent(remoteapi.UserID("wxid_self"), []wechatStickerImage{{Shortcode: "old", URL: "mxc://example.com/old"}})
+	src := buildWechatStickerPackContent(remoteapi.UserID("wxid_self"), []wechatStickerImage{
+		{Shortcode: "old", URL: "mxc://example.com/old2"},
+		{Shortcode: "new", URL: "mxc://example.com/new"},
+	})
+	added := mergeImagePackContent(dst, src)
+	if added != 1 {
+		t.Fatalf("expected one added image, got %d", added)
+	}
+	if dst.Images["old"].URL != "mxc://example.com/old" {
+		t.Fatalf("expected existing image to be preserved")
+	}
+	if dst.Images["new"].URL != "mxc://example.com/new" {
+		t.Fatalf("expected new image to be merged")
+	}
+}
+
 func TestWechatStickerStateKeyIsStableAndNamespaced(t *testing.T) {
 	stateKey := wechatStickerPackStateKey(remoteapi.UserID("wxid_self"))
 	if stateKey != "wechat.wxid_self" {

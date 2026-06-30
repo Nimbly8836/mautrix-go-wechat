@@ -120,6 +120,10 @@ func (s *Server) Run(ctx context.Context) error {
 			if _, err := s.ensureAccountSpace(ctx, account); err != nil {
 				log.Printf("failed to ensure account space for %s: %v", account, err)
 			}
+			go func() {
+				updated, failed, members, memberFailed := s.syncPortalMetadata(context.WithoutCancel(ctx), account, puppetProfileUpdateStartup)
+				log.Printf("startup portal/profile sync finished: account=%s portals=%d failed=%d members=%d member_failed=%d", account, updated, failed, members, memberFailed)
+			}()
 		}
 		s.startRemote(ctx)
 	}
@@ -396,6 +400,9 @@ func (s *Server) addRemoteEmojiToStickerPacks(ctx context.Context, portal id.Roo
 	}
 	stateKey := wechatStickerPackStateKey(account)
 	owner := s.portals.owner()
+	for _, room := range stickerPackCleanupRooms(space, portal) {
+		s.removeStickerPackFromRoom(ctx, account, room)
+	}
 	for _, room := range stickerPackTargetRooms(space, portal) {
 		count, err := s.addStickerToAccountSpace(ctx, account, room, sticker)
 		if owner != "" && room == space {
@@ -407,6 +414,8 @@ func (s *Server) addRemoteEmojiToStickerPacks(ctx context.Context, portal id.Roo
 		}
 		log.Printf("added WeChat emoji sticker %s to sticker pack account=%s room=%s count=%d shortcode=%s", m.ID, account, room, count, sticker.Shortcode)
 	}
+	mirrored := s.syncStickerToElementPortals(ctx, account, sticker)
+	log.Printf("mirrored WeChat emoji sticker %s to Element portal packs account=%s rooms=%d shortcode=%s", m.ID, account, mirrored, sticker.Shortcode)
 }
 
 func messageEventKey(chat remoteapi.ChatID, msg remoteapi.MessageID) string {

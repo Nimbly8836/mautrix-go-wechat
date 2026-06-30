@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
+	"maunium.net/go/mautrix/id"
 )
 
 type contactStore struct {
@@ -21,8 +22,19 @@ type contactStoreData struct {
 }
 
 type accountContacts struct {
-	UpdatedAt time.Time                `json:"updated_at"`
-	Contacts  map[string]contactRecord `json:"contacts"`
+	UpdatedAt      time.Time                     `json:"updated_at"`
+	Contacts       map[string]contactRecord      `json:"contacts"`
+	PuppetProfiles map[string]puppetProfileCache `json:"puppet_profiles,omitempty"`
+}
+
+type puppetProfileCache struct {
+	DisplayName     string              `json:"display_name,omitempty"`
+	AvatarSourceURL string              `json:"avatar_source_url,omitempty"`
+	AvatarMXC       id.ContentURIString `json:"avatar_mxc,omitempty"`
+}
+
+func samePuppetProfileCache(a, b puppetProfileCache) bool {
+	return a.DisplayName == b.DisplayName && a.AvatarSourceURL == b.AvatarSourceURL && a.AvatarMXC == b.AvatarMXC
 }
 
 type contactRecord struct {
@@ -121,6 +133,39 @@ func (cs *contactStore) shouldRefresh(account remoteapi.UserID, maxAge time.Dura
 	defer cs.mu.Unlock()
 	acct, ok := cs.data.Accounts[string(account)]
 	return !ok || len(acct.Contacts) == 0 || time.Since(acct.UpdatedAt) > maxAge
+}
+
+func (cs *contactStore) getPuppetProfileCache(account, user remoteapi.UserID) (puppetProfileCache, bool) {
+	if cs == nil || account == "" || user == "" {
+		return puppetProfileCache{}, false
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	acct, ok := cs.data.Accounts[string(account)]
+	if !ok || acct.PuppetProfiles == nil {
+		return puppetProfileCache{}, false
+	}
+	cache, ok := acct.PuppetProfiles[string(user)]
+	return cache, ok
+}
+
+func (cs *contactStore) setPuppetProfileCache(account, user remoteapi.UserID, cache puppetProfileCache) {
+	if cs == nil || account == "" || user == "" {
+		return
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	acct := cs.data.Accounts[string(account)]
+	if acct.Contacts == nil {
+		acct.Contacts = map[string]contactRecord{}
+	}
+	if acct.PuppetProfiles == nil {
+		acct.PuppetProfiles = map[string]puppetProfileCache{}
+	}
+	acct.PuppetProfiles[string(user)] = cache
+	acct.UpdatedAt = time.Now()
+	cs.data.Accounts[string(account)] = acct
+	cs.saveLocked()
 }
 
 func contactToRecord(contact remoteapi.Contact) contactRecord {

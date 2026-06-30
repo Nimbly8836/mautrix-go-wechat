@@ -151,6 +151,19 @@ type fileMessageDownloadReq struct {
 	Xml            string `json:"Xml,omitempty"`
 }
 
+type videoMessageDownloadReq struct {
+	Wxid           string `json:"Wxid"`
+	Talker         string `json:"Talker,omitempty"`
+	SenderUserName string `json:"SenderUserName,omitempty"`
+	MsgID          int64  `json:"MsgId,omitempty"`
+	NewMsgID       int64  `json:"NewMsgID,omitempty"`
+	MsgSeq         int64  `json:"MsgSeq,omitempty"`
+	MsgType        int    `json:"MsgType,omitempty"`
+	DataLen        int64  `json:"DataLen,omitempty"`
+	SourceXml      string `json:"SourceXml,omitempty"`
+	Xml            string `json:"Xml,omitempty"`
+}
+
 // sendEmojiReq -> /Msg/SendEmoji
 // The backend only accepts GIF emoji payloads.
 type sendEmojiReq struct {

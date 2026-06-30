@@ -38,10 +38,10 @@ func TestWechatStickerImageFromRemoteEmojiRejectsNonEmoji(t *testing.T) {
 	}
 }
 
-func TestStickerPackTargetRoomsIncludesSpaceAndPortal(t *testing.T) {
+func TestStickerPackTargetRoomsUsesOnlyAccountSpace(t *testing.T) {
 	targets := stickerPackTargetRooms(id.RoomID("!space:example.com"), id.RoomID("!portal:example.com"))
-	if len(targets) != 2 || targets[0] != "!space:example.com" || targets[1] != "!portal:example.com" {
-		t.Fatalf("unexpected targets: %#v", targets)
+	if len(targets) != 1 || targets[0] != "!space:example.com" {
+		t.Fatalf("expected only account space target, got %#v", targets)
 	}
 }
 
@@ -49,6 +49,20 @@ func TestStickerPackTargetRoomsDeduplicatesPortalSpace(t *testing.T) {
 	targets := stickerPackTargetRooms(id.RoomID("!same:example.com"), id.RoomID("!same:example.com"))
 	if len(targets) != 1 || targets[0] != "!same:example.com" {
 		t.Fatalf("unexpected targets: %#v", targets)
+	}
+}
+
+func TestStickerPackCleanupRoomsUsesOnlyPortalRoom(t *testing.T) {
+	targets := stickerPackCleanupRooms(id.RoomID("!space:example.com"), id.RoomID("!portal:example.com"))
+	if len(targets) != 1 || targets[0] != "!portal:example.com" {
+		t.Fatalf("expected only portal cleanup target, got %#v", targets)
+	}
+}
+
+func TestStickerPackCleanupRoomsSkipsAccountSpace(t *testing.T) {
+	targets := stickerPackCleanupRooms(id.RoomID("!same:example.com"), id.RoomID("!same:example.com"))
+	if len(targets) != 0 {
+		t.Fatalf("expected no cleanup target for account space, got %#v", targets)
 	}
 }
 
@@ -61,6 +75,27 @@ func TestMessageIDAliasesIncludesRawMessageID(t *testing.T) {
 	})
 	if len(aliases) != 2 || aliases[0] != "new-456" || aliases[1] != "123" {
 		t.Fatalf("unexpected aliases: %#v", aliases)
+	}
+}
+
+func TestMatrixContentFromRemoteVideoWithoutMediaFallsBackToText(t *testing.T) {
+	content := matrixContentFromRemote(&remoteapi.InboundMessage{
+		Type: remoteapi.MsgVideo,
+		Text: "[video]",
+	})
+	if content.MsgType != "m.text" {
+		t.Fatalf("expected video without media to be text, got %s", content.MsgType)
+	}
+}
+
+func TestMatrixContentFromRemoteVideoWithMediaUsesVideo(t *testing.T) {
+	content := matrixContentFromRemote(&remoteapi.InboundMessage{
+		Type:  remoteapi.MsgVideo,
+		Text:  "clip.mp4",
+		Media: &remoteapi.Media{Data: []byte("mp4")},
+	})
+	if content.MsgType != "m.video" {
+		t.Fatalf("expected video with media to be m.video, got %s", content.MsgType)
 	}
 }
 

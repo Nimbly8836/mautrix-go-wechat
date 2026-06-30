@@ -349,7 +349,7 @@ func (s *Server) startFullContactRefresh(ctx context.Context, room id.RoomID, ac
 			s.notice(ctx, room, fmt.Sprintf("刷新联系人缓存失败: %v", err))
 			return
 		}
-		updated, failed, members, memberFailed := s.syncPortalMetadata(bg, account)
+		updated, failed, members, memberFailed := s.syncPortalMetadata(bg, account, puppetProfileUpdateCommand)
 		s.notice(ctx, room, fmt.Sprintf("已刷新联系人缓存: %d 个联系人。已同步 %d 个 portal 元数据，失败 %d 个；已同步 %d 个成员/puppet，失败 %d 个。", count, updated, failed, members, memberFailed))
 	}()
 }
@@ -376,7 +376,7 @@ func (s *Server) startSingleContactRefresh(ctx context.Context, room id.RoomID, 
 			}
 			chat = normalizePortalChat(rec, chat)
 			s.applyPortalMetadata(bg, rec, chat)
-			joined, failed := s.syncPortalMembers(bg, rec, chat, true)
+			joined, failed := s.syncPortalMembers(bg, rec, chat, true, puppetProfileUpdateCommand)
 			s.addPortalToAccountSpace(bg, account, rec)
 			s.notice(ctx, room, fmt.Sprintf("已刷新 %s。%s", chatID, s.portalRefreshDebug(chat, joined, failed)))
 			return
@@ -390,7 +390,7 @@ func (s *Server) startSingleContactRefresh(ctx context.Context, room id.RoomID, 
 	}()
 }
 
-func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserID) (updated, failed, members, memberFailed int) {
+func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserID, profileMode puppetProfileUpdateMode) (updated, failed, members, memberFailed int) {
 	if s.portals == nil {
 		return 0, 0, 0, 0
 	}
@@ -411,7 +411,7 @@ func (s *Server) syncPortalMetadata(ctx context.Context, account remoteapi.UserI
 			}
 		}
 		s.applyPortalMetadata(ctx, rec, chat)
-		joined, failedMembers := s.syncPortalMembers(ctx, rec, chat, true)
+		joined, failedMembers := s.syncPortalMembers(ctx, rec, chat, true, profileMode)
 		members += joined
 		memberFailed += failedMembers
 		updated++

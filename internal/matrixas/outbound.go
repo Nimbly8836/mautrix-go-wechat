@@ -140,7 +140,7 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 		}
 		chat = normalizePortalChat(rec, chat)
 		s.applyPortalMetadata(ctx, rec, chat)
-		joined, memberFailed := s.syncPortalMembers(ctx, rec, chat, true)
+		joined, memberFailed := s.syncPortalMembers(ctx, rec, chat, true, puppetProfileUpdateCommand)
 		s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("已刷新当前 portal 房间元数据。%s", s.portalRefreshDebug(chat, joined, memberFailed)))
 		return

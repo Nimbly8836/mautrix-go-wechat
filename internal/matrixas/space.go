@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"maunium.net/go/mautrix"
@@ -29,6 +30,38 @@ var accountSpaceFolders = []accountSpaceFolder{
 	{Key: spaceFolderContacts, Name: "联系人", Topic: "WeChat one-to-one contact portals"},
 	{Key: spaceFolderOfficial, Name: "公众号", Topic: "WeChat official account portals"},
 	{Key: spaceFolderGroups, Name: "群聊", Topic: "WeChat group chat portals"},
+}
+
+func accountSpaceFolderNames() map[string]struct{} {
+	names := make(map[string]struct{}, len(accountSpaceFolders))
+	for _, folder := range accountSpaceFolders {
+		names[folder.Name] = struct{}{}
+	}
+	return names
+}
+
+func duplicateAccountFolderChildren(folders map[string]id.RoomID, childNames map[id.RoomID]string, childSpaces map[id.RoomID]bool) []id.RoomID {
+	current := map[id.RoomID]struct{}{}
+	for _, room := range folders {
+		if room != "" {
+			current[room] = struct{}{}
+		}
+	}
+	folderNames := accountSpaceFolderNames()
+	duplicates := make([]id.RoomID, 0)
+	for room, name := range childNames {
+		if room == "" || !childSpaces[room] {
+			continue
+		}
+		if _, isCurrent := current[room]; isCurrent {
+			continue
+		}
+		if _, isFolderName := folderNames[strings.TrimSpace(name)]; isFolderName {
+			duplicates = append(duplicates, room)
+		}
+	}
+	sort.Slice(duplicates, func(i, j int) bool { return duplicates[i] < duplicates[j] })
+	return duplicates
 }
 
 // ensureAccountSpace creates or returns the Matrix Space for the current WeChat
@@ -149,6 +182,7 @@ func (s *Server) ensureAccountSpaceVisibleTo(ctx context.Context, account remote
 	}
 	s.inviteUserToRoom(ctx, space, user)
 	s.ensureRoomAdminPower(ctx, user, space)
+	s.repairStickerPackCompatibility(ctx, account, space, user)
 	for _, folder := range folders {
 		s.inviteUserToRoom(ctx, folder, user)
 		s.ensureRoomAdminPower(ctx, user, folder)
@@ -195,7 +229,42 @@ func (s *Server) ensureAccountSpaceFoldersLocked(ctx context.Context, account re
 		s.addSpaceChild(ctx, parent, roomID, true)
 		s.setSpaceParent(ctx, roomID, parent, false)
 	}
+	s.cleanupDuplicateAccountFolderChildren(ctx, parent, out)
 	return out, nil
+}
+
+func (s *Server) cleanupDuplicateAccountFolderChildren(ctx context.Context, parent id.RoomID, folders map[string]id.RoomID) {
+	if parent == "" || s == nil || s.as == nil || s.as.BotIntent() == nil || s.as.BotIntent().Client == nil {
+		return
+	}
+	state, err := s.as.BotIntent().Client.StateAsArray(ctx, parent)
+	if err != nil {
+		log.Printf("failed to fetch account space state for duplicate folder cleanup space=%s: %v", parent, err)
+		return
+	}
+	childNames := map[id.RoomID]string{}
+	childSpaces := map[id.RoomID]bool{}
+	for _, evt := range state {
+		if evt == nil || evt.Type != event.StateSpaceChild || evt.StateKey == nil || *evt.StateKey == "" {
+			continue
+		}
+		child := id.RoomID(*evt.StateKey)
+		var createContent event.CreateEventContent
+		if err := s.as.BotIntent().StateEvent(ctx, child, event.StateCreate, "", &createContent); err != nil || createContent.Type != event.RoomTypeSpace {
+			continue
+		}
+		var nameContent event.RoomNameEventContent
+		if err := s.as.BotIntent().StateEvent(ctx, child, event.StateRoomName, "", &nameContent); err != nil {
+			continue
+		}
+		childNames[child] = nameContent.Name
+		childSpaces[child] = true
+	}
+	for _, duplicate := range duplicateAccountFolderChildren(folders, childNames, childSpaces) {
+		s.removeSpaceChild(ctx, parent, duplicate)
+		s.removeSpaceParent(ctx, duplicate, parent)
+		log.Printf("removed duplicate account folder space from account space: parent=%s duplicate=%s name=%q", parent, duplicate, childNames[duplicate])
+	}
 }
 
 func (s *Server) createAccountRootSpace(ctx context.Context, account remoteapi.UserID, owner id.UserID) (id.RoomID, error) {
@@ -314,6 +383,7 @@ func (s *Server) repairAccountSpace(ctx context.Context, account remoteapi.UserI
 		s.ensureRoomAdminPower(ctx, owner, portal.RoomID)
 		count++
 	}
+	s.repairStickerPacksForAccount(ctx, account, space, owner)
 	return count
 }
 
@@ -346,6 +416,10 @@ func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.
 	s.addSpaceChild(ctx, space, portal.RoomID, true)
 	s.setSpaceParent(ctx, portal.RoomID, space, false)
 	s.addPortalToSpace(ctx, folderSpace, portal)
+	for _, room := range stickerPackCleanupRooms(space, portal.RoomID) {
+		s.removeStickerPackFromRoom(ctx, account, room)
+	}
+	s.mirrorStickerPackToElementPortal(ctx, account, space, portal.RoomID)
 }
 
 func (s *Server) portalSpaceFolder(ctx context.Context, portal portalRecord) string {
