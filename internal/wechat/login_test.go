@@ -26,6 +26,31 @@ func withQRSettings(poll time.Duration, maxFailures int, fallback time.Duration)
 	}
 }
 
+func TestQRLoginStartAcceptsStringExpiredTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Login/LoginGetQRx":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Code": 0, "Success": true, "Data": map[string]any{"Uuid": "uuid-1", "QrBase64": "data:qr", "ExpiredTime": "120"}})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL)}
+	login := &qrLogin{c: c, flow: qrFlow{ID: "ipad-x", Name: "iPad QR bypass", Endpoint: "/Login/LoginGetQRx", LoginType: "ipad"}}
+	step, err := login.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if step.Type != remoteapi.LoginDisplayAndWait || step.Display == nil || step.Display.Data != "data:qr" {
+		t.Fatalf("unexpected start step: %#v", step)
+	}
+	if ttl := time.Until(login.expiresAt); ttl <= 0 || ttl > 121*time.Second {
+		t.Fatalf("unexpected QR expiry deadline: %s", ttl)
+	}
+}
+
 func TestRefreshLoginUsesCurrentAccountAndEnablesHooks(t *testing.T) {
 	var twiceCalls int32
 	var heartCalls int32

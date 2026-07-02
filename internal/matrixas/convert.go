@@ -51,12 +51,19 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgEmoji:
 		if m.Media != nil && len(m.Media.Data) > 0 {
-			return &event.MessageEventContent{MsgType: event.CapMsgSticker, Body: body}
+			// m.sticker events don't have a msgtype in the Matrix spec. Cinny is
+			// tolerant of msgtype=m.sticker here, but Element may ignore those
+			// events, so leave MsgType empty and let the event type carry sticker.
+			return &event.MessageEventContent{Body: body}
 		}
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	default:
 		return &event.MessageEventContent{MsgType: event.MsgNotice, Body: body}
 	}
+}
+
+func shouldUploadRemoteMedia(m *remoteapi.InboundMessage, eventType event.Type, content *event.MessageEventContent) bool {
+	return m != nil && content != nil && m.Media != nil && len(m.Media.Data) > 0 && (content.MsgType.IsMedia() || eventType == event.EventSticker)
 }
 
 func wechatStickerImageFromRemoteEmoji(m *remoteapi.InboundMessage, mxcURL id.ContentURIString) (wechatStickerImage, bool) {

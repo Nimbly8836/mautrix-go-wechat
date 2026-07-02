@@ -27,20 +27,33 @@ type getQRReq struct {
 // getQRResp is the Data of /Login/LoginGetQR. Field names are tolerant; the
 // service returns at least a UUID and a base64/URL QR payload.
 type getQRResp struct {
-	Uuid        string `json:"Uuid"`
-	QRCode      string `json:"QrCode"` // sometimes "QRCodeURL" / base64
-	QRBase      string `json:"QrBase64"`
-	BaseUrl     string `json:"BaseUrl"`
-	ExpiredTime int64  `json:"ExpiredTime"`
+	Uuid        string        `json:"Uuid"`
+	QRCode      string        `json:"QrCode"` // sometimes "QRCodeURL" / base64
+	QRBase      string        `json:"QrBase64"`
+	BaseUrl     string        `json:"BaseUrl"`
+	ExpiredTime flexibleInt64 `json:"ExpiredTime"`
+}
+
+// flexibleInt64 accepts API numbers that may be encoded either as JSON numbers
+// or as strings (e.g. LoginGetQRx returns ExpiredTime as "120").
+type flexibleInt64 int64
+
+func (n *flexibleInt64) UnmarshalJSON(data []byte) error {
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*n = flexibleInt64(int64Value(raw))
+	return nil
 }
 
 // checkQRResp is the Data of /Login/LoginCheckQR.
 type checkQRResp struct {
-	Status      int    `json:"Status"` // 0=waiting, 1=scanned, 2=confirmed/success
-	Wxid        string `json:"Wxid"`
-	NickName    string `json:"NickName"`
-	HeadImgUrl  string `json:"HeadImgUrl"`
-	ExpiredTime int    `json:"ExpiredTime"`
+	Status      int           `json:"Status"` // 0=waiting, 1=scanned, 2=confirmed/success
+	Wxid        string        `json:"Wxid"`
+	NickName    string        `json:"NickName"`
+	HeadImgUrl  string        `json:"HeadImgUrl"`
+	ExpiredTime flexibleInt64 `json:"ExpiredTime"`
 }
 
 // --- Messaging ---

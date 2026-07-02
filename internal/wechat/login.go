@@ -92,7 +92,7 @@ func (l *qrLogin) Start(ctx context.Context) (*remoteapi.LoginStep, error) {
 		return nil, fmt.Errorf("wechat: empty UUID from %s", l.flow.Endpoint)
 	}
 	l.uuid = qr.Uuid
-	l.expiresAt = qrExpiryDeadline(qr.ExpiredTime, time.Now())
+	l.expiresAt = qrExpiryDeadline(int64(qr.ExpiredTime), time.Now())
 
 	return &remoteapi.LoginStep{
 		Type:         remoteapi.LoginDisplayAndWait,

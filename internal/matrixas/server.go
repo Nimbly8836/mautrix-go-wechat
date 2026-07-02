@@ -342,7 +342,7 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	}
 	content := matrixContentFromRemote(m)
 	eventType := matrixEventTypeFromRemote(m)
-	if m.Media != nil && len(m.Media.Data) > 0 && content.MsgType.IsMedia() {
+	if shouldUploadRemoteMedia(m, eventType, content) {
 		mimeType := m.Media.MimeType
 		if mimeType == "" {
 			mimeType = http.DetectContentType(m.Media.Data)

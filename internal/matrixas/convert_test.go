@@ -1,12 +1,43 @@
 package matrixas
 
 import (
+	"encoding/json"
 	"testing"
 
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
+
+func TestMatrixContentFromRemoteEmojiWithMediaUsesSpecStickerContent(t *testing.T) {
+	msg := &remoteapi.InboundMessage{
+		Type:  remoteapi.MsgEmoji,
+		Text:  "[emoji]",
+		Media: &remoteapi.Media{Data: []byte("gif")},
+	}
+	content := matrixContentFromRemote(msg)
+	if content.MsgType != "" {
+		t.Fatalf("expected m.sticker event content to omit msgtype, got %s", content.MsgType)
+	}
+	if eventType := matrixEventTypeFromRemote(msg); eventType != event.EventSticker {
+		t.Fatalf("expected m.sticker event type, got %s", eventType.Type)
+	}
+	if !shouldUploadRemoteMedia(msg, event.EventSticker, content) {
+		t.Fatalf("expected m.sticker event with media to be uploaded")
+	}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if _, ok := obj["msgtype"]; ok {
+		t.Fatalf("expected sticker content JSON to omit msgtype, got %s", raw)
+	}
+}
 
 func TestWechatStickerImageFromRemoteEmojiUsesStableMD5Shortcode(t *testing.T) {
 	sticker, ok := wechatStickerImageFromRemoteEmoji(&remoteapi.InboundMessage{
