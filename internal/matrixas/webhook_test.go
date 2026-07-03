@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/leat/mautrix-go-wechat/internal/config"
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
 
@@ -42,5 +43,22 @@ func TestHandleWebhookRejectsNonPost(t *testing.T) {
 	s.handleWebhook(resp, req)
 	if resp.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected status 405, got %d", resp.Code)
+	}
+}
+
+func TestShouldStartRemoteOnRunStartsPushEvenWhenLoginProbeFails(t *testing.T) {
+	s := &Server{cfg: &config.Config{Network: config.Network{Receive: config.Receive{Mode: "push"}}}}
+	if !s.shouldStartRemoteOnRun(false) {
+		t.Fatalf("push mode must start remote event pump even when login probe fails")
+	}
+}
+
+func TestShouldStartRemoteOnRunKeepsPollLoginGate(t *testing.T) {
+	s := &Server{cfg: &config.Config{Network: config.Network{Receive: config.Receive{Mode: "poll"}}}}
+	if s.shouldStartRemoteOnRun(false) {
+		t.Fatalf("poll mode should not start remote event pump when login probe fails")
+	}
+	if !s.shouldStartRemoteOnRun(true) {
+		t.Fatalf("poll mode should start remote event pump when logged in")
 	}
 }

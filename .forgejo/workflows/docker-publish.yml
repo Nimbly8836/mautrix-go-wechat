@@ -1,0 +1,41 @@
+name: Build and publish Docker image
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  docker-publish:
+    runs-on: docker
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker registry
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          set -eu
+          echo "$DOCKER_PASSWORD" | docker login 10.0.0.214:28052 \
+            --username "$DOCKER_USERNAME" \
+            --password-stdin
+
+      - name: Build and push image
+        env:
+          REGISTRY: 10.0.0.214:28052
+          IMAGE_NAME: mautrix-go-wechat
+        run: |
+          set -eu
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          image="$REGISTRY/$IMAGE_NAME"
+
+          docker buildx create --use --name forgejo-builder 2>/dev/null || docker buildx use forgejo-builder
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --tag "$image:latest" \
+            --tag "$image:$short_sha" \
+            --push \
+            .

@@ -115,7 +115,8 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.as.Start()
 	go s.matrixLoop(ctx)
 
-	if ok, _ := s.api.IsLoggedIn(ctx); ok {
+	loggedIn, _ := s.api.IsLoggedIn(ctx)
+	if loggedIn {
 		if account := s.currentAccountID(ctx); account != "" {
 			if _, err := s.ensureAccountSpace(ctx, account); err != nil {
 				log.Printf("failed to ensure account space for %s: %v", account, err)
@@ -125,6 +126,8 @@ func (s *Server) Run(ctx context.Context) error {
 				log.Printf("startup portal/profile sync finished: account=%s portals=%d failed=%d members=%d member_failed=%d", account, updated, failed, members, memberFailed)
 			}()
 		}
+	}
+	if s.shouldStartRemoteOnRun(loggedIn) {
 		s.startRemote(ctx)
 	}
 
@@ -133,6 +136,13 @@ func (s *Server) Run(ctx context.Context) error {
 	s.as.Stop()
 	s.stopRemote()
 	return ctx.Err()
+}
+
+func (s *Server) shouldStartRemoteOnRun(loggedIn bool) bool {
+	if loggedIn {
+		return true
+	}
+	return s != nil && s.cfg != nil && s.cfg.Network.Receive.Mode == "push"
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {

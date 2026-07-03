@@ -41,3 +41,18 @@ func TestHandleWebhookAcceptsDirectSyncResponse(t *testing.T) {
 		t.Fatalf("expected webhook to emit an event")
 	}
 }
+
+func TestConnectInPushModeSkipsLoginProbe(t *testing.T) {
+	c := &Client{events: make(chan remoteapi.Event, 1), done: make(chan struct{}), receiveMode: "push"}
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatalf("push Connect should not require login probe: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		if ev.Kind != remoteapi.EventConnected {
+			t.Fatalf("expected connected event, got %#v", ev)
+		}
+	default:
+		t.Fatalf("expected connected event")
+	}
+}

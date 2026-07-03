@@ -94,6 +94,10 @@ var (
 // ---------------------------------------------------------------------------
 
 func (c *Client) Connect(ctx context.Context) error {
+	if c.receiveMode == "push" {
+		c.emit(remoteapi.Event{Kind: remoteapi.EventConnected})
+		return nil
+	}
 	loggedIn, err := c.IsLoggedIn(ctx)
 	if err != nil {
 		return err
@@ -101,9 +105,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	if !loggedIn {
 		return fmt.Errorf("wechat: not logged in; call Login first")
 	}
-	if c.receiveMode != "push" {
-		go c.syncLoop()
-	}
+	go c.syncLoop()
 	c.emit(remoteapi.Event{Kind: remoteapi.EventConnected})
 	return nil
 }
