@@ -13,13 +13,14 @@ jobs:
 
       - name: Log in to Docker registry
         env:
+          DOCKER_CONFIG: /tmp/.docker
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         run: |
           set -eu
-          echo "$DOCKER_PASSWORD" | docker login 10.0.0.214:28052 \
-            --username "$DOCKER_USERNAME" \
-            --password-stdin
+          test -n "$DOCKER_USERNAME" || { echo "DOCKER_USERNAME secret is empty"; exit 1; }
+          test -n "$DOCKER_PASSWORD" || { echo "DOCKER_PASSWORD secret is empty"; exit 1; }
+          printf '%s' "$DOCKER_PASSWORD" | docker login 10.0.0.214:28052 --username "$DOCKER_USERNAME" --password-stdin
 
       - name: Build and push image
         env:
