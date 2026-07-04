@@ -11,6 +11,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Preflight workspace
+        run: |
+          set -eu
+          echo "pwd=$(pwd)"
+          echo "github.workspace=${{ github.workspace }}"
+          test -f "${{ github.workspace }}/Dockerfile"
+          test -f "${{ github.workspace }}/go.mod"
+
       - name: Write registry auth config
         env:
           REGISTRY: 10.0.0.214:28052
@@ -18,9 +26,9 @@ jobs:
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         run: |
           set -eu
-          mkdir -p .docker
+          mkdir -p "${{ github.workspace }}/.docker"
           auth="$(printf '%s:%s' "$DOCKER_USERNAME" "$DOCKER_PASSWORD" | base64 | tr -d '\n')"
-          cat > .docker/config.json <<EOF
+          cat > "${{ github.workspace }}/.docker/config.json" <<EOF
           {
             "auths": {
               "$REGISTRY": {
@@ -33,13 +41,15 @@ jobs:
       - name: Build and push image with Kaniko
         uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
         env:
-          DOCKER_CONFIG: /github/workspace/.docker
+          DOCKER_CONFIG: ${{ github.workspace }}/.docker
         with:
           args: >-
-            --context=/github/workspace
-            --dockerfile=/github/workspace/Dockerfile
+            --context=dir://${{ github.workspace }}
+            --dockerfile=Dockerfile
             --destination=10.0.0.214:28052/mautrix-go-wechat:latest
             --destination=10.0.0.214:28052/mautrix-go-wechat:${{ github.sha }}
             --custom-platform=linux/amd64
             --insecure
+            --insecure-pull
             --skip-tls-verify
+            --skip-tls-verify-pull
