@@ -42,6 +42,19 @@ func TestHandleWebhookAcceptsDirectSyncResponse(t *testing.T) {
 	}
 }
 
+func TestHandleWebhookIgnoresTransientLoggedOutEnvelope(t *testing.T) {
+	c := &Client{events: make(chan remoteapi.Event, 1), done: make(chan struct{})}
+	payload := []byte(`{"Code":-13,"Success":false,"Message":"用户可能退出"}`)
+	if err := c.HandleWebhook(context.Background(), payload); err != nil {
+		t.Fatalf("HandleWebhook should ignore transient logged-out envelope, got error: %v", err)
+	}
+	select {
+	case ev := <-c.Events():
+		t.Fatalf("expected no event for transient logged-out envelope, got %#v", ev)
+	default:
+	}
+}
+
 func TestConnectInPushModeSkipsLoginProbe(t *testing.T) {
 	c := &Client{events: make(chan remoteapi.Event, 1), done: make(chan struct{}), receiveMode: "push"}
 	if err := c.Connect(context.Background()); err != nil {

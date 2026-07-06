@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -165,6 +166,10 @@ func decodeWebhookMessages(payload []byte) (syncResponse, error) {
 	var env Envelope
 	if err := json.Unmarshal(payload, &env); err == nil && (len(env.Data) > 0 || env.Code != 0 || env.Message != "") {
 		if !env.Success && env.Code != 0 {
+			if isTransientLoggedOutCode(env.Code, env.Message) {
+				log.Printf("wechat webhook: ignoring transient logged-out envelope code=%d message=%q", env.Code, env.Message)
+				return syncResponse{}, nil
+			}
 			return syncResponse{}, &APIError{Code: env.Code, Message: env.Message, Path: "webhook"}
 		}
 		if len(env.Data) == 0 {
@@ -177,6 +182,18 @@ func decodeWebhookMessages(payload []byte) (syncResponse, error) {
 		return resp, nil
 	}
 	return decodeWebhookMessageSet(payload)
+}
+
+func isTransientLoggedOutError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return isTransientLoggedOutCode(apiErr.Code, apiErr.Message)
+}
+
+func isTransientLoggedOutCode(code int, message string) bool {
+	return code == -13 || strings.Contains(message, "用户可能退出")
 }
 
 func decodeWebhookMessageSet(payload []byte) (syncResponse, error) {
@@ -496,7 +513,43 @@ func normalizeInfoFields(raw any) map[string]any {
 // outbound messaging
 // ---------------------------------------------------------------------------
 
+var transientSendRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
 func (c *Client) SendMessage(ctx context.Context, chat remoteapi.ChatID, msg remoteapi.OutgoingMessage) (remoteapi.MessageID, error) {
+	msgID, err := c.sendMessageOnce(ctx, chat, msg)
+	if !isTransientLoggedOutError(err) {
+		return msgID, err
+	}
+	lastErr := err
+	for attempt, delay := range transientSendRetryDelays {
+		log.Printf("wechat send: transient logged-out error, waiting for upstream auto relogin before retry attempt=%d/%d chat=%s delay=%s err=%v", attempt+1, len(transientSendRetryDelays), chat, delay, lastErr)
+		if err := sleepContext(ctx, delay); err != nil {
+			return "", fmt.Errorf("%w (stopped waiting for upstream auto relogin: %v)", lastErr, err)
+		}
+		msgID, err = c.sendMessageOnce(ctx, chat, msg)
+		if !isTransientLoggedOutError(err) {
+			return msgID, err
+		}
+		lastErr = err
+	}
+	return "", lastErr
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg remoteapi.OutgoingMessage) (remoteapi.MessageID, error) {
 	c.mu.RLock()
 	wxid := c.wxid
 	c.mu.RUnlock()
