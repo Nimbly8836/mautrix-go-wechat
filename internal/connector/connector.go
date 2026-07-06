@@ -12,6 +12,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
@@ -84,7 +85,8 @@ func (c *Connector) dispatch(ctx context.Context, ev remoteapi.Event) {
 	switch ev.Kind {
 	case remoteapi.EventMessage:
 		if ev.Message != nil {
-			c.sink.OnMessage(ctx, ev.Message)
+			msg := ev.Message
+			go c.dispatchMessage(ctx, msg)
 		}
 	case remoteapi.EventRedaction:
 		if ev.Redaction != nil {
@@ -103,4 +105,13 @@ func (c *Connector) dispatch(ctx context.Context, ev remoteapi.Event) {
 	case remoteapi.EventDisconnected:
 		c.sink.OnDisconnected(ctx, ev.Error)
 	}
+}
+
+func (c *Connector) dispatchMessage(ctx context.Context, msg *remoteapi.InboundMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("connector: recovered panic while dispatching inbound message chat=%s sender=%s id=%s: %v", msg.Chat, msg.Sender, msg.ID, r)
+		}
+	}()
+	c.sink.OnMessage(ctx, msg)
 }

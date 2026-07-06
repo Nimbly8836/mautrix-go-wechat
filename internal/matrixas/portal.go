@@ -416,7 +416,32 @@ const (
 )
 
 func shouldUpdatePuppetProfile(mode puppetProfileUpdateMode) bool {
-	return mode == puppetProfileUpdateStartup || mode == puppetProfileUpdateCommand
+	return mode == puppetProfileUpdateCommand
+}
+
+func puppetJoinKey(room id.RoomID, user remoteapi.UserID) string {
+	return string(room) + "\x00" + string(user)
+}
+
+func (s *Server) hasPuppetJoin(room id.RoomID, user remoteapi.UserID) bool {
+	if s == nil || room == "" || user == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.puppetJoins[puppetJoinKey(room, user)]
+}
+
+func (s *Server) markPuppetJoined(room id.RoomID, user remoteapi.UserID) {
+	if s == nil || room == "" || user == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.puppetJoins == nil {
+		s.puppetJoins = map[string]bool{}
+	}
+	s.puppetJoins[puppetJoinKey(room, user)] = true
 }
 
 func (s *Server) puppetIntent(ctx context.Context, user remoteapi.UserID) *mautrix.Client {
@@ -457,6 +482,9 @@ func (s *Server) ensurePuppetJoinedWithProfile(ctx context.Context, user remotea
 	if !ok {
 		return nil, false
 	}
+	if !force && profileMode == puppetProfileUpdateAuto && s.hasPuppetJoin(room, user) {
+		return intent, true
+	}
 	extra := map[string]interface{}{}
 	if shouldUpdatePuppetProfile(profileMode) {
 		name, avatar, changed := s.updatePuppetProfile(ctx, user, force)
@@ -476,6 +504,7 @@ func (s *Server) ensurePuppetJoinedWithProfile(ctx context.Context, user remotea
 			return nil, false
 		}
 	}
+	s.markPuppetJoined(room, user)
 	return intent, true
 }
 

@@ -48,6 +48,7 @@ type Server struct {
 	remoteCtx      context.Context
 	remoteStop     context.CancelFunc
 	contactRefresh map[string]bool
+	puppetJoins    map[string]bool
 }
 
 // New creates the appservice and remote connector from config + registration.
@@ -72,7 +73,7 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	as.Log = zerolog.New(os.Stdout).With().Timestamp().Str("component", "appservice").Logger()
 	as.QueryHandler = queryHandler{bot: id.NewUserID(reg.SenderLocalpart, cfg.Homeserver.Domain), domain: cfg.Homeserver.Domain, prefix: reg.ID + "_"}
 
-	s := &Server{cfg: cfg, as: as, apiCfg: apiCfg, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}, messageEvents: map[string]id.EventID{}, contactRefresh: map[string]bool{}}
+	s := &Server{cfg: cfg, as: as, apiCfg: apiCfg, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}, messageEvents: map[string]id.EventID{}, contactRefresh: map[string]bool{}, puppetJoins: map[string]bool{}}
 	if s.sessionFile == "" {
 		s.sessionFile = "/data/session.json"
 	}
@@ -135,10 +136,6 @@ func (s *Server) Run(ctx context.Context) error {
 			if _, err := s.ensureAccountSpace(ctx, account); err != nil {
 				log.Printf("failed to ensure account space for %s: %v", account, err)
 			}
-			go func() {
-				updated, failed, members, memberFailed := s.syncPortalMetadata(context.WithoutCancel(ctx), account, puppetProfileUpdateStartup)
-				log.Printf("startup portal/profile sync finished: account=%s portals=%d failed=%d members=%d member_failed=%d", account, updated, failed, members, memberFailed)
-			}()
 		}
 	}
 	if s.shouldStartRemoteOnRun(loggedIn) {
