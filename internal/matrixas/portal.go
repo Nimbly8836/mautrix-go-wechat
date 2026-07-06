@@ -509,25 +509,48 @@ func (s *Server) ensurePuppetJoinedWithProfile(ctx context.Context, user remotea
 	if !force && profileMode == puppetProfileUpdateAuto && s.hasPuppetJoin(room, user) {
 		return intent, true
 	}
-	extra := map[string]interface{}{}
 	if shouldUpdatePuppetProfile(profileMode) {
-		_, avatar, changed := s.updatePuppetProfile(ctx, user, force)
-		if changed && avatar != "" {
-			extra["avatar_url"] = string(avatar)
-		}
+		s.updatePuppetProfile(ctx, user, force)
 	}
-	if name := s.roomMemberDisplayNameForRemote(ctx, user); name != "" {
-		extra["displayname"] = name
-	}
-	if _, err := intent.JoinRoomByID(ctx, room, extra); err != nil {
+	if _, err := intent.JoinRoomByID(ctx, room); err != nil {
+		// JoinRoomByID with custom membership extra cannot be used for displayname
+		// overrides here: mautrix merges parsed membership content after Raw, so
+		// the profile displayname overwrites Raw["displayname"]. Send an explicit
+		// m.room.member state event after joining instead.
 		log.Printf("failed to join/update puppet %s in %s: %v", user, room, err)
 		if err := intent.EnsureJoined(ctx, room); err != nil {
 			log.Printf("failed to ensure puppet %s joined to %s: %v", user, room, err)
 			return nil, false
 		}
 	}
+	if name := s.roomMemberDisplayNameForRemote(ctx, user); name != "" {
+		s.setPuppetRoomDisplayName(ctx, intent, room, name)
+	}
 	s.markPuppetJoined(room, user)
 	return intent, true
+}
+
+func (s *Server) setPuppetRoomDisplayName(ctx context.Context, intent *appservice.IntentAPI, room id.RoomID, name string) {
+	if intent == nil || room == "" || strings.TrimSpace(name) == "" {
+		return
+	}
+	content := event.MemberEventContent{Membership: event.MembershipJoin}
+	if s != nil && s.as != nil && s.as.BotIntent() != nil {
+		var existing event.MemberEventContent
+		if err := s.as.BotIntent().StateEvent(ctx, room, event.StateMember, intent.UserID.String(), &existing); err == nil {
+			content = existing
+		}
+	}
+	if content.Membership == "" {
+		content.Membership = event.MembershipJoin
+	}
+	if content.Displayname == name {
+		return
+	}
+	content.Displayname = name
+	if _, err := intent.SendStateEvent(ctx, room, event.StateMember, intent.UserID.String(), &content); err != nil {
+		log.Printf("failed to set puppet room displayname user=%s room=%s name=%q: %v", intent.UserID, room, name, err)
+	}
 }
 
 func (s *Server) updatePuppetProfile(ctx context.Context, user remoteapi.UserID, force bool) (string, id.ContentURIString, bool) {
