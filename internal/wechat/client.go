@@ -578,6 +578,22 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		}
 		return msgID(r), nil
 
+	case remoteapi.MsgVideo:
+		if msg.Media == nil || len(msg.Media.Data) == 0 {
+			return "", fmt.Errorf("wechat: video message without media")
+		}
+		req := sendVideoReq{
+			Wxid:       wxid,
+			ToWxid:     to,
+			Base64:     base64.StdEncoding.EncodeToString(msg.Media.Data),
+			PlayLength: intFromOutgoingExtra(msg.Extra, "play_length"),
+		}
+		var r sendResp
+		if err := c.t.post(ctx, "/Msg/SendVideo", req, nil, &r); err != nil {
+			return "", err
+		}
+		return msgID(r), nil
+
 	case remoteapi.MsgFile:
 		if msg.Media == nil || len(msg.Media.Data) == 0 {
 			return "", fmt.Errorf("wechat: file message without media")
@@ -640,6 +656,24 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 			return "", err
 		}
 		return msgID(r), nil
+	}
+}
+
+func intFromOutgoingExtra(extra map[string]any, key string) int {
+	if extra == nil {
+		return 0
+	}
+	switch v := extra[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case string:
+		return int(int64Value(v))
+	default:
+		return 0
 	}
 }
 

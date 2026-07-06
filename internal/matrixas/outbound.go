@@ -18,7 +18,7 @@ func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord,
 		s.sendPortalNotice(ctx, rec.RoomID, "你没有使用此 bridge 的权限。")
 		return
 	}
-	if eventType != event.EventSticker && msg.MsgType != event.MsgImage && msg.MsgType != event.MsgFile && msg.MsgType != event.CapMsgSticker {
+	if eventType != event.EventSticker && msg.MsgType != event.MsgImage && msg.MsgType != event.MsgVideo && msg.MsgType != event.MsgFile && msg.MsgType != event.CapMsgSticker {
 		return
 	}
 	if msg.URL == "" {
@@ -49,11 +49,11 @@ func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord,
 	}
 	msgID, err := s.api.SendMessage(ctx, rec.ChatID, outgoing)
 	if err != nil {
-		log.Printf("failed to send Matrix sticker to WeChat chat=%s sender=%s: %v", rec.ChatID, sender, err)
+		log.Printf("failed to send Matrix media to WeChat chat=%s sender=%s msgtype=%s: %v", rec.ChatID, sender, msg.MsgType, err)
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
 		return
 	}
-	log.Printf("sent Matrix sticker to WeChat: room=%s chat=%s sender=%s msg_id=%s", rec.RoomID, rec.ChatID, sender, msgID)
+	log.Printf("sent Matrix media to WeChat: room=%s chat=%s sender=%s msgtype=%s msg_id=%s", rec.RoomID, rec.ChatID, sender, msg.MsgType, msgID)
 }
 
 func portalMediaToRemoteMessage(data []byte, mimeType, fileName, body string, msgType event.MessageType, eventType event.Type) (remoteapi.OutgoingMessage, error) {
@@ -77,6 +77,19 @@ func portalMediaToRemoteMessage(data []byte, mimeType, fileName, body string, ms
 		}
 		return remoteapi.OutgoingMessage{
 			Type:  remoteapi.MsgImage,
+			Text:  body,
+			Media: &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))},
+		}, nil
+	}
+	if msgType == event.MsgVideo {
+		if body == "" {
+			body = fileName
+		}
+		if body == "" {
+			body = "[video]"
+		}
+		return remoteapi.OutgoingMessage{
+			Type:  remoteapi.MsgVideo,
 			Text:  body,
 			Media: &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))},
 		}, nil

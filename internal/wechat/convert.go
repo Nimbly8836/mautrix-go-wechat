@@ -325,11 +325,15 @@ func (c *Client) attachImageMedia(ctx context.Context, base *remoteapi.InboundMe
 	}
 }
 
+const videoDownloadTimeout = 30 * time.Second
+
 func (c *Client) attachVideoMedia(ctx context.Context, base *remoteapi.InboundMessage, req videoMessageDownloadReq) {
 	if c == nil || c.t == nil || base == nil || base.Media == nil {
 		return
 	}
-	data, mimeType, err := c.downloadVideo(ctx, req)
+	downloadCtx, cancel := context.WithTimeout(ctx, videoDownloadTimeout)
+	defer cancel()
+	data, mimeType, err := c.downloadVideo(downloadCtx, req)
 	if err != nil {
 		log.Printf("failed to download WeChat video %s data_len=%d user=%q: %v", base.ID, req.DataLen, req.SenderUserName, err)
 		return

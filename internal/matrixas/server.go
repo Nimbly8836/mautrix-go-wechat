@@ -243,7 +243,7 @@ func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 	log.Printf("matrix message: room=%s sender=%s eventtype=%s msgtype=%s body=%q", evt.RoomID, evt.Sender, evt.Type.String(), msg.MsgType, msg.Body)
 	if rec, ok := s.portals.byRoom(evt.RoomID); ok {
 		if evt.Type == event.EventSticker || msg.MsgType.IsMedia() {
-			s.handlePortalMediaMessage(ctx, rec, evt.Sender, msg, evt.Type)
+			go s.handlePortalMediaMessage(context.WithoutCancel(ctx), rec, evt.Sender, msg, evt.Type)
 			return
 		}
 		if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
@@ -382,7 +382,7 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 			eventType = event.EventMessage
 		} else {
 			content.URL = resp.ContentURI.CUString()
-			content.Info = &event.FileInfo{MimeType: mimeType, Size: len(m.Media.Data), Width: intFromExtra(m.Extra, "width"), Height: intFromExtra(m.Extra, "height")}
+			content.Info = &event.FileInfo{MimeType: mimeType, Size: len(m.Media.Data), Width: intFromExtra(m.Extra, "width"), Height: intFromExtra(m.Extra, "height"), Duration: intFromExtra(m.Extra, "duration")}
 			if m.Type == remoteapi.MsgEmoji {
 				s.addRemoteEmojiToStickerPacks(ctx, rec.RoomID, m, content.URL)
 			}

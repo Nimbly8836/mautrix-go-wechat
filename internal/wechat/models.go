@@ -89,6 +89,16 @@ type sendAppReq struct {
 	Xml    string `json:"Xml"`
 }
 
+// sendVideoReq -> /Msg/SendVideo
+// Base64 is the video bytes. ImageBase64 is an optional thumbnail.
+type sendVideoReq struct {
+	Wxid        string `json:"Wxid"`
+	ToWxid      string `json:"ToWxid"`
+	Base64      string `json:"Base64"`
+	ImageBase64 string `json:"ImageBase64,omitempty"`
+	PlayLength  int    `json:"PlayLength,omitempty"`
+}
+
 type uploadFileResp struct {
 	MediaID  string
 	TotalLen int64
