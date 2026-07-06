@@ -21,7 +21,8 @@ jobs:
 
       - name: Write registry auth config
         env:
-          REGISTRY: 10.0.0.214:28052
+          PUSH_REGISTRY: 10.0.0.214:28052
+          PULL_REGISTRY: 10.0.0.214:28051
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         run: |
@@ -31,9 +32,8 @@ jobs:
           cat > "${{ github.workspace }}/.docker/config.json" <<EOF
           {
             "auths": {
-              "$REGISTRY": {
-                "auth": "$auth"
-              }
+              "$PUSH_REGISTRY": { "auth": "$auth" },
+              "$PULL_REGISTRY": { "auth": "$auth" }
             }
           }
           EOF
@@ -49,6 +49,10 @@ jobs:
             --destination=10.0.0.214:28052/mautrix-go-wechat:latest
             --destination=10.0.0.214:28052/mautrix-go-wechat:${{ github.sha }}
             --custom-platform=linux/amd64
+            --registry-mirror=10.0.0.214:28051
+            --skip-default-registry-fallback
+            --insecure-registry=10.0.0.214:28051
+            --insecure-registry=10.0.0.214:28052
             --insecure
             --insecure-pull
             --skip-tls-verify
