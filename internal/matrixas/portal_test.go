@@ -45,19 +45,16 @@ func TestRoomMemberDisplayNameUsesBareRoomDisplayNameWithoutNickname(t *testing.
 	}
 }
 
-func TestRoomMemberDisplayNameCombinesNicknameAndRemark(t *testing.T) {
+func TestRoomMemberDisplayNameUsesBracketedNicknameWithoutDisplayName(t *testing.T) {
 	name := roomMemberDisplayName(remoteapi.Contact{Name: "昵称", Remark: "备注"})
-	if name != "昵称 [备注]" {
-		t.Fatalf("expected nickname [remark], got %q", name)
+	if name != "[昵称]" {
+		t.Fatalf("expected bracketed nickname fallback, got %q", name)
 	}
 }
 
-func TestRoomMemberDisplayNameFallsBackToRemarkOrNickname(t *testing.T) {
+func TestRoomMemberDisplayNameFallsBackToRemarkOnlyWhenNicknameMissing(t *testing.T) {
 	if name := roomMemberDisplayName(remoteapi.Contact{Remark: "备注"}); name != "备注" {
 		t.Fatalf("expected remark fallback, got %q", name)
-	}
-	if name := roomMemberDisplayName(remoteapi.Contact{Name: "昵称"}); name != "昵称" {
-		t.Fatalf("expected nickname fallback, got %q", name)
 	}
 }
 

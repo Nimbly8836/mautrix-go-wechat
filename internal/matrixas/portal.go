@@ -235,17 +235,16 @@ func (s *Server) contactDisplayName(ctx context.Context, user remoteapi.UserID) 
 func roomMemberDisplayName(ct remoteapi.Contact) string {
 	roomName := remoteExtraString(ct.Extra, "room_display_name")
 	name := strings.TrimSpace(ct.Name)
-	remark := strings.TrimSpace(ct.Remark)
 	if roomName != "" {
 		if name != "" && name != roomName {
 			return fmt.Sprintf("%s [%s]", roomName, name)
 		}
 		return roomName
 	}
-	if name != "" && remark != "" && name != remark {
-		return fmt.Sprintf("%s [%s]", name, remark)
+	if name != "" {
+		return fmt.Sprintf("[%s]", name)
 	}
-	return matrixPick(remark, name)
+	return strings.TrimSpace(ct.Remark)
 }
 
 func (s *Server) roomMemberDisplayNameForRemote(ctx context.Context, user remoteapi.UserID) string {
