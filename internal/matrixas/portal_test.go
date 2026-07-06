@@ -27,14 +27,21 @@ func (a namingAPI) GetContact(ctx context.Context, id remoteapi.UserID) (remotea
 	return remoteapi.Contact{ID: id}, nil
 }
 
-func TestRoomMemberDisplayNameUsesRoomDisplayNameFirst(t *testing.T) {
+func TestRoomMemberDisplayNameUsesRoomDisplayNameWithNickname(t *testing.T) {
 	name := roomMemberDisplayName(remoteapi.Contact{
 		Name:   "昵称",
 		Remark: "备注",
-		Extra:  map[string]any{"room_display_name": "群昵称"},
+		Extra:  map[string]any{"room_display_name": "群备注"},
 	})
-	if name != "群昵称" {
-		t.Fatalf("expected room display name, got %q", name)
+	if name != "群备注 [昵称]" {
+		t.Fatalf("expected room display name with nickname, got %q", name)
+	}
+}
+
+func TestRoomMemberDisplayNameUsesBareRoomDisplayNameWithoutNickname(t *testing.T) {
+	name := roomMemberDisplayName(remoteapi.Contact{Extra: map[string]any{"room_display_name": "群备注"}})
+	if name != "群备注" {
+		t.Fatalf("expected bare room display name, got %q", name)
 	}
 }
 

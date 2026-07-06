@@ -890,7 +890,11 @@ func anyString(v any) string {
 	case nil:
 		return ""
 	case string:
-		return strings.TrimSpace(val)
+		s := strings.TrimSpace(val)
+		if strings.EqualFold(s, "undefined") || strings.EqualFold(s, "null") {
+			return ""
+		}
+		return s
 	case map[string]any:
 		// protobuf-json style: {"string":"..."}
 		if s := anyString(val["string"]); s != "" {
@@ -905,7 +909,7 @@ func anyString(v any) string {
 		return ""
 	default:
 		s := strings.TrimSpace(fmt.Sprint(v))
-		if s == "<nil>" || s == "map[]" {
+		if s == "<nil>" || s == "map[]" || strings.EqualFold(s, "undefined") || strings.EqualFold(s, "null") {
 			return ""
 		}
 		return s
@@ -965,6 +969,14 @@ func (c *Client) GetChat(ctx context.Context, id remoteapi.ChatID) (remoteapi.Ch
 			}
 		} else {
 			log.Printf("failed to fetch chatroom group info chat=%s: %v", id, err)
+		}
+	}
+	if members, memberContacts := c.fetchChatRoomMemberDetail(ctx, wxid, id); len(members) > 0 || len(memberContacts) > 0 {
+		if len(members) > 0 {
+			chat.Members = members
+		}
+		if len(memberContacts) > 0 {
+			chat.Extra["member_contacts"] = memberContacts
 		}
 	}
 	chat.Members = dedupeUserIDs(chat.Members)
@@ -1033,6 +1045,25 @@ func chatMemberIDsFromContactMap(m map[string]any) []remoteapi.UserID {
 	return nil
 }
 
+func parseChatRoomMemberDetail(raw any) ([]remoteapi.UserID, []remoteapi.Contact) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	for _, path := range [][]string{
+		{"NewChatroomData", "ChatRoomMember"},
+		{"NewChatRoomData", "ChatRoomMember"},
+		{"ChatRoomMember"},
+		{"MemberList"},
+		{"Members"},
+	} {
+		if v, ok := nestedAny(m, path...); ok {
+			return parseChatMembers(map[string]any{"ChatRoomMember": v})
+		}
+	}
+	return parseChatMembers(m)
+}
+
 func parseChatMembers(m map[string]any) ([]remoteapi.UserID, []remoteapi.Contact) {
 	members := []remoteapi.UserID{}
 	contacts := []remoteapi.Contact{}
@@ -1046,6 +1077,10 @@ func parseChatMembers(m map[string]any) ([]remoteapi.UserID, []remoteapi.Contact
 			for _, item := range list {
 				if mm, ok := item.(map[string]any); ok {
 					ct := contactFromMap(mm, "")
+					// In chatroom member detail, DisplayName is the per-room remark.
+					// Keep NickName as the global/contact name so Matrix can render
+					// "DisplayName [NickName]" in the room membership.
+					ct.Name = firstString(mm, "NickName", "nickname", "Name", "name")
 					if roomName := firstString(mm, "DisplayName", "displayname", "Remark", "remark", "RemarkName", "ChatRoomNickName", "RoomNickName", "MemberDisplayName"); roomName != "" {
 						if ct.Extra == nil {
 							ct.Extra = map[string]any{}
@@ -1114,6 +1149,15 @@ func dedupeUserIDs(in []remoteapi.UserID) []remoteapi.UserID {
 		out = append(out, id)
 	}
 	return out
+}
+
+func (c *Client) fetchChatRoomMemberDetail(ctx context.Context, wxid string, chatroom remoteapi.ChatID) ([]remoteapi.UserID, []remoteapi.Contact) {
+	var raw any
+	if err := c.t.post(ctx, "/Group/GetChatRoomMemberDetail", map[string]any{"Wxid": wxid, "QID": string(chatroom)}, nil, &raw); err != nil {
+		log.Printf("failed to fetch chatroom member detail chat=%s: %v", chatroom, err)
+		return nil, nil
+	}
+	return parseChatRoomMemberDetail(raw)
 }
 
 func (c *Client) fetchChatMemberContacts(ctx context.Context, wxid string, chatroom remoteapi.ChatID, members []remoteapi.UserID) []remoteapi.Contact {
