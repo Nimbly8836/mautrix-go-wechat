@@ -513,7 +513,7 @@ func normalizeInfoFields(raw any) map[string]any {
 // outbound messaging
 // ---------------------------------------------------------------------------
 
-var transientSendRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+var transientSendRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 60 * time.Second}
 
 func (c *Client) SendMessage(ctx context.Context, chat remoteapi.ChatID, msg remoteapi.OutgoingMessage) (remoteapi.MessageID, error) {
 	msgID, err := c.sendMessageOnce(ctx, chat, msg)

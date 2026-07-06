@@ -86,13 +86,14 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 		accountFile = "/data/accounts.json"
 	}
 	s.accounts = newAccountStore(accountFile)
+	s.apiCfg = applyCurrentAccountSessionFallback(s.apiCfg, s.accounts)
 	contactFile := cfg.Bridge.ContactFile
 	if contactFile == "" {
 		contactFile = "/data/contacts.json"
 	}
 	s.contacts = newContactStore(contactFile)
 
-	conn, err := connector.New(cfg.Network.Protocol, apiCfg, s)
+	conn, err := connector.New(cfg.Network.Protocol, s.apiCfg, s)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +103,19 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 		as.Router.HandleFunc("POST "+cfg.Network.Receive.WebhookPath, s.handleWebhook)
 	}
 	return s, nil
+}
+
+func applyCurrentAccountSessionFallback(apiCfg remoteapi.Config, accounts *accountStore) remoteapi.Config {
+	if len(apiCfg.Session) > 0 || accounts == nil {
+		return apiCfg
+	}
+	acc, ok := accounts.current()
+	if !ok || len(acc.Session) == 0 {
+		return apiCfg
+	}
+	apiCfg.Session = acc.Session
+	log.Printf("using saved current account session fallback for %s", acc.ID)
+	return apiCfg
 }
 
 // Run starts the appservice HTTP listener, event loop and remote connector if
