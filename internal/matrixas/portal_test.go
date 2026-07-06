@@ -27,6 +27,33 @@ func (a namingAPI) GetContact(ctx context.Context, id remoteapi.UserID) (remotea
 	return remoteapi.Contact{ID: id}, nil
 }
 
+func TestRoomMemberDisplayNameUsesRoomDisplayNameFirst(t *testing.T) {
+	name := roomMemberDisplayName(remoteapi.Contact{
+		Name:   "昵称",
+		Remark: "备注",
+		Extra:  map[string]any{"room_display_name": "群昵称"},
+	})
+	if name != "群昵称" {
+		t.Fatalf("expected room display name, got %q", name)
+	}
+}
+
+func TestRoomMemberDisplayNameCombinesNicknameAndRemark(t *testing.T) {
+	name := roomMemberDisplayName(remoteapi.Contact{Name: "昵称", Remark: "备注"})
+	if name != "昵称 [备注]" {
+		t.Fatalf("expected nickname [remark], got %q", name)
+	}
+}
+
+func TestRoomMemberDisplayNameFallsBackToRemarkOrNickname(t *testing.T) {
+	if name := roomMemberDisplayName(remoteapi.Contact{Remark: "备注"}); name != "备注" {
+		t.Fatalf("expected remark fallback, got %q", name)
+	}
+	if name := roomMemberDisplayName(remoteapi.Contact{Name: "昵称"}); name != "昵称" {
+		t.Fatalf("expected nickname fallback, got %q", name)
+	}
+}
+
 func TestPortalRoomNameUsesContactRemarkBeforeNickname(t *testing.T) {
 	s := &Server{api: namingAPI{contacts: map[remoteapi.UserID]remoteapi.Contact{
 		"wxid_friend": {ID: "wxid_friend", Remark: "朋友备注", Name: "朋友昵称"},

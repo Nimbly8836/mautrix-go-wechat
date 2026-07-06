@@ -232,6 +232,27 @@ func (s *Server) contactDisplayName(ctx context.Context, user remoteapi.UserID) 
 	return matrixPick(ct.Remark, ct.Name)
 }
 
+func roomMemberDisplayName(ct remoteapi.Contact) string {
+	roomName := remoteExtraString(ct.Extra, "room_display_name")
+	if roomName != "" {
+		return roomName
+	}
+	name := strings.TrimSpace(ct.Name)
+	remark := strings.TrimSpace(ct.Remark)
+	if name != "" && remark != "" && name != remark {
+		return fmt.Sprintf("%s [%s]", name, remark)
+	}
+	return matrixPick(remark, name)
+}
+
+func (s *Server) roomMemberDisplayNameForRemote(ctx context.Context, user remoteapi.UserID) string {
+	ct, ok := s.contactForRemote(ctx, user, false)
+	if !ok {
+		return ""
+	}
+	return roomMemberDisplayName(ct)
+}
+
 func (s *Server) contactForRemote(ctx context.Context, user remoteapi.UserID, force bool) (remoteapi.Contact, bool) {
 	if user == "" || s.api == nil {
 		return remoteapi.Contact{}, false
@@ -487,15 +508,13 @@ func (s *Server) ensurePuppetJoinedWithProfile(ctx context.Context, user remotea
 	}
 	extra := map[string]interface{}{}
 	if shouldUpdatePuppetProfile(profileMode) {
-		name, avatar, changed := s.updatePuppetProfile(ctx, user, force)
-		if changed {
-			if name != "" {
-				extra["displayname"] = name
-			}
-			if avatar != "" {
-				extra["avatar_url"] = string(avatar)
-			}
+		_, avatar, changed := s.updatePuppetProfile(ctx, user, force)
+		if changed && avatar != "" {
+			extra["avatar_url"] = string(avatar)
 		}
+	}
+	if name := s.roomMemberDisplayNameForRemote(ctx, user); name != "" {
+		extra["displayname"] = name
 	}
 	if _, err := intent.JoinRoomByID(ctx, room, extra); err != nil {
 		log.Printf("failed to join/update puppet %s in %s: %v", user, room, err)

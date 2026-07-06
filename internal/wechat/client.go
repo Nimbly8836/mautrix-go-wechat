@@ -1046,7 +1046,7 @@ func parseChatMembers(m map[string]any) ([]remoteapi.UserID, []remoteapi.Contact
 			for _, item := range list {
 				if mm, ok := item.(map[string]any); ok {
 					ct := contactFromMap(mm, "")
-					if roomName := firstString(mm, "DisplayName", "displayname", "RemarkName", "ChatRoomNickName", "RoomNickName", "MemberDisplayName"); roomName != "" {
+					if roomName := firstString(mm, "DisplayName", "displayname", "Remark", "remark", "RemarkName", "ChatRoomNickName", "RoomNickName", "MemberDisplayName"); roomName != "" {
 						if ct.Extra == nil {
 							ct.Extra = map[string]any{}
 						}
