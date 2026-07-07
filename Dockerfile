@@ -3,15 +3,15 @@
 
 FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git ca-certificates
+RUN apk add --no-cache git ca-certificates build-base
 
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-# Pure-Go static build (no sqlite cgo driver in use yet).
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /usr/bin/mautrix-wechat ./cmd/bridge
+# SILK voice codec uses cgo.
+RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /usr/bin/mautrix-wechat ./cmd/bridge
 
 # ---------------------------------------------------------------------------
 

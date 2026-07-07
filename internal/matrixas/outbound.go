@@ -18,7 +18,7 @@ func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord,
 		s.sendPortalNotice(ctx, rec.RoomID, "你没有使用此 bridge 的权限。")
 		return
 	}
-	if eventType != event.EventSticker && msg.MsgType != event.MsgImage && msg.MsgType != event.MsgVideo && msg.MsgType != event.MsgFile && msg.MsgType != event.CapMsgSticker {
+	if eventType != event.EventSticker && msg.MsgType != event.MsgImage && msg.MsgType != event.MsgVideo && msg.MsgType != event.MsgAudio && msg.MsgType != event.MsgFile && msg.MsgType != event.CapMsgSticker {
 		return
 	}
 	if msg.URL == "" {
@@ -43,6 +43,12 @@ func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord,
 		mimeType = http.DetectContentType(data)
 	}
 	outgoing, err := portalMediaToRemoteMessage(data, mimeType, msg.GetFileName(), msg.Body, msg.MsgType, eventType)
+	if err == nil && msg.MsgType == event.MsgAudio && msg.Info != nil && msg.Info.Duration > 0 {
+		if outgoing.Extra == nil {
+			outgoing.Extra = map[string]any{}
+		}
+		outgoing.Extra["duration"] = msg.Info.Duration
+	}
 	if err != nil {
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
 		return
@@ -90,6 +96,19 @@ func portalMediaToRemoteMessage(data []byte, mimeType, fileName, body string, ms
 		}
 		return remoteapi.OutgoingMessage{
 			Type:  remoteapi.MsgVideo,
+			Text:  body,
+			Media: &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))},
+		}, nil
+	}
+	if msgType == event.MsgAudio {
+		if body == "" {
+			body = fileName
+		}
+		if body == "" {
+			body = "[voice]"
+		}
+		return remoteapi.OutgoingMessage{
+			Type:  remoteapi.MsgAudio,
 			Text:  body,
 			Media: &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))},
 		}, nil

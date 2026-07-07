@@ -594,6 +594,24 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		}
 		return msgID(r), nil
 
+	case remoteapi.MsgAudio:
+		if msg.Media == nil || len(msg.Media.Data) == 0 {
+			return "", fmt.Errorf("wechat: audio message without media")
+		}
+		silkData, voiceTime, err := audioToSilk(msg.Media.Data, msg.Media.MimeType)
+		if err != nil {
+			return "", err
+		}
+		if fromExtra := intFromOutgoingExtra(msg.Extra, "duration"); fromExtra > 0 {
+			voiceTime = fromExtra
+		}
+		req := sendVoiceReq{Wxid: wxid, ToWxid: to, Base64: base64.StdEncoding.EncodeToString(silkData), Type: 4, VoiceTime: voiceTime}
+		var r sendResp
+		if err := c.t.post(ctx, "/Msg/SendVoice", req, nil, &r); err != nil {
+			return "", err
+		}
+		return msgID(r), nil
+
 	case remoteapi.MsgFile:
 		if msg.Media == nil || len(msg.Media.Data) == 0 {
 			return "", fmt.Errorf("wechat: file message without media")

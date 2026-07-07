@@ -281,35 +281,57 @@ func TestHandleWebhookImageXMLDownloadsRawBinaryCDNImageMedia(t *testing.T) {
 }
 
 func TestHandleWebhookVideoXMLUsesDownloadVideoMedia(t *testing.T) {
+	oldChunkSize := videoDownloadChunkSize
+	videoDownloadChunkSize = 5
+	defer func() { videoDownloadChunkSize = oldChunkSize }()
+
 	videoBytes := []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}
-	var requested bool
+	var requests []videoMessageDownloadReq
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Tools/DownloadVideo" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		requested = true
 		var req videoMessageDownloadReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode video download request: %v", err)
 		}
-		if req.Wxid != "wxid_self" || req.DataLen != 12 || req.NewMsgID != 2 || req.MsgType != wxVideo || req.Talker != "wxid_friend" || req.SenderUserName != "wxid_friend" {
+		requests = append(requests, req)
+		if req.Wxid != "wxid_self" || req.ToWxid != "wxid_self" || req.MsgID != 1 || req.DataLen != 12 || req.CompressType != 0 {
 			t.Fatalf("unexpected video download request: %#v", req)
 		}
-		w.Header().Set("Content-Type", "video/mp4")
-		_, _ = w.Write(videoBytes)
+		start := req.Section.StartPos
+		end := start + req.Section.DataLen
+		if start < 0 || end > int64(len(videoBytes)) || start >= end {
+			t.Fatalf("unexpected video section: %#v", req.Section)
+		}
+		chunk := videoBytes[start:end]
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Code":    0,
+			"Success": true,
+			"Data": map[string]any{"data": map[string]any{
+				"buffer": base64.StdEncoding.EncodeToString(chunk),
+				"iLen":   len(chunk),
+			}},
+		})
 	}))
 	defer server.Close()
 
 	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
 	videoXML := `<msg><videomsg aeskey="video-aes" cdnvideourl="video-file-no" length="12" playlength="3" /></msg>`
-	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":43,"ContentText":` + strconv.Quote(videoXML) + `,"PushContent":"","Talker":"wxid_friend","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
+	payload := []byte(`{"MsgID":1,"NewMsgID":2,"MsgType":43,"ContentText":` + strconv.Quote(videoXML) + `,"PushContent":"","Talker":"wxid_friend","SenderUserName":"wxid_friend","ToUserName":{"Str":"wxid_self"},"CreateTime":1710000000}`)
 	if err := c.HandleWebhook(context.Background(), payload); err != nil {
 		t.Fatalf("HandleWebhook returned error: %v", err)
 	}
 	select {
 	case ev := <-c.Events():
-		if !requested {
-			t.Fatalf("expected video download request")
+		if len(requests) != 3 {
+			t.Fatalf("expected 3 video chunk requests, got %d: %#v", len(requests), requests)
+		}
+		wantSections := []downloadSectionReq{{StartPos: 0, DataLen: 5}, {StartPos: 5, DataLen: 5}, {StartPos: 10, DataLen: 2}}
+		for i, want := range wantSections {
+			if requests[i].Section != want {
+				t.Fatalf("request %d section mismatch: got %#v want %#v", i, requests[i].Section, want)
+			}
 		}
 		if ev.Message == nil || ev.Message.Type != remoteapi.MsgVideo || ev.Message.Media == nil {
 			t.Fatalf("expected video media, got %#v", ev)

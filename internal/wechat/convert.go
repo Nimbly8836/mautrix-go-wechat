@@ -84,7 +84,10 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		c.attachImageMedia(ctx, &base)
 	}
 	if m.MsgType == wxVideo {
-		c.attachVideoMedia(ctx, &base, videoMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: m.MsgID, NewMsgID: m.NewMsgID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, DataLen: int64Value(extraString(base.Extra, "video_data_len")), SourceXml: content, Xml: content})
+		c.attachVideoMedia(ctx, &base, videoMessageDownloadReq{ToWxid: firstNonEmpty(m.ToUserName, chat), MsgID: firstNonZero(m.MsgID, m.NewMsgID), NewMsgID: m.NewMsgID, SenderUserName: sender, DataLen: int64Value(extraString(base.Extra, "video_data_len"))})
+	}
+	if m.MsgType == wxVoice {
+		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(sender, chat), MsgID: firstNonZero(m.MsgID, m.NewMsgID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
 	}
 	if base.Type == remoteapi.MsgFile {
 		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: m.MsgID, NewMsgID: m.NewMsgID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
@@ -185,7 +188,10 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		c.attachImageMedia(ctx, &base)
 	}
 	if m.MsgType == wxVideo {
-		c.attachVideoMedia(ctx, &base, videoMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: rawID, NewMsgID: messageID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, DataLen: int64Value(extraString(base.Extra, "video_data_len")), SourceXml: content, Xml: content})
+		c.attachVideoMedia(ctx, &base, videoMessageDownloadReq{ToWxid: firstNonEmpty(to, chat), MsgID: firstNonZero(rawID, messageID), NewMsgID: messageID, SenderUserName: sender, DataLen: int64Value(extraString(base.Extra, "video_data_len"))})
+	}
+	if m.MsgType == wxVoice {
+		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(sender, chat), MsgID: firstNonZero(rawID, messageID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
 	}
 	if base.Type == remoteapi.MsgFile {
 		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: rawID, NewMsgID: messageID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
@@ -195,6 +201,53 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	}
 
 	return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+}
+
+func (c *Client) attachVoiceMedia(ctx context.Context, base *remoteapi.InboundMessage, req voiceMessageDownloadReq) {
+	if c == nil || c.t == nil || base == nil || base.Media == nil {
+		return
+	}
+	data, err := c.downloadVoice(ctx, req)
+	if err != nil {
+		log.Printf("failed to download WeChat voice %s msg_id=%d from=%q length=%d: %v", base.ID, req.MsgID, req.FromUserName, req.Length, err)
+		return
+	}
+	wav, err := silkToWAV(data)
+	if err != nil {
+		log.Printf("failed to decode WeChat voice %s msg_id=%d from=%q: %v", base.ID, req.MsgID, req.FromUserName, err)
+		return
+	}
+	base.Media.Data = wav
+	base.Media.Size = int64(len(wav))
+	base.Media.MimeType = "audio/wav"
+	if strings.TrimSpace(base.Media.FileName) == "" {
+		base.Media.FileName = string(base.ID) + ".wav"
+	}
+}
+
+func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq) ([]byte, error) {
+	c.mu.RLock()
+	wxid := c.wxid
+	c.mu.RUnlock()
+	if wxid == "" {
+		return nil, fmt.Errorf("missing wxid")
+	}
+	if req.FromUserName == "" {
+		return nil, fmt.Errorf("missing voice FromUserName")
+	}
+	if req.MsgID == 0 {
+		return nil, fmt.Errorf("missing voice MsgId")
+	}
+	if req.Length <= 0 {
+		return nil, fmt.Errorf("missing voice length")
+	}
+	req.Wxid = wxid
+	raw, contentType, err := c.t.postRaw(ctx, "/Tools/DownloadVoice", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	data, _, err := mediaBytesFromRawResponse(raw, contentType, "/Tools/DownloadVoice")
+	return data, err
 }
 
 func (c *Client) attachFileMedia(ctx context.Context, base *remoteapi.InboundMessage, req fileMessageDownloadReq) {
@@ -327,6 +380,8 @@ func (c *Client) attachImageMedia(ctx context.Context, base *remoteapi.InboundMe
 
 const videoDownloadTimeout = 30 * time.Second
 
+var videoDownloadChunkSize int64 = 1024
+
 func (c *Client) attachVideoMedia(ctx context.Context, base *remoteapi.InboundMessage, req videoMessageDownloadReq) {
 	if c == nil || c.t == nil || base == nil || base.Media == nil {
 		return
@@ -358,15 +413,62 @@ func (c *Client) downloadVideo(ctx context.Context, req videoMessageDownloadReq)
 	if wxid == "" {
 		return nil, "", fmt.Errorf("missing wxid")
 	}
+	if req.ToWxid == "" {
+		return nil, "", fmt.Errorf("missing video ToWxid")
+	}
+	if req.MsgID == 0 {
+		return nil, "", fmt.Errorf("missing video MsgId")
+	}
 	if req.DataLen <= 0 {
 		return nil, "", fmt.Errorf("missing video data length")
 	}
-	req.Wxid = wxid
+	chunkSize := videoDownloadChunkSize
+	if chunkSize <= 0 {
+		chunkSize = 1024
+	}
+	var out []byte
+	mimeType := "video/mp4"
+	for start := int64(0); start < req.DataLen; {
+		n := chunkSize
+		if remaining := req.DataLen - start; remaining < n {
+			n = remaining
+		}
+		chunkReq := videoMessageDownloadReq{
+			Wxid:         wxid,
+			ToWxid:       req.ToWxid,
+			MsgID:        req.MsgID,
+			DataLen:      req.DataLen,
+			Section:      downloadSectionReq{StartPos: start, DataLen: n},
+			CompressType: 0,
+		}
+		chunk, gotLen, gotMime, err := c.downloadVideoChunk(ctx, chunkReq)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(chunk) == 0 {
+			return nil, "", fmt.Errorf("empty video chunk at offset %d", start)
+		}
+		out = append(out, chunk...)
+		if strings.HasPrefix(gotMime, "video/") {
+			mimeType = gotMime
+		}
+		if gotLen <= 0 {
+			gotLen = int64(len(chunk))
+		}
+		start += gotLen
+	}
+	if int64(len(out)) > req.DataLen {
+		out = out[:req.DataLen]
+	}
+	return out, mimeType, nil
+}
+
+func (c *Client) downloadVideoChunk(ctx context.Context, req videoMessageDownloadReq) ([]byte, int64, string, error) {
 	raw, contentType, err := c.t.postRaw(ctx, "/Tools/DownloadVideo", req, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, 0, "", err
 	}
-	return mediaBytesFromRawResponse(raw, contentType, "/Tools/DownloadVideo")
+	return videoChunkFromRawResponse(raw, contentType, "/Tools/DownloadVideo")
 }
 
 func (c *Client) downloadCDNImage(ctx context.Context, aesKey, fileNo string) ([]byte, string, error) {
@@ -381,6 +483,63 @@ func (c *Client) downloadCDNImage(ctx context.Context, aesKey, fileNo string) ([
 		return nil, "", err
 	}
 	return mediaBytesFromRawResponse(raw, contentType, "/Tools/CdnDownloadImage")
+}
+
+func videoChunkFromRawResponse(raw []byte, contentType, path string) ([]byte, int64, string, error) {
+	var env Envelope
+	if json.Unmarshal(raw, &env) == nil && (env.Success || env.Code != 0 || env.Message != "" || len(env.Data) > 0 || env.Data62 != "") {
+		if !env.Success {
+			return nil, 0, "", &APIError{Code: env.Code, Message: env.Message, Path: path}
+		}
+		data, mimeType, iLen, err := videoChunkFromJSON(env.Data)
+		if err != nil {
+			return nil, 0, "", err
+		}
+		return data, iLen, mimeType, nil
+	}
+	return raw, int64(len(raw)), strings.Split(contentType, ";")[0], nil
+}
+
+func videoChunkFromJSON(raw json.RawMessage) ([]byte, string, int64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, "", 0, fmt.Errorf("response has no video chunk data")
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, "", 0, fmt.Errorf("decode video chunk json: %w", err)
+	}
+	data, mimeType, ok := mediaBytesFromValue(v)
+	if !ok || len(data) == 0 {
+		return nil, "", 0, fmt.Errorf("unsupported video chunk response shape: %s", mediaResponseShape(v, 0))
+	}
+	iLen := int64Value(findNestedValue(v, "iLen", "ILen", "ilen", "len", "Len"))
+	if iLen <= 0 {
+		iLen = int64(len(data))
+	}
+	return data, mimeType, iLen, nil
+}
+
+func findNestedValue(v any, keys ...string) any {
+	switch val := v.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if item, ok := val[key]; ok {
+				return item
+			}
+		}
+		for _, item := range val {
+			if found := findNestedValue(item, keys...); found != nil {
+				return found
+			}
+		}
+	case []any:
+		for _, item := range val {
+			if found := findNestedValue(item, keys...); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
 }
 
 func mediaBytesFromRawResponse(raw []byte, contentType, path string) ([]byte, string, error) {
@@ -607,7 +766,18 @@ func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push
 		}
 	case wxVoice:
 		base.Type = remoteapi.MsgAudio
-		base.Media = &remoteapi.Media{MimeType: "audio/amr"}
+		base.Media = &remoteapi.Media{MimeType: "audio/wav", FileName: string(base.ID) + ".wav"}
+		if isXMLMessage(base.Text) {
+			if length := firstNonEmpty(xmlAttr(base.Text, "length"), xmlAttr(base.Text, "voicelength")); length != "" {
+				base.Extra["voice_length"] = length
+			}
+			if bufID := firstNonEmpty(xmlAttr(base.Text, "bufid"), xmlAttr(base.Text, "bufID")); bufID != "" {
+				base.Extra["voice_bufid"] = bufID
+			}
+			if voiceTime := firstNonEmpty(xmlAttr(base.Text, "voicelength"), xmlAttr(base.Text, "length")); voiceTime != "" {
+				base.Extra["duration"] = voiceTime
+			}
+		}
 		base.Text = firstNonEmpty(push, "[voice]")
 	case wxVideo:
 		base.Type = remoteapi.MsgVideo
@@ -789,6 +959,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonZero(values ...int64) int64 {
+	for _, v := range values {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 func (c *Client) selfWxid() string {

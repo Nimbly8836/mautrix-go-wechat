@@ -22,6 +22,20 @@ func TestPortalMediaToRemoteMessageSendsMatrixImageAsWechatImage(t *testing.T) {
 	}
 }
 
+func TestPortalMediaToRemoteMessageSendsMatrixAudioAsWechatAudio(t *testing.T) {
+	data := []byte("wav-bytes")
+	msg, err := portalMediaToRemoteMessage(data, "audio/wav", "voice.wav", "voice", event.MsgAudio, event.EventMessage)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if msg.Type != remoteapi.MsgAudio {
+		t.Fatalf("expected Matrix audio to become WeChat audio, got %v", msg.Type)
+	}
+	if msg.Media == nil || string(msg.Media.Data) != string(data) || msg.Media.MimeType != "audio/wav" || msg.Media.FileName != "voice.wav" {
+		t.Fatalf("unexpected media: %#v", msg.Media)
+	}
+}
+
 func TestPortalMediaToRemoteMessageSendsMatrixVideoAsWechatVideo(t *testing.T) {
 	data := []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p'}
 	msg, err := portalMediaToRemoteMessage(data, "video/mp4", "clip.mp4", "clip", event.MsgVideo, event.EventMessage)

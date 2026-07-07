@@ -175,16 +175,31 @@ type fileMessageDownloadReq struct {
 }
 
 type videoMessageDownloadReq struct {
-	Wxid           string `json:"Wxid"`
-	Talker         string `json:"Talker,omitempty"`
-	SenderUserName string `json:"SenderUserName,omitempty"`
-	MsgID          int64  `json:"MsgId,omitempty"`
-	NewMsgID       int64  `json:"NewMsgID,omitempty"`
-	MsgSeq         int64  `json:"MsgSeq,omitempty"`
-	MsgType        int    `json:"MsgType,omitempty"`
-	DataLen        int64  `json:"DataLen,omitempty"`
-	SourceXml      string `json:"SourceXml,omitempty"`
-	Xml            string `json:"Xml,omitempty"`
+	Wxid         string             `json:"Wxid"`
+	ToWxid       string             `json:"ToWxid"`
+	MsgID        int64              `json:"MsgId"`
+	DataLen      int64              `json:"DataLen"`
+	Section      downloadSectionReq `json:"Section"`
+	CompressType int                `json:"CompressType"`
+
+	NewMsgID       int64  `json:"-"`
+	SenderUserName string `json:"-"`
+}
+
+type voiceMessageDownloadReq struct {
+	Wxid         string `json:"Wxid"`
+	FromUserName string `json:"FromUserName"`
+	MsgID        int64  `json:"MsgId"`
+	Length       int64  `json:"Length"`
+	BufID        string `json:"Bufid,omitempty"`
+}
+
+type sendVoiceReq struct {
+	Wxid      string `json:"Wxid"`
+	ToWxid    string `json:"ToWxid"`
+	Base64    string `json:"Base64"`
+	Type      int    `json:"Type"`
+	VoiceTime int    `json:"VoiceTime"`
 }
 
 // sendEmojiReq -> /Msg/SendEmoji
