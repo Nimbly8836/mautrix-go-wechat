@@ -87,7 +87,7 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		c.attachVideoMedia(ctx, &base, videoMessageDownloadReq{ToWxid: firstNonEmpty(m.ToUserName, chat), MsgID: firstNonZero(m.MsgID, m.NewMsgID), NewMsgID: m.NewMsgID, SenderUserName: sender, DataLen: int64Value(extraString(base.Extra, "video_data_len"))})
 	}
 	if m.MsgType == wxVoice {
-		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(sender, chat), MsgID: firstNonZero(m.MsgID, m.NewMsgID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
+		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(chat, sender), MsgID: firstNonZero(m.MsgID, m.NewMsgID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
 	}
 	if base.Type == remoteapi.MsgFile {
 		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: m.MsgID, NewMsgID: m.NewMsgID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
@@ -191,7 +191,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		c.attachVideoMedia(ctx, &base, videoMessageDownloadReq{ToWxid: firstNonEmpty(to, chat), MsgID: firstNonZero(rawID, messageID), NewMsgID: messageID, SenderUserName: sender, DataLen: int64Value(extraString(base.Extra, "video_data_len"))})
 	}
 	if m.MsgType == wxVoice {
-		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(sender, chat), MsgID: firstNonZero(rawID, messageID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
+		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(chat, sender), MsgID: firstNonZero(rawID, messageID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
 	}
 	if base.Type == remoteapi.MsgFile {
 		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: rawID, NewMsgID: messageID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})

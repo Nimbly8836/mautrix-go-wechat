@@ -29,7 +29,7 @@ func TestHandleWebhookVoiceDownloadsSilkAndEmitsWAVAudio(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode voice download request: %v", err)
 		}
-		if req.Wxid != "wxid_self" || req.FromUserName != "wxid_friend" || req.MsgID != 11 || req.Length != 80 || req.BufID != "buf-1" {
+		if req.Wxid != "wxid_self" || req.FromUserName != "45170834716@chatroom" || req.MsgID != 11 || req.Length != 80 || req.BufID != "buf-1" {
 			t.Fatalf("unexpected voice download request: %#v", req)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
