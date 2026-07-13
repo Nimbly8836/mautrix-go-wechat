@@ -96,7 +96,11 @@ var (
 
 func (c *Client) Connect(ctx context.Context) error {
 	if c.receiveMode == "push" {
-		c.emit(remoteapi.Event{Kind: remoteapi.EventConnected})
+		select {
+		case c.events <- remoteapi.Event{Kind: remoteapi.EventConnected}:
+		default:
+			log.Printf("wechat connect: event queue full; skipping connected status to prioritize queued messages")
+		}
 		return nil
 	}
 	loggedIn, err := c.IsLoggedIn(ctx)

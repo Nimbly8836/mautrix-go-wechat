@@ -3,6 +3,7 @@ package wechat
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
@@ -67,5 +68,45 @@ func TestConnectInPushModeSkipsLoginProbe(t *testing.T) {
 		}
 	default:
 		t.Fatalf("expected connected event")
+	}
+}
+
+func TestConnectInPushModeDoesNotBlockWhenEventQueueIsFull(t *testing.T) {
+	events := make(chan remoteapi.Event, 1)
+	events <- remoteapi.Event{Kind: remoteapi.EventMessage, Message: &remoteapi.InboundMessage{
+		ID: "queued-message", Chat: "wxid_friend", Text: "hello",
+	}}
+	c := &Client{events: events, done: make(chan struct{}), receiveMode: "push"}
+
+	connectDone := make(chan struct{})
+	released := make(chan remoteapi.Event, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(250 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			released <- <-events
+		case <-connectDone:
+		}
+	}()
+
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatalf("push Connect should not require login probe: %v", err)
+	}
+	close(connectDone)
+	<-done
+
+	select {
+	case <-released:
+		t.Fatal("push Connect blocked while the event queue was full")
+	default:
+	}
+
+	ev := <-events
+	if ev.Kind != remoteapi.EventMessage || ev.Message == nil ||
+		ev.Message.ID != "queued-message" || ev.Message.Chat != "wxid_friend" || ev.Message.Text != "hello" {
+		t.Fatalf("queued event was replaced or dropped: %#v", ev)
 	}
 }
