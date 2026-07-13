@@ -104,9 +104,13 @@ func TestConnectInPushModeDoesNotBlockWhenEventQueueIsFull(t *testing.T) {
 	default:
 	}
 
-	ev := <-events
-	if ev.Kind != remoteapi.EventMessage || ev.Message == nil ||
-		ev.Message.ID != "queued-message" || ev.Message.Chat != "wxid_friend" || ev.Message.Text != "hello" {
-		t.Fatalf("queued event was replaced or dropped: %#v", ev)
+	select {
+	case ev := <-events:
+		if ev.Kind != remoteapi.EventMessage || ev.Message == nil ||
+			ev.Message.ID != "queued-message" || ev.Message.Chat != "wxid_friend" || ev.Message.Text != "hello" {
+			t.Fatalf("queued event was replaced or dropped: %#v", ev)
+		}
+	default:
+		t.Fatal("queued event was dropped")
 	}
 }
