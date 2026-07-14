@@ -24,6 +24,11 @@ type silkFrameInspection struct {
 	DroppedBytes int
 }
 
+type silkPacket struct {
+	PayloadStart int
+	PayloadEnd   int
+}
+
 type silkRecoveryCandidate struct {
 	Data        []byte
 	SourceIndex int
@@ -37,8 +42,9 @@ func isSilkData(data []byte) bool {
 	return len(data) > 10 && data[0] == 0x02 && bytes.HasPrefix(data[1:], []byte("#!SILK_V3"))
 }
 
-func inspectSilkFrames(data []byte) (silkFrameInspection, error) {
+func parseSilkPackets(data []byte) (silkFrameInspection, []silkPacket, error) {
 	var inspection silkFrameInspection
+	var packets []silkPacket
 	position := 0
 	if len(data) > 0 && data[0] == 0x02 {
 		position++
@@ -46,10 +52,10 @@ func inspectSilkFrames(data []byte) (silkFrameInspection, error) {
 
 	const header = "#!SILK_V3"
 	if len(data)-position < len(header) {
-		return inspection, fmt.Errorf("invalid SILK header: too short")
+		return inspection, packets, fmt.Errorf("invalid SILK header: too short")
 	}
 	if string(data[position:position+len(header)]) != header {
-		return inspection, fmt.Errorf("invalid SILK header")
+		return inspection, packets, fmt.Errorf("invalid SILK header")
 	}
 	position += len(header)
 	inspection.PrefixEnd = position
@@ -58,55 +64,56 @@ func inspectSilkFrames(data []byte) (silkFrameInspection, error) {
 		frameStart := position
 		if len(data)-position < 2 {
 			inspection.DroppedBytes = len(data) - inspection.PrefixEnd
-			return inspection, fmt.Errorf("truncated SILK frame length: %w", io.ErrUnexpectedEOF)
+			return inspection, packets, fmt.Errorf("truncated SILK frame length: %w", io.ErrUnexpectedEOF)
 		}
 
 		payloadLength := int(int16(binary.LittleEndian.Uint16(data[position : position+2])))
 		position += 2
 		if payloadLength < 0 {
 			if inspection.FrameCount == 0 {
-				return inspection, fmt.Errorf("SILK footer without a complete frame")
+				return inspection, packets, fmt.Errorf("SILK footer without a complete frame")
 			}
 			if position != len(data) {
-				return inspection, fmt.Errorf("SILK footer must be at end of data")
+				return inspection, packets, fmt.Errorf("SILK footer must be at end of data")
 			}
 			inspection.PrefixEnd = frameStart
 			inspection.DroppedBytes = 0
-			return inspection, nil
+			return inspection, packets, nil
 		}
 		if payloadLength == 0 {
-			return inspection, fmt.Errorf("zero-length SILK frame")
+			return inspection, packets, fmt.Errorf("zero-length SILK frame")
 		}
 		if payloadLength > maxSilkFramePayload {
-			return inspection, fmt.Errorf("SILK frame payload %d exceeds maximum %d", payloadLength, maxSilkFramePayload)
+			return inspection, packets, fmt.Errorf("SILK frame payload %d exceeds maximum %d", payloadLength, maxSilkFramePayload)
 		}
 		if len(data)-position < payloadLength {
 			inspection.DroppedBytes = len(data) - inspection.PrefixEnd
-			return inspection, fmt.Errorf("truncated SILK frame payload: %w", io.ErrUnexpectedEOF)
+			return inspection, packets, fmt.Errorf("truncated SILK frame payload: %w", io.ErrUnexpectedEOF)
 		}
 
+		payloadStart := position
 		position += payloadLength
+		packets = append(packets, silkPacket{PayloadStart: payloadStart, PayloadEnd: position})
 		inspection.PrefixEnd = position
 		inspection.FrameCount++
 		inspection.PayloadBytes += payloadLength
 	}
 
 	if inspection.FrameCount == 0 {
-		return inspection, fmt.Errorf("no complete SILK frames")
+		return inspection, packets, fmt.Errorf("no complete SILK frames")
 	}
-	return inspection, nil
+	return inspection, packets, nil
+}
+
+func inspectSilkFrames(data []byte) (silkFrameInspection, error) {
+	inspection, _, err := parseSilkPackets(data)
+	return inspection, err
 }
 
 func silkToWAV(data []byte) ([]byte, error) {
-	if _, err := inspectSilkFrames(data); err != nil {
-		return nil, fmt.Errorf("invalid SILK structure: %w", err)
-	}
-	pcm, err := silk.Decode(bytes.NewReader(data), silk.WithSampleRate(voiceSampleRate))
+	pcm, err := decodeSilkPCM(data)
 	if err != nil {
 		return nil, err
-	}
-	if len(pcm) == 0 {
-		return nil, fmt.Errorf("decoded SILK contains empty PCM")
 	}
 	return pcmToWAV(pcm, voiceSampleRate, 1, 16), nil
 }

@@ -947,6 +947,47 @@ func TestSendMessageAudioWAVCallsSendVoiceAsSilk(t *testing.T) {
 	}
 }
 
+func TestParseSilkPacketsPayloadOffsets(t *testing.T) {
+	firstPayload := []byte{0x11, 0x22, 0x33}
+	secondPayload := []byte{0x44, 0x55}
+	body := append(testSilkFrame(firstPayload), testSilkFrame(secondPayload)...)
+
+	for _, tt := range []struct {
+		name    string
+		withSTX bool
+	}{
+		{name: "without STX", withSTX: false},
+		{name: "with STX", withSTX: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := testSilkContainer(tt.withSTX, body)
+			inspection, packets, err := parseSilkPackets(data)
+			if err != nil {
+				t.Fatalf("parseSilkPackets: %v", err)
+			}
+			if inspection.FrameCount != 2 || len(packets) != 2 {
+				t.Fatalf("inspection=%#v packets=%#v, want two packets", inspection, packets)
+			}
+			headerEnd := len("#!SILK_V3")
+			if tt.withSTX {
+				headerEnd++
+			}
+			want := []silkPacket{
+				{PayloadStart: headerEnd + 2, PayloadEnd: headerEnd + 2 + len(firstPayload)},
+				{PayloadStart: headerEnd + 2 + len(firstPayload) + 2, PayloadEnd: len(data)},
+			}
+			for index := range want {
+				if packets[index] != want[index] {
+					t.Fatalf("packet %d = %#v, want %#v", index, packets[index], want[index])
+				}
+				if got := data[packets[index].PayloadStart:packets[index].PayloadEnd]; !bytes.Equal(got, [][]byte{firstPayload, secondPayload}[index]) {
+					t.Fatalf("packet %d payload = %x", index, got)
+				}
+			}
+		})
+	}
+}
+
 func TestInspectSilkFrames(t *testing.T) {
 	frame := testSilkFrame([]byte{0x11, 0x22, 0x33})
 	frameEndWithoutSTX := len("#!SILK_V3") + len(frame)
