@@ -222,6 +222,7 @@ func (c *Client) attachVoiceMedia(ctx context.Context, base *remoteapi.InboundMe
 
 		retryData, retryDownloadErr := c.downloadVoice(ctx, req)
 		if retryDownloadErr != nil {
+			log.Printf("failed to retry WeChat voice download %s msg_id=%d from=%q: %v", base.ID, req.MsgID, req.FromUserName, retryDownloadErr)
 			retryErr = fmt.Errorf("retry WeChat voice download: %w", retryDownloadErr)
 		} else {
 			retryWAV, retryDecodeErr := silkToWAV(retryData)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,6 +49,10 @@ func TestHandleWebhookVoiceDownloadsSilkAndEmitsWAVAudio(t *testing.T) {
 
 func TestHandleWebhookVoiceRetriesTruncatedDownload(t *testing.T) {
 	full := testMultiFrameSilk(t)
+	expectedWAV, err := silkToWAV(full)
+	if err != nil {
+		t.Fatalf("decode complete test SILK: %v", err)
+	}
 	first := append([]byte(nil), full[:len(full)-1]...)
 	var requests atomic.Int32
 	handlerErr := make(chan error, 2)
@@ -75,7 +80,12 @@ func TestHandleWebhookVoiceRetriesTruncatedDownload(t *testing.T) {
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("voice download requests = %d, want 2", got)
 	}
-	assertNonEmptyWAVAudio(t, ev)
+	if ev.Message == nil || ev.Message.Media == nil {
+		t.Fatalf("expected audio media, got %#v", ev)
+	}
+	if !bytes.Equal(ev.Message.Media.Data, expectedWAV) {
+		t.Fatalf("voice media does not match complete retry decode: got %d bytes, want %d", len(ev.Message.Media.Data), len(expectedWAV))
+	}
 }
 
 func TestHandleWebhookVoiceRecoversWhenRetryRemainsTruncated(t *testing.T) {
@@ -141,6 +151,10 @@ func TestHandleWebhookVoiceDoesNotRetryNonEOFDecodeError(t *testing.T) {
 func TestHandleWebhookVoiceRecoversFirstPayloadWhenRetryDownloadFails(t *testing.T) {
 	full := testMultiFrameSilk(t)
 	truncated := append([]byte(nil), full[:len(full)-1]...)
+	var logs bytes.Buffer
+	originalLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
 	var requests atomic.Int32
 	handlerErr := make(chan error, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +182,11 @@ func TestHandleWebhookVoiceRecoversFirstPayloadWhenRetryDownloadFails(t *testing
 		t.Fatalf("voice download requests = %d, want 2", got)
 	}
 	assertNonEmptyWAVAudio(t, ev)
+	for _, want := range []string{"failed to retry WeChat voice download 22", "msg_id=11", `from="45170834716@chatroom"`, "temporary voice download failure"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("retry failure log %q does not contain %q", logs.String(), want)
+		}
+	}
 }
 
 func writeVoiceResponse(w http.ResponseWriter, silkData []byte) error {
