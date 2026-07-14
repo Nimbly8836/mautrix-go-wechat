@@ -230,6 +230,7 @@ func (c *Client) attachVoiceMedia(ctx context.Context, base *remoteapi.InboundMe
 				decodeErr = nil
 				log.Printf("decoded retried WeChat voice %s msg_id=%d from=%q retry_bytes=%d", base.ID, req.MsgID, req.FromUserName, len(retryData))
 			} else {
+				log.Printf("failed to decode retried WeChat voice %s msg_id=%d from=%q retry_bytes=%d: %v", base.ID, req.MsgID, req.FromUserName, len(retryData), retryDecodeErr)
 				retryErr = fmt.Errorf("decode retried WeChat voice retry_bytes=%d: %w", len(retryData), retryDecodeErr)
 				if errors.Is(retryDecodeErr, io.ErrUnexpectedEOF) {
 					candidates = append(candidates, retryData)
