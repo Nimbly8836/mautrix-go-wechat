@@ -32,6 +32,7 @@ const (
 	wxRevoke       = 10002
 
 	voiceDownloadChunkSize int64 = 60 * 1024
+	maxVoiceDownloadBytes  int64 = 64 << 20
 )
 
 func shouldDropLocal(m localMessage) bool {
@@ -286,16 +287,22 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 	if req.Length <= 0 {
 		return nil, fmt.Errorf("missing voice length")
 	}
+	if req.Length > maxVoiceDownloadBytes {
+		return nil, fmt.Errorf("voice length %d exceeds maximum %d", req.Length, maxVoiceDownloadBytes)
+	}
 
 	totalLen := req.Length
 	fragments := make([]string, 0)
-	for offset := int64(0); offset < totalLen; offset += voiceDownloadChunkSize {
+	for offset := int64(0); offset < totalLen; {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		chunkLen := voiceDownloadChunkSize
 		if remaining := totalLen - offset; remaining < chunkLen {
 			chunkLen = remaining
+		}
+		if chunkLen <= 0 {
+			return nil, fmt.Errorf("invalid voice chunk length %d at offset %d", chunkLen, offset)
 		}
 		chunkReq := req
 		chunkReq.Wxid = wxid
@@ -310,17 +317,27 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 		if fragment == "" {
 			return nil, fmt.Errorf("download voice chunk offset=%d returned empty data.buffer", offset)
 		}
+		if resp.Data.ILen > 0 && resp.Data.ILen < chunkLen {
+			return nil, fmt.Errorf("download voice chunk offset=%d data.iLen=%d shorter than requested length=%d", offset, resp.Data.ILen, chunkLen)
+		}
+		if resp.Length > 0 && resp.Length < chunkLen {
+			return nil, fmt.Errorf("download voice chunk offset=%d response length=%d shorter than requested length=%d", offset, resp.Length, chunkLen)
+		}
 		fragments = append(fragments, fragment)
 		if resp.Offset != offset || (resp.Length != 0 && resp.Length != chunkLen) {
 			log.Printf("WeChat voice chunk metadata mismatch msg_id=%d requested_offset=%d requested_length=%d returned_offset=%d returned_length=%d end_flag=%d", req.MsgID, offset, chunkLen, resp.Offset, resp.Length, resp.EndFlag)
 		}
+		offset += chunkLen
 	}
 
 	data, fallback, err := decodeVoiceBase64Fragments(fragments)
 	if err != nil {
 		return nil, fmt.Errorf("decode WeChat voice chunks: %w", err)
 	}
-	log.Printf("downloaded WeChat voice msg_id=%d from=%q total=%d chunks=%d assembled=%d fallback=%t", req.MsgID, req.FromUserName, totalLen, len(fragments), len(data), fallback)
+	if int64(len(data)) < totalLen {
+		return nil, fmt.Errorf("assembled voice data shorter than declared length: actual=%d declared=%d", len(data), totalLen)
+	}
+	log.Printf("downloaded WeChat voice msg_id=%d from=%q declared=%d chunks=%d actual=%d fallback=%t", req.MsgID, req.FromUserName, totalLen, len(fragments), len(data), fallback)
 	return data, nil
 }
 
