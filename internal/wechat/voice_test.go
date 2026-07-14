@@ -7,10 +7,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
@@ -18,33 +20,201 @@ import (
 )
 
 func TestHandleWebhookVoiceDownloadsSilkAndEmitsWAVAudio(t *testing.T) {
-	pcm := make([]byte, voiceSampleRate/10*2)
-	silkData, err := silk.Encode(bytes.NewReader(pcm), silk.SampleRate(voiceSampleRate), silk.Stx(true))
-	if err != nil {
-		t.Fatalf("encode test silk: %v", err)
-	}
-	var requested bool
+	silkData := testMultiFrameSilk(t)
+	var requests atomic.Int32
+	handlerErr := make(chan error, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/Tools/DownloadVoice" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+		requests.Add(1)
+		if err := validateVoiceDownloadRequest(r); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
-		requested = true
-		var req voiceMessageDownloadReq
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode voice download request: %v", err)
+		if err := writeVoiceResponse(w, silkData); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-		if req.Wxid != "wxid_self" || req.FromUserName != "45170834716@chatroom" || req.MsgID != 11 || req.Length != 80 || req.BufID != "buf-1" {
-			t.Fatalf("unexpected voice download request: %#v", req)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"Code":    0,
-			"Success": true,
-			"Data":    map[string]any{"data": map[string]any{"buffer": base64.StdEncoding.EncodeToString(silkData)}},
-		})
 	}))
 	defer server.Close()
 
-	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
+	ev := handleTestVoiceWebhook(t, server.URL)
+	assertNoVoiceHandlerError(t, handlerErr)
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("voice download requests = %d, want 1", got)
+	}
+	assertNonEmptyWAVAudio(t, ev)
+}
+
+func TestHandleWebhookVoiceRetriesTruncatedDownload(t *testing.T) {
+	full := testMultiFrameSilk(t)
+	first := append([]byte(nil), full[:len(full)-1]...)
+	var requests atomic.Int32
+	handlerErr := make(chan error, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		if err := validateVoiceDownloadRequest(r); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		data := full
+		if attempt == 1 {
+			data = first
+		}
+		if err := writeVoiceResponse(w, data); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
+	defer server.Close()
+
+	ev := handleTestVoiceWebhook(t, server.URL)
+	assertNoVoiceHandlerError(t, handlerErr)
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("voice download requests = %d, want 2", got)
+	}
+	assertNonEmptyWAVAudio(t, ev)
+}
+
+func TestHandleWebhookVoiceRecoversWhenRetryRemainsTruncated(t *testing.T) {
+	full := testMultiFrameSilk(t)
+	truncated := append([]byte(nil), full[:len(full)-1]...)
+	var requests atomic.Int32
+	handlerErr := make(chan error, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if err := validateVoiceDownloadRequest(r); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := writeVoiceResponse(w, truncated); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
+	defer server.Close()
+
+	ev := handleTestVoiceWebhook(t, server.URL)
+	assertNoVoiceHandlerError(t, handlerErr)
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("voice download requests = %d, want 2", got)
+	}
+	assertNonEmptyWAVAudio(t, ev)
+}
+
+func TestHandleWebhookVoiceDoesNotRetryNonEOFDecodeError(t *testing.T) {
+	malformed := testSilkContainer(true, []byte{0x00, 0x00})
+	var requests atomic.Int32
+	handlerErr := make(chan error, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if err := validateVoiceDownloadRequest(r); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := writeVoiceResponse(w, malformed); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
+	defer server.Close()
+
+	ev := handleTestVoiceWebhook(t, server.URL)
+	assertNoVoiceHandlerError(t, handlerErr)
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("voice download requests = %d, want 1", got)
+	}
+	if ev.Message == nil || ev.Message.Type != remoteapi.MsgAudio || ev.Message.Media == nil {
+		t.Fatalf("expected audio fallback, got %#v", ev)
+	}
+	if len(ev.Message.Media.Data) != 0 {
+		t.Fatalf("fallback media data = %d bytes, want empty", len(ev.Message.Media.Data))
+	}
+}
+
+func TestHandleWebhookVoiceRecoversFirstPayloadWhenRetryDownloadFails(t *testing.T) {
+	full := testMultiFrameSilk(t)
+	truncated := append([]byte(nil), full[:len(full)-1]...)
+	var requests atomic.Int32
+	handlerErr := make(chan error, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		if err := validateVoiceDownloadRequest(r); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if attempt == 2 {
+			http.Error(w, "temporary voice download failure", http.StatusInternalServerError)
+			return
+		}
+		if err := writeVoiceResponse(w, truncated); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
+	defer server.Close()
+
+	ev := handleTestVoiceWebhook(t, server.URL)
+	assertNoVoiceHandlerError(t, handlerErr)
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("voice download requests = %d, want 2", got)
+	}
+	assertNonEmptyWAVAudio(t, ev)
+}
+
+func writeVoiceResponse(w http.ResponseWriter, silkData []byte) error {
+	return json.NewEncoder(w).Encode(map[string]any{
+		"Code":    0,
+		"Success": true,
+		"Data":    map[string]any{"data": map[string]any{"buffer": base64.StdEncoding.EncodeToString(silkData)}},
+	})
+}
+
+func validateVoiceDownloadRequest(r *http.Request) error {
+	if r.URL.Path != "/Tools/DownloadVoice" {
+		return fmt.Errorf("unexpected path: %s", r.URL.Path)
+	}
+	var req voiceMessageDownloadReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return fmt.Errorf("decode voice download request: %w", err)
+	}
+	if req.Wxid != "wxid_self" || req.FromUserName != "45170834716@chatroom" || req.MsgID != 11 || req.Length != 80 || req.BufID != "buf-1" {
+		return fmt.Errorf("unexpected voice download request: %#v", req)
+	}
+	return nil
+}
+
+func testMultiFrameSilk(t *testing.T) []byte {
+	t.Helper()
+	pcm := make([]byte, voiceSampleRate/5*2)
+	for i := range pcm {
+		pcm[i] = byte(i)
+	}
+	silkData, err := silk.Encode(bytes.NewReader(pcm), silk.SampleRate(voiceSampleRate), silk.Stx(true))
+	if err != nil {
+		t.Fatalf("encode test SILK: %v", err)
+	}
+	inspection, err := inspectSilkFrames(silkData)
+	if err != nil {
+		t.Fatalf("inspect test SILK: %v", err)
+	}
+	if inspection.FrameCount < 2 {
+		t.Fatalf("test SILK frame count = %d, want at least 2", inspection.FrameCount)
+	}
+	return silkData
+}
+
+func handleTestVoiceWebhook(t *testing.T, serverURL string) remoteapi.Event {
+	t.Helper()
+	c := &Client{t: newTransport(serverURL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
 	voiceXML := `<msg><voicemsg length="80" bufid="buf-1" voicelength="1000" /></msg>`
 	payload := []byte(`{"MsgID":11,"NewMsgID":22,"MsgType":34,"ContentText":` + strconvQuote(voiceXML) + `,"PushContent":"反贼王 sent you a voice message in a group chat.","Talker":"45170834716@chatroom","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
 	if err := c.HandleWebhook(context.Background(), payload); err != nil {
@@ -52,17 +222,32 @@ func TestHandleWebhookVoiceDownloadsSilkAndEmitsWAVAudio(t *testing.T) {
 	}
 	select {
 	case ev := <-c.Events():
-		if !requested {
-			t.Fatalf("expected voice download request")
-		}
-		if ev.Message == nil || ev.Message.Type != remoteapi.MsgAudio || ev.Message.Media == nil {
-			t.Fatalf("expected audio media, got %#v", ev)
-		}
-		if ev.Message.Media.MimeType != "audio/wav" || !bytes.HasPrefix(ev.Message.Media.Data, []byte("RIFF")) {
-			t.Fatalf("expected WAV media, got mime=%q prefix=%q", ev.Message.Media.MimeType, ev.Message.Media.Data[:4])
-		}
+		return ev
 	default:
 		t.Fatalf("expected webhook to emit voice message")
+		return remoteapi.Event{}
+	}
+}
+
+func assertNoVoiceHandlerError(t *testing.T, handlerErr <-chan error) {
+	t.Helper()
+	select {
+	case err := <-handlerErr:
+		t.Fatalf("voice download handler: %v", err)
+	default:
+	}
+}
+
+func assertNonEmptyWAVAudio(t *testing.T, ev remoteapi.Event) {
+	t.Helper()
+	if ev.Message == nil || ev.Message.Type != remoteapi.MsgAudio || ev.Message.Media == nil {
+		t.Fatalf("expected audio media, got %#v", ev)
+	}
+	if ev.Message.Media.MimeType != "audio/wav" || !bytes.HasPrefix(ev.Message.Media.Data, []byte("RIFF")) {
+		t.Fatalf("expected WAV media, got mime=%q data_bytes=%d", ev.Message.Media.MimeType, len(ev.Message.Media.Data))
+	}
+	if got := testWAVDataChunkLength(t, ev.Message.Media.Data); got == 0 {
+		t.Fatalf("WAV data chunk length = 0")
 	}
 }
 

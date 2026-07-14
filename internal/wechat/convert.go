@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"mime"
 	"net/http"
@@ -212,9 +214,48 @@ func (c *Client) attachVoiceMedia(ctx context.Context, base *remoteapi.InboundMe
 		log.Printf("failed to download WeChat voice %s msg_id=%d from=%q length=%d: %v", base.ID, req.MsgID, req.FromUserName, req.Length, err)
 		return
 	}
-	wav, err := silkToWAV(data)
-	if err != nil {
-		log.Printf("failed to decode WeChat voice %s msg_id=%d from=%q: %v", base.ID, req.MsgID, req.FromUserName, err)
+	wav, decodeErr := silkToWAV(data)
+	if decodeErr != nil && errors.Is(decodeErr, io.ErrUnexpectedEOF) {
+		log.Printf("first WeChat voice decode was truncated %s msg_id=%d from=%q first_bytes=%d: %v", base.ID, req.MsgID, req.FromUserName, len(data), decodeErr)
+		candidates := [][]byte{data}
+		var retryErr error
+
+		retryData, retryDownloadErr := c.downloadVoice(ctx, req)
+		if retryDownloadErr != nil {
+			retryErr = fmt.Errorf("retry WeChat voice download: %w", retryDownloadErr)
+		} else {
+			retryWAV, retryDecodeErr := silkToWAV(retryData)
+			if retryDecodeErr == nil {
+				wav = retryWAV
+				decodeErr = nil
+				log.Printf("decoded retried WeChat voice %s msg_id=%d from=%q retry_bytes=%d", base.ID, req.MsgID, req.FromUserName, len(retryData))
+			} else {
+				retryErr = fmt.Errorf("decode retried WeChat voice retry_bytes=%d: %w", len(retryData), retryDecodeErr)
+				if errors.Is(retryDecodeErr, io.ErrUnexpectedEOF) {
+					candidates = append(candidates, retryData)
+				}
+			}
+		}
+
+		if decodeErr != nil {
+			var recoveryErr error
+			var sourceIndex, sourceBytes, droppedBytes int
+			wav, sourceIndex, sourceBytes, droppedBytes, recoveryErr = recoverTruncatedSilkToWAV(candidates...)
+			if recoveryErr == nil {
+				decodeErr = nil
+				log.Printf("recovered truncated WeChat voice %s msg_id=%d from=%q source_attempt=%d source_bytes=%d dropped_bytes=%d", base.ID, req.MsgID, req.FromUserName, sourceIndex+1, sourceBytes, droppedBytes)
+			} else {
+				decodeErr = errors.Join(decodeErr, retryErr, recoveryErr)
+			}
+		}
+	}
+	if decodeErr != nil {
+		log.Printf("failed to decode WeChat voice %s msg_id=%d from=%q bytes=%d: %v", base.ID, req.MsgID, req.FromUserName, len(data), decodeErr)
+		return
+	}
+	pcm, _, _, _, wavErr := wavToPCM(wav)
+	if wavErr != nil || len(pcm) == 0 {
+		log.Printf("failed to attach decoded WeChat voice %s msg_id=%d from=%q wav_bytes=%d: WAV data chunk is empty or invalid: %v", base.ID, req.MsgID, req.FromUserName, len(wav), wavErr)
 		return
 	}
 	base.Media.Data = wav
