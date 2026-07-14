@@ -292,7 +292,13 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 	}
 
 	totalLen := req.Length
-	fragments := make([]string, 0)
+	chunkCount := totalLen / voiceDownloadChunkSize
+	if totalLen%voiceDownloadChunkSize != 0 {
+		chunkCount++
+	}
+	maxEncodedChars := int64(base64.StdEncoding.EncodedLen(int(totalLen))) + 2*chunkCount
+	encodedChars := int64(0)
+	fragments := make([]string, 0, int(chunkCount))
 	for offset := int64(0); offset < totalLen; {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -313,9 +319,13 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 		if err := c.t.post(ctx, "/Tools/DownloadVoice", chunkReq, nil, &resp); err != nil {
 			return nil, fmt.Errorf("download voice chunk offset=%d length=%d: %w", offset, chunkLen, err)
 		}
-		fragment := strings.TrimSpace(resp.Data.Buffer)
+		fragment := normalizeVoiceBase64Fragment(resp.Data.Buffer)
 		if fragment == "" {
 			return nil, fmt.Errorf("download voice chunk offset=%d returned empty data.buffer", offset)
+		}
+		fragmentChars := int64(len(fragment))
+		if fragmentChars > maxEncodedChars-encodedChars {
+			return nil, fmt.Errorf("voice Base64 data exceeds maximum encoded size: offset=%d fragment=%d cumulative=%d maximum=%d", offset, fragmentChars, encodedChars+fragmentChars, maxEncodedChars)
 		}
 		if resp.Data.ILen > 0 && resp.Data.ILen < chunkLen {
 			return nil, fmt.Errorf("download voice chunk offset=%d data.iLen=%d shorter than requested length=%d", offset, resp.Data.ILen, chunkLen)
@@ -323,6 +333,7 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 		if resp.Length > 0 && resp.Length < chunkLen {
 			return nil, fmt.Errorf("download voice chunk offset=%d response length=%d shorter than requested length=%d", offset, resp.Length, chunkLen)
 		}
+		encodedChars += fragmentChars
 		fragments = append(fragments, fragment)
 		if resp.Offset != offset || (resp.Length != 0 && resp.Length != chunkLen) {
 			log.Printf("WeChat voice chunk metadata mismatch msg_id=%d requested_offset=%d requested_length=%d returned_offset=%d returned_length=%d end_flag=%d", req.MsgID, offset, chunkLen, resp.Offset, resp.Length, resp.EndFlag)
@@ -330,15 +341,28 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 		offset += chunkLen
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	data, fallback, err := decodeVoiceBase64Fragments(fragments)
 	if err != nil {
 		return nil, fmt.Errorf("decode WeChat voice chunks: %w", err)
 	}
-	if int64(len(data)) < totalLen {
-		return nil, fmt.Errorf("assembled voice data shorter than declared length: actual=%d declared=%d", len(data), totalLen)
+	if int64(len(data)) != totalLen {
+		log.Printf("WeChat voice assembled length mismatch msg_id=%d from=%q declared=%d actual=%d chunks=%d fallback=%t", req.MsgID, req.FromUserName, totalLen, len(data), len(fragments), fallback)
+		return nil, fmt.Errorf("assembled voice data does not match declared length: actual=%d declared=%d", len(data), totalLen)
 	}
 	log.Printf("downloaded WeChat voice msg_id=%d from=%q declared=%d chunks=%d actual=%d fallback=%t", req.MsgID, req.FromUserName, totalLen, len(fragments), len(data), fallback)
 	return data, nil
+}
+
+func normalizeVoiceBase64Fragment(fragment string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			return -1
+		}
+		return r
+	}, fragment)
 }
 
 func decodeVoiceBase64Fragments(fragments []string) ([]byte, bool, error) {
@@ -347,12 +371,7 @@ func decodeVoiceBase64Fragments(fragments []string) ([]byte, bool, error) {
 	}
 	normalized := make([]string, len(fragments))
 	for i, fragment := range fragments {
-		normalized[i] = strings.Map(func(r rune) rune {
-			if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
-				return -1
-			}
-			return r
-		}, fragment)
+		normalized[i] = normalizeVoiceBase64Fragment(fragment)
 		if normalized[i] == "" {
 			return nil, false, fmt.Errorf("voice Base64 fragment %d is empty", i)
 		}

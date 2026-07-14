@@ -27,7 +27,7 @@ func TestHandleWebhookVoiceDownloadsSilkAndEmitsWAVAudio(t *testing.T) {
 	handlerErr := make(chan error, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if err := validateVoiceDownloadRequest(r); err != nil {
+		if err := validateVoiceDownloadRequest(r, int64(len(silkData))); err != nil {
 			handlerErr <- err
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -40,7 +40,7 @@ func TestHandleWebhookVoiceDownloadsSilkAndEmitsWAVAudio(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ev := handleTestVoiceWebhook(t, server.URL)
+	ev := handleTestVoiceWebhook(t, server.URL, int64(len(silkData)))
 	assertNoVoiceHandlerError(t, handlerErr)
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("voice download requests = %d, want 1", got)
@@ -54,12 +54,12 @@ func TestHandleWebhookVoiceRetriesTruncatedDownload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode complete test SILK: %v", err)
 	}
-	first := append([]byte(nil), full[:len(full)-1]...)
+	first := testSameLengthTruncatedSilk(t, full)
 	var requests atomic.Int32
 	handlerErr := make(chan error, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempt := requests.Add(1)
-		if err := validateVoiceDownloadRequest(r); err != nil {
+		if err := validateVoiceDownloadRequest(r, int64(len(full))); err != nil {
 			handlerErr <- err
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -76,7 +76,7 @@ func TestHandleWebhookVoiceRetriesTruncatedDownload(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ev := handleTestVoiceWebhook(t, server.URL)
+	ev := handleTestVoiceWebhook(t, server.URL, int64(len(full)))
 	assertNoVoiceHandlerError(t, handlerErr)
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("voice download requests = %d, want 2", got)
@@ -91,12 +91,12 @@ func TestHandleWebhookVoiceRetriesTruncatedDownload(t *testing.T) {
 
 func TestHandleWebhookVoiceRecoversWhenRetryRemainsTruncated(t *testing.T) {
 	full := testMultiFrameSilk(t)
-	truncated := append([]byte(nil), full[:len(full)-1]...)
+	truncated := testSameLengthTruncatedSilk(t, full)
 	var requests atomic.Int32
 	handlerErr := make(chan error, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if err := validateVoiceDownloadRequest(r); err != nil {
+		if err := validateVoiceDownloadRequest(r, int64(len(truncated))); err != nil {
 			handlerErr <- err
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -109,7 +109,7 @@ func TestHandleWebhookVoiceRecoversWhenRetryRemainsTruncated(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ev := handleTestVoiceWebhook(t, server.URL)
+	ev := handleTestVoiceWebhook(t, server.URL, int64(len(truncated)))
 	assertNoVoiceHandlerError(t, handlerErr)
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("voice download requests = %d, want 2", got)
@@ -151,7 +151,7 @@ func TestHandleWebhookVoiceDoesNotRetryNonEOFDecodeError(t *testing.T) {
 
 func TestHandleWebhookVoiceRecoversFirstPayloadWhenRetryDownloadFails(t *testing.T) {
 	full := testMultiFrameSilk(t)
-	truncated := append([]byte(nil), full[:len(full)-1]...)
+	truncated := testSameLengthTruncatedSilk(t, full)
 	var logs bytes.Buffer
 	originalLogOutput := log.Writer()
 	log.SetOutput(&logs)
@@ -160,7 +160,7 @@ func TestHandleWebhookVoiceRecoversFirstPayloadWhenRetryDownloadFails(t *testing
 	handlerErr := make(chan error, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempt := requests.Add(1)
-		if err := validateVoiceDownloadRequest(r); err != nil {
+		if err := validateVoiceDownloadRequest(r, int64(len(truncated))); err != nil {
 			handlerErr <- err
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -177,7 +177,7 @@ func TestHandleWebhookVoiceRecoversFirstPayloadWhenRetryDownloadFails(t *testing
 	}))
 	defer server.Close()
 
-	ev := handleTestVoiceWebhook(t, server.URL)
+	ev := handleTestVoiceWebhook(t, server.URL, int64(len(truncated)))
 	assertNoVoiceHandlerError(t, handlerErr)
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("voice download requests = %d, want 2", got)
@@ -287,6 +287,99 @@ func TestDownloadVoiceRejectsMaxInt64LengthWithoutRequest(t *testing.T) {
 	}
 }
 
+func TestDownloadVoiceRejectsDecodedDataLongerThanDeclaredLength(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_ = writeVoiceChunkResponse(w, base64.StdEncoding.EncodeToString([]byte{1, 2}), 0, 1)
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	data, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{
+		FromUserName: "wxid_voice_sender", MsgID: 11, Length: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "declared length") {
+		t.Fatalf("downloadVoice error = %v, want declared length mismatch", err)
+	}
+	if data != nil || requests.Load() != 1 {
+		t.Fatalf("downloadVoice data=%d requests=%d, want nil data and one request", len(data), requests.Load())
+	}
+}
+
+func TestDownloadVoiceRejectsBase64OverDeclaredSizeDuringCollection(t *testing.T) {
+	t.Run("whitespace is normalized before checking", func(t *testing.T) {
+		const totalLen int64 = 1
+		fragment := strings.Repeat(" \n\t", 100) + base64.StdEncoding.EncodeToString([]byte{1})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = writeVoiceChunkResponse(w, fragment, 0, totalLen)
+		}))
+		defer server.Close()
+
+		c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+		data, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{
+			FromUserName: "wxid_voice_sender", MsgID: 11, Length: totalLen,
+		})
+		if err != nil || !bytes.Equal(data, []byte{1}) {
+			t.Fatalf("downloadVoice data=%v error=%v, want one decoded byte", data, err)
+		}
+	})
+
+	t.Run("single fragment", func(t *testing.T) {
+		const totalLen int64 = 1
+		maxEncodedChars := int64(base64.StdEncoding.EncodedLen(int(totalLen))) + 2
+		var requests atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			_ = writeVoiceChunkResponse(w, strings.Repeat("A", int(maxEncodedChars+1)), 0, totalLen)
+		}))
+		defer server.Close()
+
+		c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+		data, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{
+			FromUserName: "wxid_voice_sender", MsgID: 11, Length: totalLen,
+		})
+		if err == nil || !strings.Contains(err.Error(), "Base64") || !strings.Contains(err.Error(), "maximum") {
+			t.Fatalf("downloadVoice error = %v, want Base64 collection limit error", err)
+		}
+		if data != nil || requests.Load() != 1 {
+			t.Fatalf("downloadVoice data=%d requests=%d, want nil data and one request", len(data), requests.Load())
+		}
+	})
+
+	t.Run("cumulative fragments", func(t *testing.T) {
+		totalLen := voiceDownloadChunkSize + 1
+		chunkCount := totalLen / voiceDownloadChunkSize
+		if totalLen%voiceDownloadChunkSize != 0 {
+			chunkCount++
+		}
+		maxEncodedChars := int64(base64.StdEncoding.EncodedLen(int(totalLen))) + 2*chunkCount
+		first := base64.StdEncoding.EncodeToString(make([]byte, voiceDownloadChunkSize))
+		secondLen := maxEncodedChars - int64(len(first)) + 1
+		var requests atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestNumber := requests.Add(1)
+			if requestNumber == 1 {
+				_ = writeVoiceChunkResponse(w, first, 0, voiceDownloadChunkSize)
+				return
+			}
+			_ = writeVoiceChunkResponse(w, strings.Repeat("A", int(secondLen)), voiceDownloadChunkSize, 1)
+		}))
+		defer server.Close()
+
+		c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+		data, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{
+			FromUserName: "wxid_voice_sender", MsgID: 11, Length: totalLen,
+		})
+		if err == nil || !strings.Contains(err.Error(), "Base64") || !strings.Contains(err.Error(), "maximum") {
+			t.Fatalf("downloadVoice error = %v, want cumulative Base64 collection limit error", err)
+		}
+		if data != nil || requests.Load() != 2 {
+			t.Fatalf("downloadVoice data=%d requests=%d, want nil data and two requests", len(data), requests.Load())
+		}
+	})
+}
+
 func TestDownloadVoiceRejectsDecodedDataShorterThanDeclaredLength(t *testing.T) {
 	var requests atomic.Int32
 	handlerErr := make(chan error, 2)
@@ -388,6 +481,54 @@ func TestDownloadVoiceStopsBeforeNextChunkWhenContextCanceledAfterResponse(t *te
 	if data != nil || requests.Load() != 1 {
 		t.Fatalf("downloadVoice data=%d requests=%d, want nil data and one request", len(data), requests.Load())
 	}
+}
+
+func TestDownloadVoiceReturnsCanceledAfterFinalChunkBeforeAssembly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = writeVoiceChunkResponse(w, base64.StdEncoding.EncodeToString([]byte{1}), 0, 1)
+	}))
+	defer server.Close()
+
+	transport := newTransport(server.URL)
+	transport.hc.Transport = cancelAtEOFTransport{base: http.DefaultTransport, cancel: cancel}
+	c := &Client{t: transport, wxid: "wxid_self"}
+	data, err := c.downloadVoice(ctx, voiceMessageDownloadReq{
+		FromUserName: "wxid_voice_sender", MsgID: 11, Length: 1,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("downloadVoice error = %v, want context.Canceled", err)
+	}
+	if data != nil {
+		t.Fatalf("downloadVoice returned %d bytes after cancellation, want nil", len(data))
+	}
+}
+
+type cancelAtEOFTransport struct {
+	base   http.RoundTripper
+	cancel context.CancelFunc
+}
+
+func (t cancelAtEOFTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err == nil {
+		resp.Body = &cancelAtEOFBody{ReadCloser: resp.Body, cancel: t.cancel}
+	}
+	return resp, err
+}
+
+type cancelAtEOFBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelAtEOFBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.cancel()
+	}
+	return n, err
 }
 
 func TestDownloadVoiceChunksReturnsNoPartialDataOnSecondChunkAPIFailure(t *testing.T) {
@@ -650,8 +791,8 @@ func writeVoiceResponse(w http.ResponseWriter, silkData []byte) error {
 	})
 }
 
-func validateVoiceDownloadRequest(r *http.Request) error {
-	return validateVoiceDownloadRequestLength(r, 80)
+func validateVoiceDownloadRequest(r *http.Request, wantLength int64) error {
+	return validateVoiceDownloadRequestLength(r, wantLength)
 }
 
 func validateVoiceDownloadRequestLength(r *http.Request, wantLength int64) error {
@@ -670,6 +811,38 @@ func validateVoiceDownloadRequestLength(r *http.Request, wantLength int64) error
 		return fmt.Errorf("unexpected voice download request: %#v", body)
 	}
 	return nil
+}
+
+func testSameLengthTruncatedSilk(t *testing.T, full []byte) []byte {
+	t.Helper()
+	truncated := append([]byte(nil), full...)
+	position := 0
+	if len(truncated) > 0 && truncated[0] == 0x02 {
+		position++
+	}
+	position += len("#!SILK_V3")
+	lastLengthOffset := -1
+	for position < len(truncated) {
+		if len(truncated)-position < 2 {
+			t.Fatalf("test SILK has truncated frame length at %d", position)
+		}
+		lastLengthOffset = position
+		payloadLength := int(int16(binary.LittleEndian.Uint16(truncated[position : position+2])))
+		if payloadLength <= 0 || payloadLength >= maxSilkFramePayload {
+			t.Fatalf("test SILK frame length = %d at %d, cannot extend safely", payloadLength, position)
+		}
+		position += 2 + payloadLength
+	}
+	if position != len(truncated) || lastLengthOffset < 0 {
+		t.Fatalf("test SILK framing ended at %d of %d bytes", position, len(truncated))
+	}
+	payloadLength := binary.LittleEndian.Uint16(truncated[lastLengthOffset : lastLengthOffset+2])
+	binary.LittleEndian.PutUint16(truncated[lastLengthOffset:lastLengthOffset+2], payloadLength+1)
+	inspection, err := inspectSilkFrames(truncated)
+	if !errors.Is(err, io.ErrUnexpectedEOF) || inspection.FrameCount == 0 {
+		t.Fatalf("same-length test SILK inspection = %#v, %v; want recoverable truncation", inspection, err)
+	}
+	return truncated
 }
 
 func testMultiFrameSilk(t *testing.T) []byte {
@@ -692,9 +865,9 @@ func testMultiFrameSilk(t *testing.T) []byte {
 	return silkData
 }
 
-func handleTestVoiceWebhook(t *testing.T, serverURL string) remoteapi.Event {
+func handleTestVoiceWebhook(t *testing.T, serverURL string, length int64) remoteapi.Event {
 	t.Helper()
-	return handleTestVoiceWebhookLength(t, serverURL, 80)
+	return handleTestVoiceWebhookLength(t, serverURL, length)
 }
 
 func handleTestVoiceWebhookLength(t *testing.T, serverURL string, length int64) remoteapi.Event {
