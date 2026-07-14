@@ -180,6 +180,21 @@ func TestInspectSilkFrames(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "short garbage header",
+			data:    []byte("x"),
+			wantErr: true,
+		},
+		{
+			name:    "incomplete header",
+			data:    []byte("#!SILK"),
+			wantErr: true,
+		},
+		{
+			name:    "STX and incomplete header",
+			data:    []byte("\x02#!SILK"),
+			wantErr: true,
+		},
+		{
 			name:    "inexact header",
 			data:    []byte("#!SILK_V2\x01\x00\x44"),
 			wantErr: true,

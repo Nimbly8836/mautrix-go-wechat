@@ -46,7 +46,7 @@ func inspectSilkFrames(data []byte) (silkFrameInspection, error) {
 
 	const header = "#!SILK_V3"
 	if len(data)-position < len(header) {
-		return inspection, fmt.Errorf("invalid SILK header: %w", io.ErrUnexpectedEOF)
+		return inspection, fmt.Errorf("invalid SILK header: too short")
 	}
 	if string(data[position:position+len(header)]) != header {
 		return inspection, fmt.Errorf("invalid SILK header")
