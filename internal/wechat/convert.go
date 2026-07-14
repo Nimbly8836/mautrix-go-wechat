@@ -30,6 +30,8 @@ const (
 	wxApp          = 49 // links, files, mini-programs, quotes (parsed from XML)
 	wxStatusNotify = 51
 	wxRevoke       = 10002
+
+	voiceDownloadChunkSize int64 = 60 * 1024
 )
 
 func shouldDropLocal(m localMessage) bool {
@@ -89,7 +91,7 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		c.attachVideoMedia(ctx, &base, videoMessageDownloadReq{ToWxid: firstNonEmpty(m.ToUserName, chat), MsgID: firstNonZero(m.MsgID, m.NewMsgID), NewMsgID: m.NewMsgID, SenderUserName: sender, DataLen: int64Value(extraString(base.Extra, "video_data_len"))})
 	}
 	if m.MsgType == wxVoice {
-		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(chat, sender), MsgID: firstNonZero(m.MsgID, m.NewMsgID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
+		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(extraString(base.Extra, "voice_fromusername"), sender, chat), MsgID: firstNonZero(m.MsgID, m.NewMsgID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
 	}
 	if base.Type == remoteapi.MsgFile {
 		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: m.MsgID, NewMsgID: m.NewMsgID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
@@ -193,7 +195,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		c.attachVideoMedia(ctx, &base, videoMessageDownloadReq{ToWxid: firstNonEmpty(to, chat), MsgID: firstNonZero(rawID, messageID), NewMsgID: messageID, SenderUserName: sender, DataLen: int64Value(extraString(base.Extra, "video_data_len"))})
 	}
 	if m.MsgType == wxVoice {
-		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(chat, sender), MsgID: firstNonZero(rawID, messageID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
+		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(extraString(base.Extra, "voice_fromusername"), sender, chat), MsgID: firstNonZero(rawID, messageID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
 	}
 	if base.Type == remoteapi.MsgFile {
 		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: rawID, NewMsgID: messageID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
@@ -284,13 +286,81 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 	if req.Length <= 0 {
 		return nil, fmt.Errorf("missing voice length")
 	}
-	req.Wxid = wxid
-	raw, contentType, err := c.t.postRaw(ctx, "/Tools/DownloadVoice", req, nil)
-	if err != nil {
-		return nil, err
+
+	totalLen := req.Length
+	fragments := make([]string, 0)
+	for offset := int64(0); offset < totalLen; offset += voiceDownloadChunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		chunkLen := voiceDownloadChunkSize
+		if remaining := totalLen - offset; remaining < chunkLen {
+			chunkLen = remaining
+		}
+		chunkReq := req
+		chunkReq.Wxid = wxid
+		chunkReq.Offset = offset
+		chunkReq.Length = chunkLen
+
+		var resp voiceDownloadResp
+		if err := c.t.post(ctx, "/Tools/DownloadVoice", chunkReq, nil, &resp); err != nil {
+			return nil, fmt.Errorf("download voice chunk offset=%d length=%d: %w", offset, chunkLen, err)
+		}
+		fragment := strings.TrimSpace(resp.Data.Buffer)
+		if fragment == "" {
+			return nil, fmt.Errorf("download voice chunk offset=%d returned empty data.buffer", offset)
+		}
+		fragments = append(fragments, fragment)
+		if resp.Offset != offset || (resp.Length != 0 && resp.Length != chunkLen) {
+			log.Printf("WeChat voice chunk metadata mismatch msg_id=%d requested_offset=%d requested_length=%d returned_offset=%d returned_length=%d end_flag=%d", req.MsgID, offset, chunkLen, resp.Offset, resp.Length, resp.EndFlag)
+		}
 	}
-	data, _, err := mediaBytesFromRawResponse(raw, contentType, "/Tools/DownloadVoice")
-	return data, err
+
+	data, fallback, err := decodeVoiceBase64Fragments(fragments)
+	if err != nil {
+		return nil, fmt.Errorf("decode WeChat voice chunks: %w", err)
+	}
+	log.Printf("downloaded WeChat voice msg_id=%d from=%q total=%d chunks=%d assembled=%d fallback=%t", req.MsgID, req.FromUserName, totalLen, len(fragments), len(data), fallback)
+	return data, nil
+}
+
+func decodeVoiceBase64Fragments(fragments []string) ([]byte, bool, error) {
+	if len(fragments) == 0 {
+		return nil, false, fmt.Errorf("voice Base64 fragment list is empty")
+	}
+	normalized := make([]string, len(fragments))
+	for i, fragment := range fragments {
+		normalized[i] = strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+				return -1
+			}
+			return r
+		}, fragment)
+		if normalized[i] == "" {
+			return nil, false, fmt.Errorf("voice Base64 fragment %d is empty", i)
+		}
+	}
+
+	data, _, combinedErr := decodeMediaString(strings.Join(normalized, ""))
+	if combinedErr == nil && len(data) > 0 {
+		return data, false, nil
+	}
+
+	var assembled []byte
+	for i, fragment := range normalized {
+		chunk, _, err := decodeMediaString(fragment)
+		if err != nil {
+			return nil, true, fmt.Errorf("decode voice Base64 fragment %d: %w", i, err)
+		}
+		if len(chunk) == 0 {
+			return nil, true, fmt.Errorf("voice Base64 fragment %d decoded to zero bytes", i)
+		}
+		assembled = append(assembled, chunk...)
+	}
+	if len(assembled) == 0 {
+		return nil, true, fmt.Errorf("voice Base64 fragments decoded to zero bytes")
+	}
+	return assembled, true, nil
 }
 
 func (c *Client) attachFileMedia(ctx context.Context, base *remoteapi.InboundMessage, req fileMessageDownloadReq) {
@@ -816,6 +886,9 @@ func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push
 			}
 			if bufID := firstNonEmpty(xmlAttr(base.Text, "bufid"), xmlAttr(base.Text, "bufID")); bufID != "" {
 				base.Extra["voice_bufid"] = bufID
+			}
+			if from := firstNonEmpty(xmlAttr(base.Text, "fromusername"), xmlAttr(base.Text, "fromUserName")); from != "" {
+				base.Extra["voice_fromusername"] = from
 			}
 			if voiceTime := firstNonEmpty(xmlAttr(base.Text, "voicelength"), xmlAttr(base.Text, "length")); voiceTime != "" {
 				base.Extra["duration"] = voiceTime

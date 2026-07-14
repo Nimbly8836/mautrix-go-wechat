@@ -190,8 +190,26 @@ type voiceMessageDownloadReq struct {
 	Wxid         string `json:"Wxid"`
 	FromUserName string `json:"FromUserName"`
 	MsgID        int64  `json:"MsgId"`
+	Offset       int64  `json:"Offset"`
 	Length       int64  `json:"Length"`
 	BufID        string `json:"Bufid,omitempty"`
+}
+
+type voiceDownloadData struct {
+	Buffer string `json:"buffer"`
+	ILen   int64  `json:"iLen"`
+}
+
+type voiceDownloadResp struct {
+	MsgID       int64             `json:"msgId"`
+	NewMsgID    int64             `json:"newMsgId"`
+	Offset      int64             `json:"offset"`
+	Length      int64             `json:"length"`
+	VoiceLength int64             `json:"voiceLength"`
+	ClientMsgID string            `json:"clientMsgId"`
+	Data        voiceDownloadData `json:"data"`
+	EndFlag     int               `json:"endFlag"`
+	CancelFlag  int               `json:"cancelFlag"`
 }
 
 type sendVoiceReq struct {

@@ -182,11 +182,315 @@ func TestHandleWebhookVoiceRecoversFirstPayloadWhenRetryDownloadFails(t *testing
 		t.Fatalf("voice download requests = %d, want 2", got)
 	}
 	assertNonEmptyWAVAudio(t, ev)
-	for _, want := range []string{"failed to retry WeChat voice download 22", "msg_id=11", `from="45170834716@chatroom"`, "temporary voice download failure"} {
+	for _, want := range []string{"failed to retry WeChat voice download 22", "msg_id=11", `from="wxid_voice_sender"`, "temporary voice download failure"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Fatalf("retry failure log %q does not contain %q", logs.String(), want)
 		}
 	}
+}
+
+func TestDownloadVoiceChunksAssemblesRawBytes(t *testing.T) {
+	raw := make([]byte, 70*1024)
+	for i := range raw {
+		raw[i] = byte(i)
+	}
+
+	var requests atomic.Int32
+	handlerErr := make(chan error, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := requests.Add(1)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			handlerErr <- fmt.Errorf("decode chunk request %d: %w", requestNumber, err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		offset, offsetOK := body["Offset"].(float64)
+		length, lengthOK := body["Length"].(float64)
+		wantOffset := []int64{0, 60 * 1024}
+		wantLength := []int64{60 * 1024, 10 * 1024}
+		index := int(requestNumber - 1)
+		if !offsetOK || !lengthOK || index >= len(wantOffset) || int64(offset) != wantOffset[index] || int64(length) != wantLength[index] {
+			handlerErr <- fmt.Errorf("chunk request %d offset/length = %v/%v, want indexed values", requestNumber, body["Offset"], body["Length"])
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		start, size := int64(offset), int64(length)
+		fragment := base64.StdEncoding.EncodeToString(raw[start : start+size])
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"Code": 0, "Success": true,
+			"Data": map[string]any{
+				"msgId": 11, "newMsgId": 22, "offset": start, "length": size,
+				"voiceLength": 1000, "data": map[string]any{"buffer": fragment, "iLen": size},
+				"endFlag": index, "cancelFlag": 0,
+			},
+		}); err != nil {
+			handlerErr <- fmt.Errorf("encode chunk response %d: %w", requestNumber, err)
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	got, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{
+		FromUserName: "wxid_voice_sender", MsgID: 11, Length: int64(len(raw)), BufID: "buf-1",
+	})
+	if err != nil {
+		t.Fatalf("downloadVoice: %v", err)
+	}
+	assertNoVoiceHandlerError(t, handlerErr)
+	if requests.Load() != 2 {
+		t.Fatalf("voice download requests = %d, want 2", requests.Load())
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("downloaded voice differs: got %d bytes, want %d", len(got), len(raw))
+	}
+}
+
+func TestDownloadVoiceChunksReturnsNoPartialDataOnSecondChunkAPIFailure(t *testing.T) {
+	var requests atomic.Int32
+	handlerErr := make(chan error, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := requests.Add(1)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			handlerErr <- fmt.Errorf("decode request %d: %w", requestNumber, err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if requestNumber == 1 {
+			if err := writeVoiceChunkResponse(w, base64.StdEncoding.EncodeToString(make([]byte, voiceDownloadChunkSize)), 0, voiceDownloadChunkSize); err != nil {
+				handlerErr <- err
+			}
+			return
+		}
+		if _, err := w.Write([]byte(`{"Code":42,"Success":false,"Message":"chunk unavailable"}`)); err != nil {
+			handlerErr <- fmt.Errorf("write API failure response: %w", err)
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	data, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{FromUserName: "wxid_voice_sender", MsgID: 11, Length: 70 * 1024})
+	assertNoVoiceHandlerError(t, handlerErr)
+	if err == nil || !strings.Contains(err.Error(), "offset=61440") || !strings.Contains(err.Error(), "chunk unavailable") {
+		t.Fatalf("downloadVoice error = %v, want second chunk offset and API message", err)
+	}
+	if data != nil {
+		t.Fatalf("downloadVoice returned %d partial bytes, want nil", len(data))
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("voice download requests = %d, want 2", requests.Load())
+	}
+}
+
+func TestDownloadVoiceChunksRejectsEmptyBuffer(t *testing.T) {
+	var requests atomic.Int32
+	handlerErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if err := json.NewEncoder(w).Encode(map[string]any{"Code": 0, "Success": true, "Data": map[string]any{"data": map[string]any{"buffer": ""}}}); err != nil {
+			handlerErr <- err
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	data, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{FromUserName: "wxid_voice_sender", MsgID: 11, Length: 80})
+	assertNoVoiceHandlerError(t, handlerErr)
+	if err == nil || !strings.Contains(err.Error(), "empty data.buffer") {
+		t.Fatalf("downloadVoice error = %v, want empty data.buffer error", err)
+	}
+	if data != nil || requests.Load() != 1 {
+		t.Fatalf("downloadVoice data=%d requests=%d, want nil data and one request", len(data), requests.Load())
+	}
+}
+
+func TestDownloadVoiceChunksRejectsMalformedBase64(t *testing.T) {
+	var requests atomic.Int32
+	handlerErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if err := writeVoiceChunkResponse(w, "%%%", 0, 80); err != nil {
+			handlerErr <- err
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	data, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{FromUserName: "wxid_voice_sender", MsgID: 11, Length: 80})
+	assertNoVoiceHandlerError(t, handlerErr)
+	if err == nil {
+		t.Fatal("downloadVoice returned nil error for malformed Base64")
+	}
+	if data != nil || requests.Load() != 1 {
+		t.Fatalf("downloadVoice data=%d requests=%d, want nil data and one request", len(data), requests.Load())
+	}
+}
+
+func TestDownloadVoiceChunksHonorsPreCanceledContext(t *testing.T) {
+	var requests atomic.Int32
+	handlerErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if err := writeVoiceChunkResponse(w, base64.StdEncoding.EncodeToString([]byte("unexpected")), 0, 80); err != nil {
+			handlerErr <- err
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	data, err := c.downloadVoice(ctx, voiceMessageDownloadReq{FromUserName: "wxid_voice_sender", MsgID: 11, Length: 70 * 1024})
+	assertNoVoiceHandlerError(t, handlerErr)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("downloadVoice error = %v, want context.Canceled", err)
+	}
+	if data != nil || requests.Load() != 0 {
+		t.Fatalf("downloadVoice data=%d requests=%d, want nil data and no completed request", len(data), requests.Load())
+	}
+}
+
+func TestDownloadVoiceChunksIgnoresMetadataMismatchWithoutReordering(t *testing.T) {
+	raw := make([]byte, 70*1024)
+	for i := range raw {
+		raw[i] = byte(i * 31)
+	}
+	var requests atomic.Int32
+	handlerErr := make(chan error, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := requests.Add(1)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			handlerErr <- err
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		offset, offsetOK := body["Offset"].(float64)
+		length, lengthOK := body["Length"].(float64)
+		if !offsetOK || !lengthOK {
+			handlerErr <- fmt.Errorf("request %d missing numeric offset/length: %#v", requestNumber, body)
+			http.Error(w, "invalid range", http.StatusBadRequest)
+			return
+		}
+		start, size := int64(offset), int64(length)
+		metadataOffset := int64(999)
+		metadataLength := int64(1)
+		if err := writeVoiceChunkResponse(w, base64.StdEncoding.EncodeToString(raw[start:start+size]), metadataOffset, metadataLength); err != nil {
+			handlerErr <- err
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	got, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{FromUserName: "wxid_voice_sender", MsgID: 11, Length: int64(len(raw))})
+	if err != nil {
+		t.Fatalf("downloadVoice: %v", err)
+	}
+	assertNoVoiceHandlerError(t, handlerErr)
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("metadata mismatch reordered data: got %d bytes, want %d", len(got), len(raw))
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("voice download requests = %d, want 2", requests.Load())
+	}
+}
+
+func TestConvertLocalVoiceUsesXMLFromUsername(t *testing.T) {
+	var requests atomic.Int32
+	handlerErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if err := validateVoiceDownloadRequest(r); err != nil {
+			handlerErr <- err
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := writeVoiceResponse(w, testSilkContainer(true, []byte{0x00, 0x00})); err != nil {
+			handlerErr <- err
+		}
+	}))
+	defer server.Close()
+
+	voiceXML := `<msg><voicemsg length="80" bufid="buf-1" voicelength="1000" fromusername="wxid_voice_sender" /></msg>`
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	ev, ok := c.convertLocal(context.Background(), localMessage{
+		MsgID: 11, NewMsgID: 22, MsgType: wxVoice, ContentText: voiceXML,
+		Talker: "45170834716@chatroom", SenderUserName: "wxid_local_sender", CreateTime: 1710000000,
+	})
+	assertNoVoiceHandlerError(t, handlerErr)
+	if !ok || ev.Message == nil || ev.Message.Type != remoteapi.MsgAudio {
+		t.Fatalf("convertLocal returned ok=%v event=%#v", ok, ev)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("voice download requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestDecodeVoiceBase64Fragments(t *testing.T) {
+	t.Run("combined unpadded boundary", func(t *testing.T) {
+		first := make([]byte, voiceDownloadChunkSize)
+		for i := range first {
+			first[i] = byte(i)
+		}
+		second := []byte("final tail")
+		fragments := []string{
+			base64.StdEncoding.EncodeToString(first),
+			" \n" + base64.StdEncoding.EncodeToString(second) + "\t",
+		}
+		got, fallback, err := decodeVoiceBase64Fragments(fragments)
+		if err != nil {
+			t.Fatalf("decode fragments: %v", err)
+		}
+		want := append(append([]byte(nil), first...), second...)
+		if fallback || !bytes.Equal(got, want) {
+			t.Fatalf("decode fragments fallback=%v bytes=%d, want fallback=false bytes=%d", fallback, len(got), len(want))
+		}
+	})
+
+	t.Run("independent padding fallback", func(t *testing.T) {
+		fragments := []string{
+			base64.StdEncoding.EncodeToString([]byte("ab")),
+			base64.StdEncoding.EncodeToString([]byte("cde")),
+		}
+		got, fallback, err := decodeVoiceBase64Fragments(fragments)
+		if err != nil {
+			t.Fatalf("decode fragments: %v", err)
+		}
+		if !fallback || string(got) != "abcde" {
+			t.Fatalf("decode fragments fallback=%v data=%q, want fallback=true data=abcde", fallback, got)
+		}
+	})
+
+	for _, tt := range []struct {
+		name      string
+		fragments []string
+	}{
+		{name: "malformed", fragments: []string{"YWJj", "%%%"}},
+		{name: "empty list"},
+		{name: "empty chunk", fragments: []string{"YWJj", " \n\t"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data, _, err := decodeVoiceBase64Fragments(tt.fragments)
+			if err == nil {
+				t.Fatalf("decode fragments returned %d bytes, want error", len(data))
+			}
+			if len(data) != 0 {
+				t.Fatalf("decode fragments returned partial data: %d bytes", len(data))
+			}
+		})
+	}
+}
+
+func writeVoiceChunkResponse(w http.ResponseWriter, buffer string, offset, length int64) error {
+	return json.NewEncoder(w).Encode(map[string]any{
+		"Code": 0, "Success": true,
+		"Data": map[string]any{
+			"msgId": 11, "newMsgId": 22, "offset": offset, "length": length,
+			"voiceLength": 1000, "data": map[string]any{"buffer": buffer, "iLen": length},
+			"endFlag": 0, "cancelFlag": 0,
+		},
+	})
 }
 
 func writeVoiceResponse(w http.ResponseWriter, silkData []byte) error {
@@ -201,12 +505,16 @@ func validateVoiceDownloadRequest(r *http.Request) error {
 	if r.URL.Path != "/Tools/DownloadVoice" {
 		return fmt.Errorf("unexpected path: %s", r.URL.Path)
 	}
-	var req voiceMessageDownloadReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		return fmt.Errorf("decode voice download request: %w", err)
 	}
-	if req.Wxid != "wxid_self" || req.FromUserName != "45170834716@chatroom" || req.MsgID != 11 || req.Length != 80 || req.BufID != "buf-1" {
-		return fmt.Errorf("unexpected voice download request: %#v", req)
+	offset, hasOffset := body["Offset"]
+	if !hasOffset {
+		return fmt.Errorf("voice download request has no explicit Offset: %#v", body)
+	}
+	if body["Wxid"] != "wxid_self" || body["FromUserName"] != "wxid_voice_sender" || body["MsgId"] != float64(11) || offset != float64(0) || body["Length"] != float64(80) || body["Bufid"] != "buf-1" {
+		return fmt.Errorf("unexpected voice download request: %#v", body)
 	}
 	return nil
 }
@@ -234,7 +542,7 @@ func testMultiFrameSilk(t *testing.T) []byte {
 func handleTestVoiceWebhook(t *testing.T, serverURL string) remoteapi.Event {
 	t.Helper()
 	c := &Client{t: newTransport(serverURL), wxid: "wxid_self", events: make(chan remoteapi.Event, 4), done: make(chan struct{})}
-	voiceXML := `<msg><voicemsg length="80" bufid="buf-1" voicelength="1000" /></msg>`
+	voiceXML := `<msg><voicemsg length="80" bufid="buf-1" voicelength="1000" fromusername="wxid_voice_sender" /></msg>`
 	payload := []byte(`{"MsgID":11,"NewMsgID":22,"MsgType":34,"ContentText":` + strconvQuote(voiceXML) + `,"PushContent":"反贼王 sent you a voice message in a group chat.","Talker":"45170834716@chatroom","SenderUserName":"wxid_friend","CreateTime":1710000000}`)
 	if err := c.HandleWebhook(context.Background(), payload); err != nil {
 		t.Fatalf("HandleWebhook returned error: %v", err)
