@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
@@ -98,6 +102,233 @@ func TestSendMessageAudioWAVCallsSendVoiceAsSilk(t *testing.T) {
 	if msgID != "123" || !sawSendVoice {
 		t.Fatalf("unexpected send result id=%q saw=%v", msgID, sawSendVoice)
 	}
+}
+
+func TestInspectSilkFrames(t *testing.T) {
+	frame := testSilkFrame([]byte{0x11, 0x22, 0x33})
+	frameEndWithoutSTX := len("#!SILK_V3") + len(frame)
+	frameEndWithSTX := 1 + frameEndWithoutSTX
+
+	tests := []struct {
+		name           string
+		data           []byte
+		want           silkFrameInspection
+		wantErr        bool
+		wantUnexpected bool
+	}{
+		{
+			name: "valid single frame without STX",
+			data: testSilkContainer(false, frame),
+			want: silkFrameInspection{PrefixEnd: frameEndWithoutSTX, FrameCount: 1, PayloadBytes: 3},
+		},
+		{
+			name: "valid single frame with STX",
+			data: testSilkContainer(true, frame),
+			want: silkFrameInspection{PrefixEnd: frameEndWithSTX, FrameCount: 1, PayloadBytes: 3},
+		},
+		{
+			name: "complete frame and negative footer",
+			data: testSilkContainer(true, append(append([]byte{}, frame...), 0xff, 0xff)),
+			want: silkFrameInspection{PrefixEnd: frameEndWithSTX, FrameCount: 1, PayloadBytes: 3, DroppedBytes: 0},
+		},
+		{
+			name:    "footer only",
+			data:    testSilkContainer(false, []byte{0xff, 0xff}),
+			want:    silkFrameInspection{PrefixEnd: len("#!SILK_V3")},
+			wantErr: true,
+		},
+		{
+			name:    "dangling one byte length",
+			data:    testSilkContainer(false, append(append([]byte{}, frame...), 0x03)),
+			want:    silkFrameInspection{PrefixEnd: frameEndWithoutSTX, FrameCount: 1, PayloadBytes: 3, DroppedBytes: 1},
+			wantErr: true, wantUnexpected: true,
+		},
+		{
+			name:    "partial frame payload",
+			data:    testSilkContainer(false, append(append(append([]byte{}, frame...), 0x03, 0x00), 0x44)),
+			want:    silkFrameInspection{PrefixEnd: frameEndWithoutSTX, FrameCount: 1, PayloadBytes: 3, DroppedBytes: 3},
+			wantErr: true, wantUnexpected: true,
+		},
+		{
+			name:    "positive length with zero payload and no complete frame",
+			data:    testSilkContainer(false, []byte{0x03, 0x00}),
+			want:    silkFrameInspection{PrefixEnd: len("#!SILK_V3"), DroppedBytes: 2},
+			wantErr: true, wantUnexpected: true,
+		},
+		{
+			name:    "zero length",
+			data:    testSilkContainer(false, []byte{0x00, 0x00}),
+			want:    silkFrameInspection{PrefixEnd: len("#!SILK_V3")},
+			wantErr: true,
+		},
+		{
+			name:    "oversized length",
+			data:    testSilkContainer(false, []byte{0x01, 0x04}),
+			want:    silkFrameInspection{PrefixEnd: len("#!SILK_V3")},
+			wantErr: true,
+		},
+		{
+			name:    "footer trailer",
+			data:    testSilkContainer(false, append(append(append([]byte{}, frame...), 0xff, 0xff), 0x00)),
+			want:    silkFrameInspection{PrefixEnd: frameEndWithoutSTX, FrameCount: 1, PayloadBytes: 3},
+			wantErr: true,
+		},
+		{
+			name:    "header only",
+			data:    testSilkContainer(false, nil),
+			want:    silkFrameInspection{PrefixEnd: len("#!SILK_V3")},
+			wantErr: true,
+		},
+		{
+			name:    "inexact header",
+			data:    []byte("#!SILK_V2\x01\x00\x44"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := inspectSilkFrames(tt.data)
+			if got != tt.want {
+				t.Fatalf("inspection = %#v, want %#v", got, tt.want)
+			}
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if errors.Is(err, io.ErrUnexpectedEOF) != tt.wantUnexpected {
+				t.Fatalf("errors.Is(error, io.ErrUnexpectedEOF) = %v, want %v (error: %v)", errors.Is(err, io.ErrUnexpectedEOF), tt.wantUnexpected, err)
+			}
+		})
+	}
+}
+
+func TestRecoverTruncatedSilkToWAV(t *testing.T) {
+	pcm := make([]byte, voiceSampleRate/5*2) // 200 ms, ten SILK frames.
+	for i := range pcm {
+		pcm[i] = byte(i)
+	}
+	silkData, err := silk.Encode(bytes.NewReader(pcm), silk.SampleRate(voiceSampleRate), silk.Stx(true))
+	if err != nil {
+		t.Fatalf("encode test SILK: %v", err)
+	}
+	truncated := append([]byte(nil), silkData[:len(silkData)-1]...)
+
+	if _, err = silkToWAV(truncated); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("silkToWAV error = %v, want io.ErrUnexpectedEOF", err)
+	}
+
+	wav, sourceIndex, sourceBytes, droppedBytes, err := recoverTruncatedSilkToWAV(truncated, truncated)
+	if err != nil {
+		t.Fatalf("recoverTruncatedSilkToWAV: %v", err)
+	}
+	if got := testWAVDataChunkLength(t, wav); got == 0 {
+		t.Fatalf("recovered WAV data chunk length = 0")
+	}
+	if sourceIndex != 1 {
+		t.Fatalf("sourceIndex = %d, want later tied source 1", sourceIndex)
+	}
+	if sourceBytes != len(truncated) {
+		t.Fatalf("sourceBytes = %d, want %d", sourceBytes, len(truncated))
+	}
+	if droppedBytes <= 0 {
+		t.Fatalf("droppedBytes = %d, want > 0", droppedBytes)
+	}
+}
+
+func TestRecoverTruncatedSilkToWAVNoRecoverableFrames(t *testing.T) {
+	partialFirstFrame := testSilkContainer(true, []byte{0x03, 0x00})
+	wav, _, _, _, err := recoverTruncatedSilkToWAV(partialFirstFrame)
+	if err == nil || !strings.Contains(err.Error(), "no recoverable SILK frames") {
+		t.Fatalf("error = %v, want explicit no recoverable SILK frames error", err)
+	}
+	if wav != nil {
+		t.Fatalf("WAV = %d bytes, want nil", len(wav))
+	}
+}
+
+func TestRecoverTruncatedSilkToWAVCandidateSorting(t *testing.T) {
+	candidates := []silkRecoveryCandidate{
+		{Data: []byte("frames-first"), SourceIndex: 9, Inspection: silkFrameInspection{FrameCount: 1, PayloadBytes: 100}},
+		{Data: []byte("tie-earlier"), SourceIndex: 0, Inspection: silkFrameInspection{FrameCount: 2, PayloadBytes: 5}},
+		{Data: []byte("payload-third"), SourceIndex: 8, Inspection: silkFrameInspection{FrameCount: 2, PayloadBytes: 4}},
+		{Data: []byte("tie-later"), SourceIndex: 1, Inspection: silkFrameInspection{FrameCount: 2, PayloadBytes: 5}},
+	}
+
+	sortSilkRecoveryCandidates(candidates)
+	want := []string{"tie-later", "tie-earlier", "payload-third", "frames-first"}
+	for i, candidate := range candidates {
+		if string(candidate.Data) != want[i] {
+			t.Fatalf("candidate %d = %q, want %q", i, candidate.Data, want[i])
+		}
+	}
+}
+
+func TestSilkToWAVRejectsMalformedStructure(t *testing.T) {
+	frame := testSilkFrame([]byte{0x11})
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "header only", data: testSilkContainer(false, nil)},
+		{name: "zero frame", data: testSilkContainer(false, []byte{0x00, 0x00})},
+		{name: "oversized frame", data: testSilkContainer(false, []byte{0x01, 0x04})},
+		{name: "footer trailer", data: testSilkContainer(false, append(append(append([]byte{}, frame...), 0xff, 0xff), 0x00))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if wav, err := silkToWAV(tt.data); err == nil {
+				t.Fatalf("silkToWAV returned %d-byte WAV, want error", len(wav))
+			}
+		})
+	}
+}
+
+func TestSilkToWAVRejectsEmptyPCM(t *testing.T) {
+	emptySilk, err := silk.Encode(bytes.NewReader(nil), silk.SampleRate(voiceSampleRate), silk.Stx(true))
+	if err != nil {
+		t.Fatalf("encode empty SILK: %v", err)
+	}
+	pcm, err := silk.Decode(bytes.NewReader(emptySilk), silk.WithSampleRate(voiceSampleRate))
+	if err != nil {
+		t.Fatalf("confirm fixture decodes: %v", err)
+	}
+	if len(pcm) != 0 {
+		t.Fatalf("fixture PCM length = %d, want 0", len(pcm))
+	}
+	if wav, err := silkToWAV(emptySilk); err == nil {
+		t.Fatalf("silkToWAV returned %d-byte WAV for empty PCM, want error", len(wav))
+	}
+}
+
+func testSilkContainer(withSTX bool, body []byte) []byte {
+	data := make([]byte, 0, 1+len("#!SILK_V3")+len(body))
+	if withSTX {
+		data = append(data, 0x02)
+	}
+	data = append(data, "#!SILK_V3"...)
+	return append(data, body...)
+}
+
+func testSilkFrame(payload []byte) []byte {
+	frame := make([]byte, 2, 2+len(payload))
+	binary.LittleEndian.PutUint16(frame, uint16(len(payload)))
+	return append(frame, payload...)
+}
+
+func testWAVDataChunkLength(t *testing.T, wav []byte) uint32 {
+	t.Helper()
+	if len(wav) < 12 || string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
+		t.Fatalf("not a WAV file: %d bytes", len(wav))
+	}
+	for offset := 12; offset+8 <= len(wav); {
+		size := binary.LittleEndian.Uint32(wav[offset+4 : offset+8])
+		if string(wav[offset:offset+4]) == "data" {
+			return size
+		}
+		offset += 8 + int(size) + int(size%2)
+	}
+	t.Fatalf("WAV has no data chunk")
+	return 0
 }
 
 func strconvQuote(s string) string {

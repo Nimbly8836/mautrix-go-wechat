@@ -3,14 +3,32 @@ package wechat
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/youthlin/silk"
 )
 
-const voiceSampleRate = 24000
+const (
+	voiceSampleRate     = 24000
+	maxSilkFramePayload = 1024
+)
+
+type silkFrameInspection struct {
+	PrefixEnd    int
+	FrameCount   int
+	PayloadBytes int
+	DroppedBytes int
+}
+
+type silkRecoveryCandidate struct {
+	Data        []byte
+	SourceIndex int
+	Inspection  silkFrameInspection
+}
 
 func isSilkData(data []byte) bool {
 	if bytes.HasPrefix(data, []byte("#!SILK_V3")) {
@@ -19,12 +37,120 @@ func isSilkData(data []byte) bool {
 	return len(data) > 10 && data[0] == 0x02 && bytes.HasPrefix(data[1:], []byte("#!SILK_V3"))
 }
 
+func inspectSilkFrames(data []byte) (silkFrameInspection, error) {
+	var inspection silkFrameInspection
+	position := 0
+	if len(data) > 0 && data[0] == 0x02 {
+		position++
+	}
+
+	const header = "#!SILK_V3"
+	if len(data)-position < len(header) {
+		return inspection, fmt.Errorf("invalid SILK header: %w", io.ErrUnexpectedEOF)
+	}
+	if string(data[position:position+len(header)]) != header {
+		return inspection, fmt.Errorf("invalid SILK header")
+	}
+	position += len(header)
+	inspection.PrefixEnd = position
+
+	for position < len(data) {
+		frameStart := position
+		if len(data)-position < 2 {
+			inspection.DroppedBytes = len(data) - inspection.PrefixEnd
+			return inspection, fmt.Errorf("truncated SILK frame length: %w", io.ErrUnexpectedEOF)
+		}
+
+		payloadLength := int(int16(binary.LittleEndian.Uint16(data[position : position+2])))
+		position += 2
+		if payloadLength < 0 {
+			if inspection.FrameCount == 0 {
+				return inspection, fmt.Errorf("SILK footer without a complete frame")
+			}
+			if position != len(data) {
+				return inspection, fmt.Errorf("SILK footer must be at end of data")
+			}
+			inspection.PrefixEnd = frameStart
+			inspection.DroppedBytes = 0
+			return inspection, nil
+		}
+		if payloadLength == 0 {
+			return inspection, fmt.Errorf("zero-length SILK frame")
+		}
+		if payloadLength > maxSilkFramePayload {
+			return inspection, fmt.Errorf("SILK frame payload %d exceeds maximum %d", payloadLength, maxSilkFramePayload)
+		}
+		if len(data)-position < payloadLength {
+			inspection.DroppedBytes = len(data) - inspection.PrefixEnd
+			return inspection, fmt.Errorf("truncated SILK frame payload: %w", io.ErrUnexpectedEOF)
+		}
+
+		position += payloadLength
+		inspection.PrefixEnd = position
+		inspection.FrameCount++
+		inspection.PayloadBytes += payloadLength
+	}
+
+	if inspection.FrameCount == 0 {
+		return inspection, fmt.Errorf("no complete SILK frames")
+	}
+	return inspection, nil
+}
+
 func silkToWAV(data []byte) ([]byte, error) {
+	if _, err := inspectSilkFrames(data); err != nil {
+		return nil, fmt.Errorf("invalid SILK structure: %w", err)
+	}
 	pcm, err := silk.Decode(bytes.NewReader(data), silk.WithSampleRate(voiceSampleRate))
 	if err != nil {
 		return nil, err
 	}
+	if len(pcm) == 0 {
+		return nil, fmt.Errorf("decoded SILK contains empty PCM")
+	}
 	return pcmToWAV(pcm, voiceSampleRate, 1, 16), nil
+}
+
+func sortSilkRecoveryCandidates(candidates []silkRecoveryCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if left.Inspection.FrameCount != right.Inspection.FrameCount {
+			return left.Inspection.FrameCount > right.Inspection.FrameCount
+		}
+		if left.Inspection.PayloadBytes != right.Inspection.PayloadBytes {
+			return left.Inspection.PayloadBytes > right.Inspection.PayloadBytes
+		}
+		return left.SourceIndex > right.SourceIndex
+	})
+}
+
+func recoverTruncatedSilkToWAV(inputs ...[]byte) (wav []byte, sourceIndex, sourceBytes, droppedBytes int, err error) {
+	candidates := make([]silkRecoveryCandidate, 0, len(inputs))
+	for index, data := range inputs {
+		inspection, inspectErr := inspectSilkFrames(data)
+		if errors.Is(inspectErr, io.ErrUnexpectedEOF) && inspection.FrameCount > 0 {
+			candidates = append(candidates, silkRecoveryCandidate{
+				Data:        data,
+				SourceIndex: index,
+				Inspection:  inspection,
+			})
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, -1, 0, 0, fmt.Errorf("no recoverable SILK frames")
+	}
+
+	sortSilkRecoveryCandidates(candidates)
+	decodeErrors := make([]error, 0, len(candidates))
+	for _, candidate := range candidates {
+		prefix := candidate.Data[:candidate.Inspection.PrefixEnd]
+		recoveredWAV, decodeErr := silkToWAV(prefix)
+		if decodeErr == nil {
+			return recoveredWAV, candidate.SourceIndex, len(candidate.Data), candidate.Inspection.DroppedBytes, nil
+		}
+		decodeErrors = append(decodeErrors, fmt.Errorf("decode SILK recovery candidate %d: %w", candidate.SourceIndex, decodeErr))
+	}
+	return nil, -1, 0, 0, errors.Join(decodeErrors...)
 }
 
 func audioToSilk(data []byte, mimeType string) ([]byte, int, error) {
