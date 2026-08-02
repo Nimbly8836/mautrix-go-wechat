@@ -31,8 +31,7 @@ const (
 	wxStatusNotify = 51
 	wxRevoke       = 10002
 
-	voiceDownloadChunkSize int64 = 60 * 1024
-	maxVoiceDownloadBytes  int64 = 64 << 20
+	maxVoiceDownloadBytes int64 = 64 << 20
 )
 
 func shouldDropLocal(m localMessage) bool {
@@ -284,75 +283,44 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 	if req.MsgID == 0 {
 		return nil, fmt.Errorf("missing voice MsgId")
 	}
+	if req.BufID == "" {
+		return nil, fmt.Errorf("missing voice Bufid")
+	}
 	if req.Length <= 0 {
 		return nil, fmt.Errorf("missing voice length")
 	}
 	if req.Length > maxVoiceDownloadBytes {
 		return nil, fmt.Errorf("voice length %d exceeds maximum %d", req.Length, maxVoiceDownloadBytes)
 	}
-
-	totalLen := req.Length
-	chunkCount := totalLen / voiceDownloadChunkSize
-	if totalLen%voiceDownloadChunkSize != 0 {
-		chunkCount++
-	}
-	maxEncodedChars := int64(base64.StdEncoding.EncodedLen(int(totalLen))) + 2*chunkCount
-	encodedChars := int64(0)
-	fragments := make([]string, 0, int(chunkCount))
-	for offset := int64(0); offset < totalLen; {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		chunkLen := voiceDownloadChunkSize
-		if remaining := totalLen - offset; remaining < chunkLen {
-			chunkLen = remaining
-		}
-		if chunkLen <= 0 {
-			return nil, fmt.Errorf("invalid voice chunk length %d at offset %d", chunkLen, offset)
-		}
-		chunkReq := req
-		chunkReq.Wxid = wxid
-		chunkReq.Offset = offset
-		chunkReq.Length = chunkLen
-
-		var resp voiceDownloadResp
-		if err := c.t.post(ctx, "/Tools/DownloadVoice", chunkReq, nil, &resp); err != nil {
-			return nil, fmt.Errorf("download voice chunk offset=%d length=%d: %w", offset, chunkLen, err)
-		}
-		fragment := normalizeVoiceBase64Fragment(resp.Data.Buffer)
-		if fragment == "" {
-			return nil, fmt.Errorf("download voice chunk offset=%d returned empty data.buffer", offset)
-		}
-		fragmentChars := int64(len(fragment))
-		if fragmentChars > maxEncodedChars-encodedChars {
-			return nil, fmt.Errorf("voice Base64 data exceeds maximum encoded size: offset=%d fragment=%d cumulative=%d maximum=%d", offset, fragmentChars, encodedChars+fragmentChars, maxEncodedChars)
-		}
-		if resp.Data.ILen > 0 && resp.Data.ILen < chunkLen {
-			return nil, fmt.Errorf("download voice chunk offset=%d data.iLen=%d shorter than requested length=%d", offset, resp.Data.ILen, chunkLen)
-		}
-		if resp.Length > 0 && resp.Length < chunkLen {
-			return nil, fmt.Errorf("download voice chunk offset=%d response length=%d shorter than requested length=%d", offset, resp.Length, chunkLen)
-		}
-		encodedChars += fragmentChars
-		fragments = append(fragments, fragment)
-		if resp.Offset != offset || (resp.Length != 0 && resp.Length != chunkLen) {
-			log.Printf("WeChat voice chunk metadata mismatch msg_id=%d requested_offset=%d requested_length=%d returned_offset=%d returned_length=%d end_flag=%d", req.MsgID, offset, chunkLen, resp.Offset, resp.Length, resp.EndFlag)
-		}
-		offset += chunkLen
-	}
-
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	data, fallback, err := decodeVoiceBase64Fragments(fragments)
+
+	req.Wxid = wxid
+	var resp voiceDownloadResp
+	if err := c.t.post(ctx, "/Tools/DownloadVoice", req, nil, &resp); err != nil {
+		return nil, fmt.Errorf("download voice: %w", err)
+	}
+	fragment := normalizeVoiceBase64Fragment(resp.Data.Buffer)
+	if fragment == "" {
+		return nil, fmt.Errorf("download voice returned empty data.buffer")
+	}
+	maxEncodedChars := int64(base64.StdEncoding.EncodedLen(int(req.Length))) + 2
+	if int64(len(fragment)) > maxEncodedChars {
+		return nil, fmt.Errorf("voice Base64 data exceeds maximum encoded size: actual=%d maximum=%d", len(fragment), maxEncodedChars)
+	}
+	data, _, err := decodeMediaString(fragment)
 	if err != nil {
-		return nil, fmt.Errorf("decode WeChat voice chunks: %w", err)
+		return nil, fmt.Errorf("decode WeChat voice: %w", err)
 	}
-	if int64(len(data)) != totalLen {
-		log.Printf("WeChat voice assembled length mismatch msg_id=%d from=%q declared=%d actual=%d chunks=%d fallback=%t", req.MsgID, req.FromUserName, totalLen, len(data), len(fragments), fallback)
-		return nil, fmt.Errorf("assembled voice data does not match declared length: actual=%d declared=%d", len(data), totalLen)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	log.Printf("downloaded WeChat voice msg_id=%d from=%q declared=%d chunks=%d actual=%d fallback=%t", req.MsgID, req.FromUserName, totalLen, len(fragments), len(data), fallback)
+	if int64(len(data)) != req.Length {
+		log.Printf("WeChat voice length mismatch msg_id=%d from=%q declared=%d actual=%d", req.MsgID, req.FromUserName, req.Length, len(data))
+		return nil, fmt.Errorf("downloaded voice data does not match declared length: actual=%d declared=%d", len(data), req.Length)
+	}
+	log.Printf("downloaded WeChat voice msg_id=%d from=%q declared=%d actual=%d", req.MsgID, req.FromUserName, req.Length, len(data))
 	return data, nil
 }
 
@@ -363,40 +331,6 @@ func normalizeVoiceBase64Fragment(fragment string) string {
 		}
 		return r
 	}, fragment)
-}
-
-func decodeVoiceBase64Fragments(fragments []string) ([]byte, bool, error) {
-	if len(fragments) == 0 {
-		return nil, false, fmt.Errorf("voice Base64 fragment list is empty")
-	}
-	normalized := make([]string, len(fragments))
-	for i, fragment := range fragments {
-		normalized[i] = normalizeVoiceBase64Fragment(fragment)
-		if normalized[i] == "" {
-			return nil, false, fmt.Errorf("voice Base64 fragment %d is empty", i)
-		}
-	}
-
-	data, _, combinedErr := decodeMediaString(strings.Join(normalized, ""))
-	if combinedErr == nil && len(data) > 0 {
-		return data, false, nil
-	}
-
-	var assembled []byte
-	for i, fragment := range normalized {
-		chunk, _, err := decodeMediaString(fragment)
-		if err != nil {
-			return nil, true, fmt.Errorf("decode voice Base64 fragment %d: %w", i, err)
-		}
-		if len(chunk) == 0 {
-			return nil, true, fmt.Errorf("voice Base64 fragment %d decoded to zero bytes", i)
-		}
-		assembled = append(assembled, chunk...)
-	}
-	if len(assembled) == 0 {
-		return nil, true, fmt.Errorf("voice Base64 fragments decoded to zero bytes")
-	}
-	return assembled, true, nil
 }
 
 func (c *Client) attachFileMedia(ctx context.Context, base *remoteapi.InboundMessage, req fileMessageDownloadReq) {
