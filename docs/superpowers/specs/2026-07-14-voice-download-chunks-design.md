@@ -1,5 +1,7 @@
 # WeChat Voice Chunk Download Fix
 
+> **Superseded / 已被替代（2026-08-02）：** The `Offset`/60 KiB chunk protocol in this document does not match this repository's `swagger.json` or the user's actual TypeScript client. See the linked [2026-08-02 actual API design](../specs/2026-08-02-voice-download-actual-api-design.md) and [implementation plan](../plans/2026-08-02-voice-download-actual-api.md); this file is retained only as historical context. / 本文中的 `Offset`/60 KiB 分片协议与本仓库的 `swagger.json` 及用户实际使用的 TypeScript 客户端不一致。请以链接的 2026-08-02 实际接口设计和实施计划为准；本文仅保留作为历史背景。
+
 ## 中文审查摘要
 
 **目标：** 按上游 `/Tools/DownloadVoice` 的真实协议完整获取微信语音，避免错误参数、遗漏分片或错误拼接导致语音不完整。

@@ -1,5 +1,7 @@
 # Complete WeChat SILK Internal-Frame Decode Implementation Plan
 
+> **Partial supersession / 部分内容已被替代（2026-08-02）：** Statements about `/Tools/DownloadVoice` offset chunking, Base64 fragment assembly, and chunk-specific tests are superseded by the linked [2026-08-02 actual API design](../specs/2026-08-02-voice-download-actual-api-design.md) and [implementation plan](2026-08-02-voice-download-actual-api.md), because the old `/Tools/DownloadVoice` offset chunking contract does not match either this repository's `swagger.json` or the user's actual TypeScript client. The SILK packet parsing and multi-internal-frame decoder design remains authoritative. / 本文中关于 `/Tools/DownloadVoice` 偏移分片、Base64 分片拼接和分片专用测试的内容已被链接的 2026-08-02 实际接口设计和实施计划替代，因为旧的 `/Tools/DownloadVoice` 偏移分片契约既不符合本仓库的 `swagger.json`，也不符合用户实际使用的 TypeScript 客户端；SILK 数据包解析与多内部帧解码器设计仍然有效并保持权威。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Steps use checkbox syntax.
 
 ## 中文审查摘要

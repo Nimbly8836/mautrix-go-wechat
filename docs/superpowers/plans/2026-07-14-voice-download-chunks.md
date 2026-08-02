@@ -1,5 +1,7 @@
 # WeChat Voice Chunk Download Fix Implementation Plan
 
+> **Superseded / 已被替代（2026-08-02）：** The `Offset`/60 KiB chunk protocol in this document does not match this repository's `swagger.json` or the user's actual TypeScript client. See the linked [2026-08-02 actual API design](../specs/2026-08-02-voice-download-actual-api-design.md) and [implementation plan](2026-08-02-voice-download-actual-api.md); this file is retained only as historical context. / 本文中的 `Offset`/60 KiB 分片协议与本仓库的 `swagger.json` 及用户实际使用的 TypeScript 客户端不一致。请以链接的 2026-08-02 实际接口设计和实施计划为准；本文仅保留作为历史背景。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 ## 中文审查摘要
