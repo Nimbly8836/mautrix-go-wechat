@@ -200,7 +200,7 @@ func TestDownloadVoiceRejectsLengthAboveMaximumWithoutRequest(t *testing.T) {
 
 	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
 	data, err := c.downloadVoice(context.Background(), voiceMessageDownloadReq{
-		FromUserName: "wxid_voice_sender", MsgID: 11, Length: 64<<20 + 1, BufID: "buf-1",
+		FromUserName: "wxid_voice_sender", MsgID: 11, Length: maxVoiceDownloadBytes + 1, BufID: "buf-1",
 	})
 	if err == nil {
 		t.Fatal("downloadVoice returned nil error above maximum length")

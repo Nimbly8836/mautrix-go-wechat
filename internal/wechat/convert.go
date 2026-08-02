@@ -31,7 +31,8 @@ const (
 	wxStatusNotify = 51
 	wxRevoke       = 10002
 
-	maxVoiceDownloadBytes int64 = 64 << 20
+	// The Base64-encoded voice payload plus its JSON envelope must fit the transport's 64 MiB response limit.
+	maxVoiceDownloadBytes int64 = 47 << 20
 )
 
 func shouldDropLocal(m localMessage) bool {
@@ -305,7 +306,7 @@ func (c *Client) downloadVoice(ctx context.Context, req voiceMessageDownloadReq)
 	if fragment == "" {
 		return nil, fmt.Errorf("download voice returned empty data.buffer")
 	}
-	maxEncodedChars := int64(base64.StdEncoding.EncodedLen(int(req.Length))) + 2
+	maxEncodedChars := int64(base64.StdEncoding.EncodedLen(int(req.Length)))
 	if int64(len(fragment)) > maxEncodedChars {
 		return nil, fmt.Errorf("voice Base64 data exceeds maximum encoded size: actual=%d maximum=%d", len(fragment), maxEncodedChars)
 	}
@@ -851,7 +852,7 @@ func applyMessageType(base *remoteapi.InboundMessage, msgType int, content, push
 		base.Type = remoteapi.MsgAudio
 		base.Media = &remoteapi.Media{MimeType: "audio/wav", FileName: string(base.ID) + ".wav"}
 		if isXMLMessage(base.Text) {
-			if length := firstNonEmpty(xmlAttr(base.Text, "length"), xmlAttr(base.Text, "voicelength")); length != "" {
+			if length := xmlAttr(base.Text, "length"); length != "" {
 				base.Extra["voice_length"] = length
 			}
 			if bufID := firstNonEmpty(xmlAttr(base.Text, "bufid"), xmlAttr(base.Text, "bufID")); bufID != "" {
@@ -963,16 +964,23 @@ func isXMLMessage(content string) bool {
 func xmlAttr(raw, attr string) string {
 	for _, quote := range []string{"\"", "'"} {
 		needle := attr + "=" + quote
-		start := strings.Index(raw, needle)
-		if start < 0 {
-			continue
+		for searchFrom := 0; searchFrom < len(raw); {
+			index := strings.Index(raw[searchFrom:], needle)
+			if index < 0 {
+				break
+			}
+			start := searchFrom + index
+			if start > 0 && !strings.ContainsRune(" \t\r\n", rune(raw[start-1])) {
+				searchFrom = start + len(attr)
+				continue
+			}
+			start += len(needle)
+			end := strings.Index(raw[start:], quote)
+			if end < 0 {
+				return ""
+			}
+			return strings.TrimSpace(html.UnescapeString(raw[start : start+end]))
 		}
-		start += len(needle)
-		end := strings.Index(raw[start:], quote)
-		if end < 0 {
-			return ""
-		}
-		return strings.TrimSpace(html.UnescapeString(raw[start : start+end]))
 	}
 	return ""
 }

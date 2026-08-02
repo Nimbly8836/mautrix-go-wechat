@@ -13,6 +13,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
 
 func TestDownloadVoiceUsesSingleActualAPIRequest(t *testing.T) {
@@ -82,6 +85,43 @@ func testVoiceDownloadReq(length int64) voiceMessageDownloadReq {
 	}
 }
 
+func TestValidateActualVoiceRequestRequiresExactIntegersAndOneJSONValue(t *testing.T) {
+	const largeMsgID int64 = 1<<53 + 1
+	want := voiceMessageDownloadReq{
+		Wxid: "wxid_self", FromUserName: "wxid_voice_sender",
+		MsgID: largeMsgID, Length: 1, BufID: "buf-1",
+	}
+	for _, tt := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{
+			name: "exact integer above float64 precision",
+			body: `{"Bufid":"buf-1","FromUserName":"wxid_voice_sender","Length":1,"MsgId":9007199254740993,"Wxid":"wxid_self"}`,
+		},
+		{
+			name:    "different integer that aliases as float64",
+			body:    `{"Bufid":"buf-1","FromUserName":"wxid_voice_sender","Length":1,"MsgId":9007199254740992,"Wxid":"wxid_self"}`,
+			wantErr: true,
+		},
+		{
+			name:    "trailing JSON value",
+			body:    `{"Bufid":"buf-1","FromUserName":"wxid_voice_sender","Length":1,"MsgId":9007199254740993,"Wxid":"wxid_self"}{}`,
+			wantErr: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/Tools/DownloadVoice", strings.NewReader(tt.body))
+			r.Header.Set("Content-Type", "application/json")
+			err := validateActualVoiceRequest(r, want)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateActualVoiceRequest error = %v, wantErr=%v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func validateActualVoiceRequest(r *http.Request, want voiceMessageDownloadReq) error {
 	if r.Method != http.MethodPost {
 		return fmt.Errorf("method = %s, want POST", r.Method)
@@ -95,15 +135,34 @@ func validateActualVoiceRequest(r *http.Request, want voiceMessageDownloadReq) e
 	if r.URL.RawQuery != "" || r.Header.Get("Range") != "" {
 		return fmt.Errorf("unexpected range query/header: query=%q range=%q", r.URL.RawQuery, r.Header.Get("Range"))
 	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decoder.Decode(&body); err != nil {
 		return fmt.Errorf("decode request: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("request body contains trailing JSON value: %#v", trailing)
+		}
+		return fmt.Errorf("decode trailing request data: %w", err)
+	}
+	lengthNumber, lengthOK := body["Length"].(json.Number)
+	msgIDNumber, msgIDOK := body["MsgId"].(json.Number)
+	if !lengthOK || !msgIDOK {
+		return fmt.Errorf("request Length/MsgId are not JSON numbers: %#v", body)
+	}
+	length, lengthErr := lengthNumber.Int64()
+	msgID, msgIDErr := msgIDNumber.Int64()
+	if lengthErr != nil || msgIDErr != nil {
+		return fmt.Errorf("request Length/MsgId are not int64 values: length=%q (%v) msg_id=%q (%v)", lengthNumber, lengthErr, msgIDNumber, msgIDErr)
 	}
 	if len(body) != 5 ||
 		body["Bufid"] != want.BufID ||
 		body["FromUserName"] != want.FromUserName ||
-		body["Length"] != float64(want.Length) ||
-		body["MsgId"] != float64(want.MsgID) ||
+		length != want.Length ||
+		msgID != want.MsgID ||
 		body["Wxid"] != want.Wxid {
 		return fmt.Errorf("request body = %#v, want exactly %#v", body, want)
 	}
@@ -118,10 +177,11 @@ func TestDownloadVoiceResponseValidation(t *testing.T) {
 		want       []byte
 		wantErrors []string
 	}{
-		{name: "whitespace normalized", length: 1, buffer: " \n\t" + base64.StdEncoding.EncodeToString([]byte{1}), want: []byte{1}},
+		{name: "exact padded boundary", length: 1, buffer: base64.StdEncoding.EncodeToString([]byte{1}), want: []byte{1}},
+		{name: "whitespace normalized", length: 1, buffer: " \n\t" + base64.StdEncoding.EncodeToString([]byte{1}) + " ", want: []byte{1}},
 		{name: "empty buffer", length: 1, buffer: "", wantErrors: []string{"empty data.buffer"}},
 		{name: "malformed Base64", length: 1, buffer: "%%%", wantErrors: []string{"decode WeChat voice"}},
-		{name: "encoded size exceeds bound", length: 1, buffer: strings.Repeat("A", base64.StdEncoding.EncodedLen(1)+3), wantErrors: []string{"Base64", "maximum"}},
+		{name: "encoded size exceeds bound", length: 1, buffer: strings.Repeat("A", base64.StdEncoding.EncodedLen(1)+1), wantErrors: []string{"Base64", "maximum"}},
 		{name: "decoded shorter", length: 2, buffer: base64.StdEncoding.EncodeToString([]byte{1}), wantErrors: []string{"declared length"}},
 		{name: "decoded longer", length: 1, buffer: base64.StdEncoding.EncodeToString([]byte{1, 2}), wantErrors: []string{"declared length"}},
 	} {
@@ -192,6 +252,7 @@ func TestDownloadVoiceReturnsCanceledInFlight(t *testing.T) {
 	defer close(release)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
 	type result struct {
 		data []byte
@@ -202,11 +263,19 @@ func TestDownloadVoiceReturnsCanceledInFlight(t *testing.T) {
 		data, err := c.downloadVoice(ctx, testVoiceDownloadReq(1))
 		resultCh <- result{data: data, err: err}
 	}()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for voice request to start")
+	}
 	cancel()
-	got := <-resultCh
-	if !errors.Is(got.err, context.Canceled) || got.data != nil || requests.Load() != 1 {
-		t.Fatalf("data=%v error=%v requests=%d, want nil/context.Canceled/1", got.data, got.err, requests.Load())
+	select {
+	case got := <-resultCh:
+		if !errors.Is(got.err, context.Canceled) || got.data != nil || requests.Load() != 1 {
+			t.Fatalf("data=%v error=%v requests=%d, want nil/context.Canceled/1", got.data, got.err, requests.Load())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for canceled voice download")
 	}
 }
 
@@ -237,8 +306,71 @@ func TestDownloadVoiceReturnsAPIFailureWithoutData(t *testing.T) {
 
 	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
 	data, err := c.downloadVoice(context.Background(), testVoiceDownloadReq(1))
-	if err == nil || !strings.Contains(err.Error(), "voice unavailable") || data != nil || requests.Load() != 1 {
-		t.Fatalf("data=%v error=%v requests=%d, want API error/nil/1", data, err, requests.Load())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("downloadVoice error = %v, want *APIError", err)
+	}
+	if apiErr.Code != 42 || apiErr.Path != "/Tools/DownloadVoice" || apiErr.Message != "voice unavailable" {
+		t.Fatalf("APIError = %#v, want code=42 path=/Tools/DownloadVoice message=voice unavailable", apiErr)
+	}
+	if data != nil || requests.Load() != 1 {
+		t.Fatalf("data=%v requests=%d, want nil/1", data, requests.Load())
+	}
+}
+
+func TestApplyMessageTypeSeparatesVoiceDownloadLengthFromDuration(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		attributes      string
+		wantVoiceLength string
+		wantDuration    string
+	}{
+		{name: "both", attributes: `length="123" voicelength="456"`, wantVoiceLength: "123", wantDuration: "456"},
+		{name: "duration only", attributes: `voicelength="456"`, wantDuration: "456"},
+		{name: "length only", attributes: `length="123"`, wantVoiceLength: "123", wantDuration: "123"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			xml := fmt.Sprintf(`<msg><voicemsg %s /></msg>`, tt.attributes)
+			base := remoteapi.InboundMessage{Text: xml, Extra: make(map[string]any)}
+			applyMessageType(&base, wxVoice, xml, "")
+
+			gotVoiceLength, hasVoiceLength := base.Extra["voice_length"]
+			if tt.wantVoiceLength == "" {
+				if hasVoiceLength {
+					t.Fatalf("voice_length = %v, want absent", gotVoiceLength)
+				}
+			} else if gotVoiceLength != tt.wantVoiceLength {
+				t.Fatalf("voice_length = %v, want %q", gotVoiceLength, tt.wantVoiceLength)
+			}
+			if got := extraString(base.Extra, "duration"); got != tt.wantDuration {
+				t.Fatalf("duration = %q, want %q", got, tt.wantDuration)
+			}
+		})
+	}
+}
+
+func TestConvertLocalVoiceDurationWithoutLengthDoesNotDownload(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_ = writeVoiceResponse(w, make([]byte, 456))
+	}))
+	defer server.Close()
+
+	xml := `<msg><voicemsg bufid="buf-1" voicelength="456" /></msg>`
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self"}
+	ev, ok := c.convertLocal(context.Background(), localMessage{
+		MsgID: 11, NewMsgID: 22, MsgType: wxVoice, ContentText: xml,
+		Talker: "45170834716@chatroom", SenderUserName: "wxid_local_sender", CreateTime: 1710000000,
+	})
+	if !ok || ev.Message == nil || ev.Message.Media == nil {
+		t.Fatalf("convertLocal returned ok=%v event=%#v", ok, ev)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("voice download requests = %d, want 0", requests.Load())
+	}
+	if len(ev.Message.Media.Data) != 0 {
+		t.Fatalf("voice media data = %d bytes, want 0", len(ev.Message.Media.Data))
 	}
 }
 
