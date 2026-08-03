@@ -61,6 +61,7 @@ type Server struct {
 	builtinEmojiNoticeContextFactory func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	builtinEmojiSpaceResolver        func(context.Context, remoteapi.UserID) (id.RoomID, error)
 	builtinEmojiNotice               func(context.Context, id.RoomID, string)
+	builtinEmojiLogger               builtinEmojiLogSink
 	builtinEmojiNow                  func() time.Time
 	appServiceListen                 func(network, address string) (net.Listener, error)
 

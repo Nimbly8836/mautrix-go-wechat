@@ -52,7 +52,10 @@ bridge:
     portal_file: /data/portals.json
     # Saved login sessions for multiple WeChat accounts.
     account_file: /data/accounts.json
-    # Canonical global shortcode-to-MXC manifest for imported WeChat built-in emoji.
+    # Sole canonical global shortcode-to-MXC manifest for the fixed 109-file
+    # WeChat built-in emoji import. It is persisted atomically; Matrix room state
+    # is only a replica. Keep this path on durable storage. Retry with the exact
+    # `!wx stickers import wechat --ack-no-license` command after partial failure.
     wechat_builtin_emoji_file: /data/wechat-builtin-emoji-pack.json
     # Shared WeChat emoji/sticker cache directory. All accounts reuse files here.
     emoji_dir: /data/emojis
@@ -70,6 +73,12 @@ bridge:
     # Optional: allow automatic registration of bridged WeChat stickers in a real
     # Matrix user's personal sticker picker (`m.image_pack.rooms`). Appservices
     # cannot write account_data for normal users without that user's access token.
+    # Both values must identify the same user, and that user must already be joined
+    # to a room containing the stable pack; invites are not sufficient. Keep the
+    # token secret. Missing/failed account data does not roll back room pack state.
+    # This exact user may run the built-in import only after also passing the
+    # general permissions gate. Otherwise an exact user/domain `admin` match is
+    # required. A `relay` denial still wins; portal ownership grants no authority.
     personal_sticker_user_id: ""
     personal_sticker_access_token: ""
     # Who may use the bridge. Levels: relay < user < admin.

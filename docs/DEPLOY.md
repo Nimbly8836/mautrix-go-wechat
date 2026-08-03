@@ -120,6 +120,73 @@ Matrix.
 If commands don't respond, check whether the room is encrypted. This MVP does
 not decrypt Matrix E2EE rooms yet; use an unencrypted management/portal room.
 
+## Importing the fixed WeChat built-in emoji pack
+
+Configure the canonical global store and import authorization before running the
+command:
+
+```yaml
+bridge:
+    wechat_builtin_emoji_file: /data/wechat-builtin-emoji-pack.json
+    personal_sticker_user_id: "@admin:example.com"
+    personal_sticker_access_token: "REDACTED"
+    permissions:
+        "example.com": user
+        "@admin:example.com": admin
+```
+
+Keep the token only in the protected live config; do not paste it into Matrix or
+logs. The sender must pass the normal `permissions` gate and additionally be the
+exact `personal_sticker_user_id` or have an exact user/domain `admin` match.
+Explicit general denials such as `relay` still win. Portal ownership does not
+authorize import. The personal user/token are optional for room packs, but both
+are required for personal sticker-picker account data.
+
+While logged in and with the current account Space available, send this exact
+command in the initiating management room:
+
+```text
+!wx stickers import wechat --ack-no-license
+```
+
+The Chinese alias is `!wx stickers 导入 微信 --ack-no-license`. Only one global
+import runs at a time. Start, bounded batch progress, and completion notices stay
+in the initiating room even if the current account later changes.
+
+The importer fetches exactly 109 WebP files from
+`https://github.com/airinghost/wechat-emoji` at pinned commit
+`2896eb55348041f5c5a66e4eccfb4882ab9cda0c`, directory
+`web.wechat.com/compressed-cwebp/lossless-z9`. It uses 4 workers, persistence
+batches of 16, a 10-minute overall limit, and 30-second per-fetch/upload limits.
+The origin, redirects, MIME type, WebP signature, and 256 KiB maximum are fixed
+and validated.
+
+The upstream repository has no explicit `LICENSE` or `COPYING` grant.
+Downloading, uploading, and exposing files through Matrix rooms/Spaces involves
+copying and may constitute redistribution. Attribution and the
+`--ack-no-license` acknowledgment do **not** grant rights or imply permission;
+the deploying operator accepts the risk.
+
+The local file configured by `wechat_builtin_emoji_file` is the sole canonical
+global shortcode-to-MXC manifest and is replaced atomically. Matrix room state
+is never promoted back into it. Successful batches are reconciled into stable
+`m.room.image_pack[wechat.builtin]` and Element-compatible state for every known
+account Space and portal; future Spaces/portals bootstrap the same global pack.
+Existing valid entries are skipped and no import run deletes entries.
+
+Personal account-data registration uses only the configured personal user and
+token. That user must already have `join` membership in a stable-pack source
+room. The bridge prefers a joined account Space, then a joined portal in
+lexicographic room-ID order; invites and inaccessible rooms do not qualify.
+Missing credentials/membership or account-data failures are best-effort and are
+reported without rolling back room packs.
+
+Rerun the exact acknowledged command after network, upload, persistence, room
+state, or account-data failures. Missing assets are retried, existing canonical
+MXCs are not downloaded again, and final reconciliation always retries all
+known rooms. Completion reports the uploaded-but-unreferenced count without
+printing MXCs; failed entries are bounded and sorted by registry index.
+
 ## Switching the database to Postgres
 
 The compose file ships a `postgres` service. To use it instead of SQLite, set in

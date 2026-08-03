@@ -253,3 +253,37 @@ func classifyBuiltinEmojiRequestError(parent, requestContext context.Context, er
 func newBuiltinEmojiFetchError(code builtinEmojiFetchErrorCode) *builtinEmojiFetchError {
 	return &builtinEmojiFetchError{code: code}
 }
+
+// safeBuiltinEmojiFetchDetails extracts only the closed fetch-reason enum and
+// numeric HTTP status. Wrapped error text is deliberately never returned.
+func safeBuiltinEmojiFetchDetails(err error) (builtinEmojiFetchErrorCode, int) {
+	var fetchErr *builtinEmojiFetchError
+	if !errors.As(err, &fetchErr) || fetchErr == nil || !isSafeBuiltinEmojiFetchErrorCode(fetchErr.code) {
+		return "", 0
+	}
+	status := 0
+	if fetchErr.code == builtinEmojiFetchHTTPStatus && fetchErr.status >= 100 && fetchErr.status <= 599 {
+		status = fetchErr.status
+	}
+	return fetchErr.code, status
+}
+
+func isSafeBuiltinEmojiFetchErrorCode(code builtinEmojiFetchErrorCode) bool {
+	switch code {
+	case builtinEmojiFetchInvalidAsset,
+		builtinEmojiFetchTimeout,
+		builtinEmojiFetchCanceled,
+		builtinEmojiFetchRedirectRejected,
+		builtinEmojiFetchRequestFailed,
+		builtinEmojiFetchInvalidResponseURL,
+		builtinEmojiFetchHTTPStatus,
+		builtinEmojiFetchInvalidContentType,
+		builtinEmojiFetchReadFailed,
+		builtinEmojiFetchEmptyBody,
+		builtinEmojiFetchBodyTooLarge,
+		builtinEmojiFetchInvalidWebP:
+		return true
+	default:
+		return false
+	}
+}

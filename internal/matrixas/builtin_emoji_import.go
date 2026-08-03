@@ -10,6 +10,7 @@ import (
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/id"
 
+	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 	"github.com/leat/mautrix-go-wechat/internal/wechat/textemoji"
 )
 
@@ -23,11 +24,12 @@ const (
 type builtinEmojiImportStage string
 
 const (
-	builtinEmojiImportStageImport  builtinEmojiImportStage = "import"
-	builtinEmojiImportStageFetch   builtinEmojiImportStage = "fetch"
-	builtinEmojiImportStageUpload  builtinEmojiImportStage = "upload"
-	builtinEmojiImportStagePersist builtinEmojiImportStage = "persist"
-	builtinEmojiImportStageWorker  builtinEmojiImportStage = "worker"
+	builtinEmojiImportStageImport    builtinEmojiImportStage = "import"
+	builtinEmojiImportStageFetch     builtinEmojiImportStage = "fetch"
+	builtinEmojiImportStageUpload    builtinEmojiImportStage = "upload"
+	builtinEmojiImportStagePersist   builtinEmojiImportStage = "persist"
+	builtinEmojiImportStageReconcile builtinEmojiImportStage = "reconcile"
+	builtinEmojiImportStageWorker    builtinEmojiImportStage = "worker"
 )
 
 type builtinEmojiImportCode string
@@ -60,6 +62,8 @@ type builtinEmojiImportFailure struct {
 	Shortcode     string
 	Stage         builtinEmojiImportStage
 	Code          builtinEmojiImportCode
+	Reason        builtinEmojiSafeReason
+	HTTPStatus    int
 }
 
 type builtinEmojiUploadedUnreferenced struct {
@@ -97,6 +101,9 @@ type builtinEmojiImportBatch struct {
 type builtinEmojiImportResult struct {
 	StartedAt            time.Time
 	CompletedAt          time.Time
+	CommandStatus        builtinEmojiCommandStatus
+	Account              string
+	Space                id.RoomID
 	TotalConsidered      int
 	Uploaded             int
 	Imported             int
@@ -231,6 +238,8 @@ type builtinEmojiImportHooks struct {
 type builtinEmojiImporter struct {
 	fetcher          builtinEmojiFetcher
 	uploader         builtinEmojiUploader
+	account          remoteapi.UserID
+	logger           builtinEmojiLogSink
 	storeView        builtinEmojiCanonicalStoreView
 	storePersister   builtinEmojiCanonicalStorePersister
 	packLock         builtinEmojiImportLocker
@@ -479,6 +488,9 @@ func (importer *builtinEmojiImporter) runJob(ctx context.Context, workerIndex in
 			outcome.kind = builtinEmojiImportOutcomeFailed
 			outcome.mxc = ""
 			outcome.failure = newBuiltinEmojiImportFailure(job.entry, builtinEmojiImportStageWorker, builtinEmojiImportCodeWorkerPanic)
+			fields := builtinEmojiEntryLogFields(importer.account, job.entry, builtinEmojiImportStageWorker, builtinEmojiLogCodeWorkerPanic)
+			fields.Reason = builtinEmojiSafeReason(builtinEmojiImportCodeWorkerPanic)
+			importer.logBuiltinEmoji(fields)
 		}
 	}()
 
@@ -514,7 +526,17 @@ func (importer *builtinEmojiImporter) runJob(ctx context.Context, workerIndex in
 	cancel()
 	if err != nil {
 		outcome.kind = builtinEmojiImportOutcomeFailed
-		outcome.failure = newBuiltinEmojiImportFailure(job.entry, builtinEmojiImportStageFetch, classifyBuiltinEmojiImportOperationError(operationErr, ctx.Err(), builtinEmojiImportCodeFetchFailed))
+		failureCode := classifyBuiltinEmojiImportOperationError(operationErr, ctx.Err(), builtinEmojiImportCodeFetchFailed)
+		outcome.failure = newBuiltinEmojiImportFailure(job.entry, builtinEmojiImportStageFetch, failureCode)
+		fetchReason, status := safeBuiltinEmojiFetchDetails(err)
+		safeReason := builtinEmojiSafeReason(fetchReason)
+		if safeReason == "" {
+			safeReason = safeBuiltinEmojiImportReason(failureCode)
+		}
+		fields := builtinEmojiEntryLogFields(importer.account, job.entry, builtinEmojiImportStageFetch, builtinEmojiLogCodeFetchFailed)
+		fields.Reason = safeReason
+		fields.HTTPStatus = status
+		importer.logBuiltinEmoji(fields)
 		return outcome
 	}
 	if ctx.Err() != nil {
@@ -537,12 +559,19 @@ func (importer *builtinEmojiImporter) runJob(ctx context.Context, workerIndex in
 	cancel()
 	if err != nil {
 		outcome.kind = builtinEmojiImportOutcomeFailed
-		outcome.failure = newBuiltinEmojiImportFailure(job.entry, builtinEmojiImportStageUpload, classifyBuiltinEmojiImportOperationError(operationErr, ctx.Err(), builtinEmojiImportCodeUploadFailed))
+		failureCode := classifyBuiltinEmojiImportOperationError(operationErr, ctx.Err(), builtinEmojiImportCodeUploadFailed)
+		outcome.failure = newBuiltinEmojiImportFailure(job.entry, builtinEmojiImportStageUpload, failureCode)
+		fields := builtinEmojiEntryLogFields(importer.account, job.entry, builtinEmojiImportStageUpload, builtinEmojiLogCodeUploadFailed)
+		fields.Reason = safeBuiltinEmojiImportReason(failureCode)
+		importer.logBuiltinEmoji(fields)
 		return outcome
 	}
 	if _, valid := validMXC(string(mxc)); !valid {
 		outcome.kind = builtinEmojiImportOutcomeFailed
 		outcome.failure = newBuiltinEmojiImportFailure(job.entry, builtinEmojiImportStageUpload, builtinEmojiImportCodeInvalidMXC)
+		fields := builtinEmojiEntryLogFields(importer.account, job.entry, builtinEmojiImportStageUpload, builtinEmojiLogCodeUploadFailed)
+		fields.Reason = builtinEmojiSafeReason(builtinEmojiImportCodeInvalidMXC)
+		importer.logBuiltinEmoji(fields)
 		return outcome
 	}
 	outcome.kind = builtinEmojiImportOutcomeUploaded
@@ -706,6 +735,7 @@ func (importer *builtinEmojiImporter) commitBatch(ctx context.Context, outcomes 
 		reconciliation, accountData := importer.reconcileLocked(ctx)
 		batch.Reconciliation = safeBuiltinEmojiReconciliationStatus(reconciliation)
 		batch.AccountData = safeBuiltinEmojiAccountDataStatus(accountData)
+		importer.logBuiltinEmojiReconciliation(batch.Reconciliation, batch.AccountData, result)
 		canceledAfterPersistence = ctx.Err() != nil
 	}
 	locker.Unlock()
@@ -734,7 +764,11 @@ func (importer *builtinEmojiImporter) recordRecheckedOutcomes(outcomes []builtin
 func (importer *builtinEmojiImporter) recordPersistFailures(outcomes []builtinEmojiImportOutcome, result *builtinEmojiImportResult) {
 	for _, outcome := range outcomes {
 		result.UploadedUnreferenced = append(result.UploadedUnreferenced, newBuiltinEmojiUnreferenced(outcome, builtinEmojiImportCodePersistFailed))
-		result.Failures = append(result.Failures, newBuiltinEmojiImportFailure(outcome.entry, builtinEmojiImportStagePersist, builtinEmojiImportCodePersistFailed))
+		failure := newBuiltinEmojiImportFailure(outcome.entry, builtinEmojiImportStagePersist, builtinEmojiImportCodePersistFailed)
+		result.Failures = append(result.Failures, failure)
+		fields := builtinEmojiEntryLogFields(importer.account, outcome.entry, builtinEmojiImportStagePersist, builtinEmojiLogCodePersistFailed)
+		fields.Reason = builtinEmojiSafeReason(builtinEmojiImportCodePersistFailed)
+		importer.logBuiltinEmoji(fields)
 	}
 }
 
@@ -791,6 +825,23 @@ func (importer *builtinEmojiImporter) finalReconcile(ctx context.Context, result
 		locker = noopBuiltinEmojiImportLocker{}
 	}
 	if err := locker.Lock(ctx); err != nil {
+		if ctx.Err() == nil {
+			importer.logBuiltinEmoji(builtinEmojiLogFields{
+				Stage:                builtinEmojiImportStageReconcile,
+				Code:                 builtinEmojiLogCodeReconcileFailed,
+				Reason:               "reconcile_lock_failed",
+				Total:                result.TotalConsidered,
+				Uploaded:             result.Uploaded,
+				Imported:             result.Imported,
+				Persisted:            result.Persisted,
+				Skipped:              result.Skipped,
+				Failed:               len(result.Failures),
+				UploadedUnreferenced: len(result.UploadedUnreferenced),
+				PersistenceStatus:    result.Persistence,
+				ReconciliationStatus: result.FinalReconciliation.Status,
+				AccountDataStatus:    result.AccountData.Status,
+			})
+		}
 		return
 	}
 	if ctx.Err() != nil {
@@ -801,6 +852,7 @@ func (importer *builtinEmojiImporter) finalReconcile(ctx context.Context, result
 	locker.Unlock()
 	result.FinalReconciliation = safeBuiltinEmojiReconciliationStatus(reconciliation)
 	result.AccountData = safeBuiltinEmojiAccountDataStatus(accountData)
+	importer.logBuiltinEmojiReconciliation(result.FinalReconciliation, result.AccountData, result)
 	importer.notify(builtinEmojiImportProgress{
 		Kind:              builtinEmojiImportProgressFinalReconciliation,
 		TotalImported:     result.Imported,

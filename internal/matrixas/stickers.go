@@ -106,7 +106,7 @@ func mergeImagePackContent(dst, src *event.ImagePackEventContent) int {
 func (s *Server) handleStickersCommand(ctx context.Context, room id.RoomID, sender id.UserID, rest string) {
 	fields := strings.Fields(rest)
 	if len(fields) == 0 || fields[0] == "help" || fields[0] == "帮助" {
-		s.notice(ctx, room, fmt.Sprintf("用法:\n%s stickers add <shortcode> <mxc-or-image-url> [label]\n%s stickers status\n%s stickers repair\n%s stickers import wechat --ack-no-license\n\n会把图片加入当前微信账号 Space，并同步 Element 兼容 pack 到 portal rooms。WeChat 内置表情源没有明确 license；导入会 copy/上传图片，确认风险不会授予任何权利。", s.commandPrefix(), s.commandPrefix(), s.commandPrefix(), s.commandPrefix()))
+		s.notice(ctx, room, fmt.Sprintf("用法:\n%s stickers add <shortcode> <mxc-or-image-url> [label]\n%s stickers status\n%s stickers repair\n%s stickers import wechat --ack-no-license\n\n内置导入固定使用 airinghost/wechat-emoji commit %s 的 %s，共 109 个 WebP；4 workers、每批 16、总时限 10 分钟、单次 fetch/upload 30 秒。发送者必须先通过一般 permissions，并且是配置的 personal_sticker_user_id 或 exact user/domain admin。结果写入全局 canonical store，并协调到所有 account Space/portal；重试会跳过已有 MXC 并再次协调。personal account data 只使用配置用户/token，且该用户必须已 join 来源房间。上游没有明确 LICENSE/COPYING；下载、上传及房间分发涉及 copy/可能再分发，attribution 和 --ack-no-license 不授予权利或暗示许可，风险由操作者承担。", s.commandPrefix(), s.commandPrefix(), s.commandPrefix(), s.commandPrefix(), builtinEmojiSourceCommit, builtinEmojiSourcePath))
 		return
 	}
 	if fields[0] == "import" || fields[0] == "导入" {

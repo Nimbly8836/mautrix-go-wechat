@@ -23,6 +23,10 @@ type builtinEmojiImportRunner interface {
 	setProgressNotice(func(builtinEmojiImportProgress))
 }
 
+type builtinEmojiImportLoggingRunner interface {
+	setBuiltinEmojiLogging(remoteapi.UserID, builtinEmojiLogSink)
+}
+
 type builtinEmojiRuntime struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -124,6 +128,9 @@ func (s *Server) handleBuiltinEmojiImportCommand(eventCtx context.Context, room 
 		s.safeBuiltinEmojiNotice(runtime.ctx, room, "WeChat built-in emoji import cannot start because the importer is unavailable.")
 		return
 	}
+	if loggingRunner, ok := runner.(builtinEmojiImportLoggingRunner); ok {
+		loggingRunner.setBuiltinEmojiLogging(target.account, s.logBuiltinEmoji)
+	}
 
 	importCtx, cancelImport := s.newBuiltinEmojiImportContext(runtime.ctx)
 	if importCtx == nil || cancelImport == nil {
@@ -135,6 +142,12 @@ func (s *Server) handleBuiltinEmojiImportCommand(eventCtx context.Context, room 
 	})
 
 	s.safeBuiltinEmojiNotice(runtime.ctx, target.room, builtinEmojiImportStartNotice(target))
+	s.logBuiltinEmoji(builtinEmojiLogFields{
+		Account: target.account,
+		Stage:   builtinEmojiImportStageImport,
+		Code:    builtinEmojiLogCodeStarted,
+		Total:   109,
+	})
 	launched = true
 	go s.runBuiltinEmojiImport(importCtx, cancelImport, runner, target)
 }
@@ -217,11 +230,44 @@ func (s *Server) runBuiltinEmojiImport(importCtx context.Context, cancelImport c
 		}()
 
 		if panicValue != nil {
+			s.logBuiltinEmoji(builtinEmojiLogFields{
+				Account: target.account,
+				Stage:   builtinEmojiImportStageImport,
+				Code:    builtinEmojiLogCodePanic,
+				Reason:  builtinEmojiSafeReason(builtinEmojiLogCodePanic),
+			})
 			s.safeBuiltinEmojiBestEffortNotice(target.room, "WeChat built-in emoji import failed safely after an internal panic; the global import slot was released and the command may be retried.")
 			return
 		}
 		if completed {
-			s.safeBuiltinEmojiBestEffortNotice(target.room, formatTemporaryBuiltinEmojiImportResult(target, result, importErr))
+			result.CommandStatus = builtinEmojiCommandStatusFinished
+			if importErr != nil {
+				result.CommandStatus = builtinEmojiCommandStatusCanceledOrTimedOut
+			}
+			result.Account = string(target.account)
+			result.Space = target.space
+			progressStatus := builtinPackStatusSuccess
+			if result.ProgressNoticeFailed {
+				progressStatus = builtinPackStatusFailed
+			}
+			s.logBuiltinEmoji(builtinEmojiLogFields{
+				Account:              target.account,
+				Stage:                builtinEmojiImportStageImport,
+				Code:                 builtinEmojiLogCodeCompleted,
+				Reason:               builtinEmojiSafeReason(result.CommandStatus),
+				Total:                result.TotalConsidered,
+				Uploaded:             result.Uploaded,
+				Imported:             result.Imported,
+				Persisted:            result.Persisted,
+				Skipped:              result.Skipped,
+				Failed:               len(result.Failures),
+				UploadedUnreferenced: len(result.UploadedUnreferenced),
+				PersistenceStatus:    result.Persistence,
+				ReconciliationStatus: result.FinalReconciliation.Status,
+				AccountDataStatus:    result.AccountData.Status,
+				ProgressNoticeStatus: progressStatus,
+			})
+			s.safeBuiltinEmojiBestEffortNotice(target.room, formatBuiltinEmojiImportResult(result))
 		}
 	}()
 
@@ -350,12 +396,4 @@ func formatBuiltinEmojiImportProgress(progress builtinEmojiImportProgress) strin
 	default:
 		return "WeChat built-in emoji import progress updated."
 	}
-}
-
-func formatTemporaryBuiltinEmojiImportResult(target builtinEmojiImportTarget, result builtinEmojiImportResult, contextErr error) string {
-	state := "finished"
-	if contextErr != nil {
-		state = "canceled or timed out"
-	}
-	return fmt.Sprintf("WeChat built-in emoji import completed (%s). account=%s Space=%s sender=%s commit=%s total=%d imported=%d persisted=%d skipped=%d failed=%d uploaded_unreferenced=%d persistence=%s. This bounded temporary summary will be expanded by Task 12; rerun the exact acknowledged command to retry missing entries.", state, target.account, target.space, target.sender, builtinEmojiSourceCommit, result.TotalConsidered, result.Imported, result.Persisted, result.Skipped, len(result.Failures), len(result.UploadedUnreferenced), result.Persistence)
 }

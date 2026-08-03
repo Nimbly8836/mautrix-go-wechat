@@ -90,7 +90,7 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 %[1]s officials status    查看公众号处理策略
 %[1]s officials mode invite|mute|reject  设置公众号策略
 %[1]s stickers add <shortcode> <mxc-or-image-url> [label]  添加 sticker 到当前微信账号 Space
-%[1]s stickers import wechat --ack-no-license  确认上游无明确 license 及复制风险后导入 109 个内置表情
+%[1]s stickers import wechat --ack-no-license  exact personal user/admin 确认无 LICENSE 的复制风险后导入固定 109 个 WebP
 %[1]s contacts refresh    后台刷新联系人缓存，并更新一对一 portal 房间名
 %[1]s contacts refresh <wxid/chatroom>  只刷新指定 portal/联系人
 %[1]s relogin [wxid]      对当前或指定账号执行二次登录，并开启自动心跳

@@ -97,6 +97,51 @@ switched with `!wx use <wxid>`. After login/activation, portal rooms are created
 be automatic or manually confirmed via bot commands (`!wx portal-mode manual`,
 `!wx pending`, `!wx create <chat>`), similar to mautrix-telegram.
 
+## Importing WeChat built-in emoji
+
+An authorized operator can import the fixed set of 109 WebP built-in emoji with
+this exact command (replace `!wx` only if `bridge.command_prefix` differs):
+
+```text
+!wx stickers import wechat --ack-no-license
+```
+
+The sender must first pass the general `bridge.permissions` gate and must also
+be either the exact configured `bridge.personal_sticker_user_id` or an exact
+user/domain permission match whose level is `admin`. An explicit general denial
+such as `relay` still denies import. Portal ownership is not authorization.
+
+The source is fixed in code to
+[`airinghost/wechat-emoji`](https://github.com/airinghost/wechat-emoji), commit
+`2896eb55348041f5c5a66e4eccfb4882ab9cda0c`, path
+`web.wechat.com/compressed-cwebp/lossless-z9`. The importer uses 4 workers,
+commits batches of 16, allows 10 minutes for the run and 30 seconds for each
+fetch/upload, and validates the pinned HTTPS origin, MIME type, WebP signature,
+and 256 KiB size limit.
+
+The source repository has no explicit `LICENSE` or `COPYING` grant. Runtime
+download, Matrix upload, and distribution through rooms/Spaces involve copying
+and may involve redistribution. Attribution and `--ack-no-license`
+acknowledgment do **not** grant rights or imply permission; the operator accepts
+that risk.
+
+Imported shortcode-to-MXC mappings are global. The bridge atomically stores the
+canonical manifest at `bridge.wechat_builtin_emoji_file`, then reconciles stable
+`m.room.image_pack[wechat.builtin]` and Element-compatible pack state into every
+known account Space and portal. New Spaces and portals bootstrap from that local
+canonical store; editable Matrix room state never becomes canonical. Existing
+valid entries are skipped, failed/missing entries are retried, and every rerun
+reconciles all targets without deleting existing entries. Uploaded media from a
+failed persistence batch may be unreferenced and is reported only as a count.
+
+Personal sticker-picker account data is best-effort and uses only the exact
+configured `personal_sticker_user_id` plus `personal_sticker_access_token`. The
+user must already be joined to a room containing the stable pack; invite-only or
+inaccessible rooms are not selected. A joined account Space is preferred, then
+a joined portal by lexicographic room ID. Missing credentials, membership, or an
+account-data write failure does not undo the global pack import and is reported
+for retry/reconciliation. Never post the personal token in commands or logs.
+
 ## Docker (mautrix-telegram-style deployment)
 
 ```bash
