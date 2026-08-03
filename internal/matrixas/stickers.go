@@ -362,14 +362,22 @@ func (s *Server) ensureUserSeesImagePackRoom(ctx context.Context, user id.UserID
 		log.Printf("cannot register image pack room for %s: %v", user, err)
 		return
 	}
+	s.lockAccountData()
+	defer s.accountDataMu.Unlock()
 	for _, target := range imagePackAccountDataTargets(stateKey) {
 		var content event.ImagePackRoomsEventContent
-		if err := client.GetAccountData(ctx, target.EventType, &content); err != nil {
-			log.Printf("creating image pack rooms account data type=%s for %s: %v", target.EventType, user, err)
+		getCtx, cancelGet := s.matrixOperationContext(ctx)
+		getErr := client.GetAccountData(getCtx, target.EventType, &content)
+		cancelGet()
+		if getErr != nil {
+			log.Printf("creating image pack rooms account data type=%s for %s: %v", target.EventType, user, getErr)
 		}
 		setSingleImagePackRoomSourceAliases(&content, room, target.StateKey, target.Aliases...)
-		if err := client.SetAccountData(ctx, target.EventType, &content); err != nil {
-			log.Printf("failed to register image pack room type=%s for %s room=%s state_key=%s: %v", target.EventType, user, room, target.StateKey, err)
+		setCtx, cancelSet := s.matrixOperationContext(ctx)
+		setErr := client.SetAccountData(setCtx, target.EventType, &content)
+		cancelSet()
+		if setErr != nil {
+			log.Printf("failed to register image pack room type=%s for %s room=%s state_key=%s: %v", target.EventType, user, room, target.StateKey, setErr)
 		} else {
 			log.Printf("registered image pack room type=%s for %s room=%s state_key=%s", target.EventType, user, room, target.StateKey)
 		}
@@ -381,6 +389,13 @@ func (s *Server) lockImagePack() {
 		s.beforePackLock()
 	}
 	s.packMu.Lock()
+}
+
+func (s *Server) lockAccountData() {
+	if s.beforeAccountDataLock != nil {
+		s.beforeAccountDataLock()
+	}
+	s.accountDataMu.Lock()
 }
 
 func (s *Server) packState() rawImagePackState {
@@ -494,8 +509,10 @@ func (s *Server) repairStickerPacksForAccount(ctx context.Context, account remot
 	if s == nil {
 		return 0
 	}
+	operationCtx, cancel := s.matrixOperationContext(ctx)
+	defer cancel()
 	s.lockImagePack()
-	count := s.repairStickerPacksForAccountLocked(ctx, account, space)
+	count := s.repairStickerPacksForAccountLocked(operationCtx, account, space)
 	s.packMu.Unlock()
 	if count > 0 && owner != "" {
 		s.ensureUserSeesImagePackRoom(ctx, owner, space, wechatStickerPackStateKey(account))
@@ -549,8 +566,10 @@ func (s *Server) repairStickerPackCompatibility(ctx context.Context, account rem
 	if s == nil {
 		return
 	}
+	operationCtx, cancel := s.matrixOperationContext(ctx)
+	defer cancel()
 	s.lockImagePack()
-	repaired := s.repairStickerPackCompatibilityLocked(ctx, account, room)
+	repaired := s.repairStickerPackCompatibilityLocked(operationCtx, account, room)
 	s.packMu.Unlock()
 	if repaired && owner != "" {
 		s.ensureUserSeesImagePackRoom(ctx, owner, room, wechatStickerPackStateKey(account))

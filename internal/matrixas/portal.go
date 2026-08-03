@@ -422,6 +422,9 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 	}
 	rec := portalRecord{ChatID: chatID, RoomID: resp.RoomID, Name: name, IsGroup: chat.IsGroup}
 	s.portals.set(rec)
+	builtinPack, accountData := s.bootstrapBuiltinEmojiPortal(ctx, resp.RoomID)
+	warnings := append(append([]string(nil), builtinPack.Warnings...), accountData.Warnings...)
+	log.Printf("built-in emoji portal bootstrap room=%s pack=%s account_data=%s warnings=%s", resp.RoomID, builtinPack.Status, accountData.Status, strings.Join(warnings, "; "))
 	if owner != "" {
 		s.ensureRoomAdminPower(ctx, owner, resp.RoomID)
 	}

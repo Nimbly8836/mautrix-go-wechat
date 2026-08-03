@@ -101,6 +101,71 @@ func TestAccountStoreGettersReturnDeepCopies(t *testing.T) {
 	}
 }
 
+func TestAccountStoreReplaceSpacePersistsRetiredRoomAndDeepCopies(t *testing.T) {
+	as, path := seededAccountStore(t)
+	const oldSpace = "!old-space:example.com"
+	const newSpace = "!replacement:example.com"
+	account, _ := as.get("wxid_old")
+	account.SpaceRoom = oldSpace
+	account.RetiredSpaceRooms = []string{"!previously-retired:example.com"}
+	if err := as.put(account); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := as.replaceSpace("wxid_old", newSpace, map[string]string{"contacts": "!contacts:example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := as.put(savedAccount{ID: "wxid_old", Session: []byte("fresh-session")}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := as.get("wxid_old")
+	want := []string{"!previously-retired:example.com", oldSpace}
+	if !reflect.DeepEqual(got.RetiredSpaceRooms, want) {
+		t.Fatalf("retired Spaces = %#v, want %#v", got.RetiredSpaceRooms, want)
+	}
+	got.RetiredSpaceRooms[0] = "mutated"
+	unchanged, _ := as.get("wxid_old")
+	if !reflect.DeepEqual(unchanged.RetiredSpaceRooms, want) {
+		t.Fatalf("retired Spaces mutated through getter: %#v", unchanged.RetiredSpaceRooms)
+	}
+
+	reloaded := newAccountStore(path)
+	persisted, _ := reloaded.get("wxid_old")
+	if !reflect.DeepEqual(persisted.RetiredSpaceRooms, want) {
+		t.Fatalf("reloaded retired Spaces = %#v, want %#v", persisted.RetiredSpaceRooms, want)
+	}
+}
+
+func TestAccountStoreClearsRetiredRoomsAtomicallyAfterPersistence(t *testing.T) {
+	as, path := seededAccountStore(t)
+	account, _ := as.get("wxid_old")
+	account.RetiredSpaceRooms = []string{"!one:example.com", "!two:example.com"}
+	if err := as.put(account); err != nil {
+		t.Fatal(err)
+	}
+
+	injected := errors.New("clear retired persistence failed")
+	originalPersist := as.persist
+	as.persist = func(string, []byte, fs.FileMode) error { return injected }
+	if err := as.clearRetiredSpaceRooms([]string{"!one:example.com"}); !errors.Is(err, injected) {
+		t.Fatalf("clear error = %v, want persistence failure", err)
+	}
+	pending, _ := as.get("wxid_old")
+	if !reflect.DeepEqual(pending.RetiredSpaceRooms, []string{"!one:example.com", "!two:example.com"}) {
+		t.Fatalf("failed clear published pending IDs: %#v", pending.RetiredSpaceRooms)
+	}
+
+	as.persist = originalPersist
+	if err := as.clearRetiredSpaceRooms([]string{"!one:example.com", "!two:example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := newAccountStore(path)
+	cleared, _ := reloaded.get("wxid_old")
+	if len(cleared.RetiredSpaceRooms) != 0 {
+		t.Fatalf("reloaded retired Spaces = %#v, want empty", cleared.RetiredSpaceRooms)
+	}
+}
+
 func TestAccountStorePutCopiesCallerOwnedData(t *testing.T) {
 	as, _ := seededAccountStore(t)
 	acc := savedAccount{ID: "wxid_new", Session: []byte("session"), SpaceFolders: map[string]string{"groups": "!groups:example.com"}}

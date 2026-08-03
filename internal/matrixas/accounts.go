@@ -26,13 +26,14 @@ type accountStoreData struct {
 }
 
 type savedAccount struct {
-	ID           remoteapi.UserID  `json:"id"`
-	Protocol     string            `json:"protocol"`
-	LoginFlow    string            `json:"login_flow,omitempty"`
-	Session      []byte            `json:"session"`
-	SpaceRoom    string            `json:"space_room,omitempty"`
-	SpaceFolders map[string]string `json:"space_folders,omitempty"`
-	UpdatedAt    time.Time         `json:"updated_at"`
+	ID                remoteapi.UserID  `json:"id"`
+	Protocol          string            `json:"protocol"`
+	LoginFlow         string            `json:"login_flow,omitempty"`
+	Session           []byte            `json:"session"`
+	SpaceRoom         string            `json:"space_room,omitempty"`
+	SpaceFolders      map[string]string `json:"space_folders,omitempty"`
+	RetiredSpaceRooms []string          `json:"retired_space_rooms,omitempty"`
+	UpdatedAt         time.Time         `json:"updated_at"`
 }
 
 func newAccountStore(path string) *accountStore {
@@ -61,6 +62,7 @@ func (as *accountStore) load() {
 
 func cloneSavedAccount(acc savedAccount) savedAccount {
 	acc.Session = append([]byte(nil), acc.Session...)
+	acc.RetiredSpaceRooms = append([]string(nil), acc.RetiredSpaceRooms...)
 	if acc.SpaceFolders != nil {
 		folders := make(map[string]string, len(acc.SpaceFolders))
 		for key, room := range acc.SpaceFolders {
@@ -112,6 +114,9 @@ func (as *accountStore) put(acc savedAccount) error {
 			}
 			if acc.SpaceFolders == nil {
 				acc.SpaceFolders = cloneSavedAccount(old).SpaceFolders
+			}
+			if acc.RetiredSpaceRooms == nil {
+				acc.RetiredSpaceRooms = append([]string(nil), old.RetiredSpaceRooms...)
 			}
 		}
 		acc.UpdatedAt = time.Now()
@@ -180,10 +185,57 @@ func (as *accountStore) replaceSpace(id remoteapi.UserID, roomID string, folders
 		if !ok {
 			acc = savedAccount{ID: id}
 		}
+		oldSpace := acc.SpaceRoom
 		acc.SpaceRoom = roomID
 		acc.SpaceFolders = folders
+		if oldSpace != "" && oldSpace != roomID {
+			found := false
+			for _, retired := range acc.RetiredSpaceRooms {
+				if retired == oldSpace {
+					found = true
+					break
+				}
+			}
+			if !found {
+				acc.RetiredSpaceRooms = append(acc.RetiredSpaceRooms, oldSpace)
+			}
+		}
 		acc.UpdatedAt = time.Now()
 		data.Accounts[string(id)] = acc
+		return nil
+	})
+}
+
+func (as *accountStore) clearRetiredSpaceRooms(roomIDs []string) error {
+	if len(roomIDs) == 0 {
+		return nil
+	}
+	clear := make(map[string]struct{}, len(roomIDs))
+	for _, roomID := range roomIDs {
+		if roomID != "" {
+			clear[roomID] = struct{}{}
+		}
+	}
+	if len(clear) == 0 {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return as.mutateLocked(func(data *accountStoreData) error {
+		now := time.Now()
+		for key, acc := range data.Accounts {
+			kept := acc.RetiredSpaceRooms[:0]
+			for _, roomID := range acc.RetiredSpaceRooms {
+				if _, remove := clear[roomID]; !remove {
+					kept = append(kept, roomID)
+				}
+			}
+			if len(kept) != len(acc.RetiredSpaceRooms) {
+				acc.RetiredSpaceRooms = append([]string(nil), kept...)
+				acc.UpdatedAt = now
+				data.Accounts[key] = acc
+			}
+		}
 		return nil
 	})
 }

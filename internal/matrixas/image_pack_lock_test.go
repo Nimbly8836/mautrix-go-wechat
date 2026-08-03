@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -350,6 +352,206 @@ func TestImagePackLockOrderSpaceThenPackAndPackDoesNotAcquireSpace(t *testing.T)
 	}()
 	waitImagePackSignal(t, lockArrivals, "pack-only operation reaching packMu while spaceMu is held")
 	waitImagePackResult(t, packOnlyDone, "pack-only operation while spaceMu remains held")
+}
+
+func TestStickerRepairDeadlinesReleasePackLock(t *testing.T) {
+	account := remoteapi.UserID("wxid_self")
+	room := id.RoomID("!space:example.org")
+	for _, test := range []struct {
+		name      string
+		operation func(*Server)
+	}{
+		{
+			name: "full account repair",
+			operation: func(s *Server) {
+				s.repairStickerPacksForAccount(context.Background(), account, room, "")
+			},
+		},
+		{
+			name: "compatibility repair",
+			operation: func(s *Server) {
+				s.repairStickerPackCompatibility(context.Background(), account, room, "")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			started := make(chan struct{}, 1)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			s := &Server{
+				rawImagePackState:      &contextBlockingRawImagePackState{started: started, release: release},
+				matrixOperationTimeout: 20 * time.Millisecond,
+			}
+			operationDone := make(chan struct{})
+			go func() {
+				test.operation(s)
+				close(operationDone)
+			}()
+			waitImagePackSignal(t, started, "repair reaching blocked Matrix state operation")
+
+			lockAcquired := make(chan struct{})
+			go func() {
+				s.packMu.Lock()
+				close(lockAcquired)
+				s.packMu.Unlock()
+			}()
+			select {
+			case <-lockAcquired:
+			case <-time.After(250 * time.Millisecond):
+				unblock()
+				<-operationDone
+				t.Fatal("packMu remained held after the configured sticker repair deadline")
+			}
+			select {
+			case <-operationDone:
+			case <-time.After(250 * time.Millisecond):
+				unblock()
+				t.Fatal("sticker repair did not return after its Matrix operation deadline")
+			}
+		})
+	}
+}
+
+type contextBlockingSaveImagePackState struct {
+	delegate  *fakeRawImagePackState
+	blockRoom id.RoomID
+	started   chan<- struct{}
+	release   <-chan struct{}
+}
+
+func (state *contextBlockingSaveImagePackState) Load(ctx context.Context, room id.RoomID, eventType event.Type, stateKey string) (json.RawMessage, error) {
+	return state.delegate.Load(ctx, room, eventType, stateKey)
+}
+
+func (state *contextBlockingSaveImagePackState) Save(ctx context.Context, room id.RoomID, eventType event.Type, stateKey string, raw json.RawMessage) error {
+	if room != state.blockRoom {
+		return state.delegate.Save(ctx, room, eventType, stateKey, raw)
+	}
+	select {
+	case state.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-state.release:
+		return errors.New("released blocking save")
+	}
+}
+
+func TestStickerCompatibilitySaveDeadlineReleasesPackLock(t *testing.T) {
+	account := remoteapi.UserID("wxid_self")
+	room := id.RoomID("!space:example.org")
+	stateKey := wechatStickerPackStateKey(account)
+	delegate := newFakeRawImagePackState()
+	delegate.set(room, event.StateImagePack, stateKey, `{"images":{"one":{"url":"mxc://example.org/one"}}}`)
+	delegate.set(room, event.StateUnstableImagePack, "", `{"images":{}}`)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	s := &Server{
+		rawImagePackState:      &contextBlockingSaveImagePackState{delegate: delegate, blockRoom: room, started: started, release: release},
+		matrixOperationTimeout: 20 * time.Millisecond,
+	}
+	done := make(chan struct{})
+	go func() {
+		s.repairStickerPackCompatibility(context.Background(), account, room, "")
+		close(done)
+	}()
+	waitImagePackSignal(t, started, "compatibility repair reaching blocked state save")
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("compatibility repair state save ignored Matrix operation deadline")
+	}
+	lockAcquired := make(chan struct{})
+	go func() {
+		s.packMu.Lock()
+		close(lockAcquired)
+		s.packMu.Unlock()
+	}()
+	waitImagePackSignal(t, lockAcquired, "packMu release after compatibility state save deadline")
+}
+
+func TestStickerRepairJoinedRoomsDeadlineReleasesPackLock(t *testing.T) {
+	account := remoteapi.UserID("wxid_self")
+	room := id.RoomID("!space:example.org")
+	stateKey := wechatStickerPackStateKey(account)
+	state := newFakeRawImagePackState()
+	state.set(room, event.StateImagePack, stateKey, `{"images":{"one":{"url":"mxc://example.org/one"}}}`)
+	state.set(room, event.StateUnstableImagePack, "", `{"images":{}}`)
+	started := make(chan struct{}, 1)
+	homeserver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/joined_rooms") {
+			started <- struct{}{}
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer homeserver.Close()
+	s := &Server{
+		as:                     testAppservice(t, homeserver.URL),
+		rawImagePackState:      state,
+		matrixOperationTimeout: 20 * time.Millisecond,
+	}
+	done := make(chan struct{})
+	go func() {
+		s.repairStickerPacksForAccount(context.Background(), account, room, "")
+		close(done)
+	}()
+	waitImagePackSignal(t, started, "sticker repair reaching blocked joined-rooms request")
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("sticker repair JoinedRooms ignored Matrix operation deadline")
+	}
+	lockAcquired := make(chan struct{})
+	go func() {
+		s.packMu.Lock()
+		close(lockAcquired)
+		s.packMu.Unlock()
+	}()
+	waitImagePackSignal(t, lockAcquired, "packMu release after JoinedRooms deadline")
+}
+
+func TestStickerRepairMirrorSaveDeadlineReleasesPackLock(t *testing.T) {
+	account := remoteapi.UserID("wxid_self")
+	space := id.RoomID("!space:example.org")
+	portal := id.RoomID("!portal:example.org")
+	stateKey := wechatStickerPackStateKey(account)
+	delegate := newFakeRawImagePackState()
+	delegate.set(space, event.StateImagePack, stateKey, `{"images":{"one":{"url":"mxc://example.org/one"}}}`)
+	delegate.set(space, event.StateUnstableImagePack, "", `{"images":{}}`)
+	delegate.set(portal, event.StateUnstableImagePack, "", `{"images":{}}`)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	s := &Server{
+		rawImagePackState:      &contextBlockingSaveImagePackState{delegate: delegate, blockRoom: portal, started: started, release: release},
+		portals:                &portalStore{data: portalState{Portals: map[string]portalRecord{"chat": {ChatID: "chat", RoomID: portal}}}},
+		matrixOperationTimeout: 20 * time.Millisecond,
+	}
+	done := make(chan struct{})
+	go func() {
+		s.repairStickerPacksForAccount(context.Background(), account, space, "")
+		close(done)
+	}()
+	waitImagePackSignal(t, started, "sticker repair reaching blocked mirror save")
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("sticker repair mirror save ignored Matrix operation deadline")
+	}
+	lockAcquired := make(chan struct{})
+	go func() {
+		s.packMu.Lock()
+		close(lockAcquired)
+		s.packMu.Unlock()
+	}()
+	waitImagePackSignal(t, lockAcquired, "packMu release after mirror save deadline")
 }
 
 func waitImagePackSignal(t *testing.T, signal <-chan struct{}, operation string) {

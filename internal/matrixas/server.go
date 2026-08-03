@@ -30,36 +30,52 @@ import (
 // Server owns the Matrix appservice, the remote connector and the management
 // bot command loop.
 type Server struct {
-	cfg               *config.Config
-	as                *appservice.AppService
-	conn              *connector.Connector
-	api               remoteapi.PuppetAPI
-	apiCfg            remoteapi.Config
-	sessionFile       string
-	portals           *portalStore
-	accounts          *accountStore
-	contacts          *contactStore
-	builtinEmojiStore *builtinEmojiStore
-	newConnector      func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error)
+	cfg                            *config.Config
+	as                             *appservice.AppService
+	conn                           *connector.Connector
+	api                            remoteapi.PuppetAPI
+	apiCfg                         remoteapi.Config
+	sessionFile                    string
+	portals                        *portalStore
+	accounts                       *accountStore
+	contacts                       *contactStore
+	builtinEmojiStore              *builtinEmojiStore
+	newConnector                   func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error)
+	newBuiltinPackVisibilityClient func(id.UserID, string) (builtinPackVisibilityClient, error)
 
 	mu                  sync.Mutex
 	accountTransitionMu sync.Mutex
-	// Lock order: spaceMu -> packMu -> accountStore.mu / builtin store mutex.
-	// Code holding packMu must never acquire spaceMu. Future inline-resolver and
-	// reconciliation entry points must use lock-acquiring wrappers plus Locked
-	// helpers; those APIs do not exist yet and are intentionally not stubbed here.
-	spaceMu sync.Mutex
-	packMu  sync.Mutex
-	// beforePackLock is a test barrier invoked immediately before packMu.Lock.
-	beforePackLock    func()
-	rawImagePackState rawImagePackState
-	rooms             map[id.RoomID]bool
-	messageEvents     map[string]id.EventID
-	remoteRun         bool
-	remoteCtx         context.Context
-	remoteStop        context.CancelFunc
-	contactRefresh    map[string]bool
-	puppetJoins       map[string]bool
+	// Lock order: spaceMu -> packMu -> accountDataMu -> accountStore.mu /
+	// builtin store mutex. Code holding packMu must never acquire spaceMu.
+	// Account-data transactions use lock-acquiring wrappers plus non-recursive
+	// locked helpers so their read-modify-write sequences cannot interleave.
+	spaceMu       sync.Mutex
+	packMu        sync.Mutex
+	accountDataMu sync.Mutex
+	// Test barriers invoked after a portal snapshot and immediately before the
+	// corresponding image-pack lock.
+	afterPortalSnapshot    func([]portalRecord)
+	beforePackLock         func()
+	beforeAccountDataLock  func()
+	matrixOperationTimeout time.Duration
+	rawImagePackState      rawImagePackState
+	rooms                  map[id.RoomID]bool
+	messageEvents          map[string]id.EventID
+	remoteRun              bool
+	remoteCtx              context.Context
+	remoteStop             context.CancelFunc
+	contactRefresh         map[string]bool
+	puppetJoins            map[string]bool
+}
+
+const defaultMatrixOperationTimeout = 30 * time.Second
+
+func (s *Server) matrixOperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.matrixOperationTimeout
+	if timeout <= 0 {
+		timeout = defaultMatrixOperationTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 // New creates the appservice and remote connector from config + registration.
@@ -136,13 +152,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.matrixLoop(ctx)
 
 	loggedIn, _ := s.api.IsLoggedIn(ctx)
-	if loggedIn {
-		if account := s.currentAccountID(ctx); account != "" {
-			if _, err := s.ensureAccountSpace(ctx, account); err != nil {
-				log.Printf("failed to ensure account space for %s: %v", account, err)
-			}
-		}
-	}
+	s.bootstrapStartupSpaces(ctx, loggedIn)
 	if s.shouldStartRemoteOnRun(loggedIn) {
 		s.startRemote(ctx)
 	}
@@ -152,6 +162,23 @@ func (s *Server) Run(ctx context.Context) error {
 	s.as.Stop()
 	s.stopRemote()
 	return ctx.Err()
+}
+
+func (s *Server) bootstrapStartupSpaces(ctx context.Context, loggedIn bool) {
+	if loggedIn {
+		if account := s.currentAccountID(ctx); account != "" {
+			transition, err := s.ensureAccountSpaceTransition(ctx, account)
+			if err != nil {
+				log.Printf("failed to ensure account space for %s: %v (%s)", account, err, formatSpaceTransitionStatus(transition))
+			} else {
+				log.Printf("startup account space ready account=%s %s", account, formatSpaceTransitionStatus(transition))
+			}
+			return
+		}
+	}
+	builtinPack, accountData := s.reconcileBuiltinEmojiPacks(ctx)
+	warnings := append(append([]string(nil), builtinPack.Warnings...), accountData.Warnings...)
+	log.Printf("startup built-in emoji bootstrap pack=%s rooms=%d/%d account_data=%s warnings=%s", builtinPack.Status, builtinPack.ReconciledRooms, builtinPack.AttemptedRooms, accountData.Status, strings.Join(warnings, "; "))
 }
 
 func (s *Server) shouldStartRemoteOnRun(loggedIn bool) bool {

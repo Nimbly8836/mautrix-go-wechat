@@ -149,19 +149,20 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			s.notice(ctx, room, fmt.Sprintf("切换账号失败: %v", err))
 			return
 		}
+		transition, transitionErr := s.ensureAccountSpaceTransition(ctx, wxid)
+		if transitionErr != nil {
+			s.notice(ctx, room, fmt.Sprintf("已切换账号，但创建/获取 Space 失败: %v\n\n%s", transitionErr, formatSpaceTransitionStatus(transition)))
+		}
 		ok, err := s.api.IsLoggedIn(ctx)
 		if err != nil {
 			s.notice(ctx, room, fmt.Sprintf("已切换到 %s，但检查状态失败: %v", wxid, err))
 			return
 		}
 		if ok {
-			if _, err := s.ensureAccountSpace(ctx, wxid); err != nil {
-				s.notice(ctx, room, fmt.Sprintf("已切换账号，但创建/获取 Space 失败: %v", err))
-			}
 			s.startRemote(ctx)
-			s.notice(ctx, room, fmt.Sprintf("已切换并连接账号: %s", wxid))
+			s.notice(ctx, room, fmt.Sprintf("已切换并连接账号: %s\n\n%s", wxid, formatSpaceTransitionStatus(transition)))
 		} else {
-			s.notice(ctx, room, fmt.Sprintf("已切换到账号 %s，但 session 可能已失效，请重新 `%s login <flow>`。", wxid, s.commandPrefix()))
+			s.notice(ctx, room, fmt.Sprintf("已切换到账号 %s，但 session 可能已失效，请重新 `%s login <flow>`。\n\n%s", wxid, s.commandPrefix(), formatSpaceTransitionStatus(transition)))
 		}
 	case "logout", "登出", "退出":
 		if err := s.api.Logout(ctx); err != nil {
@@ -208,37 +209,39 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 		s.portals.setOwner(sender)
 		subcmd := strings.TrimSpace(strings.ToLower(rest))
 		if subcmd == "rebuild" || subcmd == "重建" {
-			newSpace, newFolders, fixed, err := s.rebuildAccountSpace(ctx, account, sender)
+			transition, err := s.rebuildAccountSpace(ctx, account, sender)
 			if err != nil {
-				s.notice(ctx, room, fmt.Sprintf("重建 Space 失败: %v", err))
+				s.notice(ctx, room, fmt.Sprintf("重建 Space 失败: %v\n\n%s", err, formatSpaceTransitionStatus(transition)))
 				return
 			}
-			s.notice(ctx, room, fmt.Sprintf("已重建当前账号 Space，并重新挂载已有 portal。处理 portal: %d\n新 Space: %s\n新分类:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s\n\n旧 Space/分类已从桥配置中替换，并尽量移除了旧 child/parent 关系；旧房间本身不会被 Matrix 立即删除。", fixed, newSpace, newFolders[spaceFolderContacts], newFolders[spaceFolderOfficial], newFolders[spaceFolderGroups]))
-			return
-		}
-		space, folders, err := s.ensureAccountSpaceVisibleTo(ctx, account, sender)
-		if err != nil {
-			s.notice(ctx, room, fmt.Sprintf("创建/获取 Space 失败: %v", err))
+			s.notice(ctx, room, fmt.Sprintf("已重建当前账号 Space，并重新挂载已有 portal。处理 portal: %d\n新 Space: %s\n新分类:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s\n\n旧 Space/分类已从桥配置中替换，并尽量移除了旧 child/parent 关系；旧房间本身不会被 Matrix 立即删除。\n\n%s", transition.PortalCount, transition.Space, transition.Folders[spaceFolderContacts], transition.Folders[spaceFolderOfficial], transition.Folders[spaceFolderGroups], formatSpaceTransitionStatus(transition)))
 			return
 		}
 		if subcmd == "repair" || subcmd == "修复" {
-			fixed, err := s.repairAccountSpace(ctx, account, sender)
+			transition, err := s.repairAccountSpace(ctx, account, sender)
 			if err != nil {
-				s.notice(ctx, room, fmt.Sprintf("修复 Space 失败: %v", err))
+				s.notice(ctx, room, fmt.Sprintf("修复 Space 失败: %v\n\n%s", err, formatSpaceTransitionStatus(transition)))
 				return
 			}
-			s.notice(ctx, room, fmt.Sprintf("已修复当前账号 Space/分类/portal 挂载和权限。处理 portal: %d\nSpace: %s\n分类:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s", fixed, space, folders[spaceFolderContacts], folders[spaceFolderOfficial], folders[spaceFolderGroups]))
+			s.notice(ctx, room, fmt.Sprintf("已修复当前账号 Space/分类/portal 挂载和权限。处理 portal: %d\nSpace: %s\n分类:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s\n\n%s", transition.PortalCount, transition.Space, transition.Folders[spaceFolderContacts], transition.Folders[spaceFolderOfficial], transition.Folders[spaceFolderGroups], formatSpaceTransitionStatus(transition)))
 			return
 		}
-		if err := s.attachExistingPortalsToAccountSpace(ctx, account, space); err != nil {
-			s.notice(ctx, room, fmt.Sprintf("整理已有 portal 到 Space 失败: %v", err))
+		transition, err := s.ensureAccountSpaceVisibleTransition(ctx, account, sender)
+		if err != nil {
+			s.notice(ctx, room, fmt.Sprintf("创建/获取 Space 失败: %v\n\n%s", err, formatSpaceTransitionStatus(transition)))
 			return
 		}
-		s.ensureRoomAdminPower(ctx, sender, space)
-		for _, folder := range folders {
+		portals := s.savedPortalRecords()
+		transition.PortalCount = len(portals)
+		if err := s.attachExistingPortalsToAccountSpace(ctx, account, transition.Space, transition.Folders, portals); err != nil {
+			s.notice(ctx, room, fmt.Sprintf("整理已有 portal 到 Space 失败: %v\n\n%s", err, formatSpaceTransitionStatus(transition)))
+			return
+		}
+		s.ensureRoomAdminPower(ctx, sender, transition.Space)
+		for _, folder := range transition.Folders {
 			s.ensureRoomAdminPower(ctx, sender, folder)
 		}
-		s.notice(ctx, room, fmt.Sprintf("当前微信账号 Space: %s\n分类 Space:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s\n\n已邀请你加入这些 Space，并重新整理已有 portal。", space, folders[spaceFolderContacts], folders[spaceFolderOfficial], folders[spaceFolderGroups]))
+		s.notice(ctx, room, fmt.Sprintf("当前微信账号 Space: %s\n分类 Space:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s\n\n已邀请你加入这些 Space，并重新整理已有 portal。\n\n%s", transition.Space, transition.Folders[spaceFolderContacts], transition.Folders[spaceFolderOfficial], transition.Folders[spaceFolderGroups], formatSpaceTransitionStatus(transition)))
 	case "portals":
 		items := s.portals.list()
 		if len(items) == 0 {
@@ -317,11 +320,12 @@ func (s *Server) handleRefreshLoginCommand(ctx context.Context, room id.RoomID, 
 		s.notice(ctx, room, fmt.Sprintf("二次登录成功，但保存会话失败: %v", err))
 		return
 	}
-	if _, err := s.ensureAccountSpace(ctx, wxid); err != nil {
-		s.notice(ctx, room, fmt.Sprintf("二次登录成功，但创建 Space 失败: %v", err))
+	transition, transitionErr := s.ensureAccountSpaceTransition(ctx, wxid)
+	if transitionErr != nil {
+		s.notice(ctx, room, fmt.Sprintf("二次登录成功，但创建 Space 失败: %v\n\n%s", transitionErr, formatSpaceTransitionStatus(transition)))
 	}
 	s.startRemote(ctx)
-	s.notice(ctx, room, fmt.Sprintf("已对 %s 完成二次登录并开启自动心跳。", wxid))
+	s.notice(ctx, room, fmt.Sprintf("已对 %s 完成二次登录并开启自动心跳。\n\n%s", wxid, formatSpaceTransitionStatus(transition)))
 }
 
 func (s *Server) handleContactsCommand(ctx context.Context, room id.RoomID, rest string) {
@@ -567,18 +571,21 @@ func (s *Server) activateAccountText(ctx context.Context, wxid remoteapi.UserID)
 	if err := s.saveSessionLocked("cache"); err != nil {
 		return fmt.Sprintf("已激活 %s 的登录缓存，但保存当前会话失败: %v", wxid, err)
 	}
+	transition := spaceTransitionResult{}
 	if account := s.currentAccountID(ctx); account != "" {
-		if _, err := s.ensureAccountSpace(ctx, account); err != nil {
-			return fmt.Sprintf("已读取并保存 %s 的登录缓存，但创建 Space 失败: %v\n\n%s", wxid, err, safeLoginInfoSummary(info))
+		transition, err = s.ensureAccountSpaceTransition(ctx, account)
+		if err != nil {
+			return fmt.Sprintf("已读取并保存 %s 的登录缓存，但创建 Space 失败: %v\n\n%s\n\n%s", wxid, err, safeLoginInfoSummary(info), formatSpaceTransitionStatus(transition))
 		}
 	}
+	transitionStatus := formatSpaceTransitionStatus(transition)
 	if ok, err := s.api.IsLoggedIn(ctx); err != nil {
-		return fmt.Sprintf("已读取并保存 %s 的登录缓存，但心跳检查失败: %v\n\n%s", wxid, err, safeLoginInfoSummary(info))
+		return fmt.Sprintf("已读取并保存 %s 的登录缓存，但心跳检查失败: %v\n\n%s\n\n%s", wxid, err, safeLoginInfoSummary(info), transitionStatus)
 	} else if ok {
 		s.startRemote(ctx)
-		return fmt.Sprintf("已将 %s 设置为当前登录账号，并已连接。\n\n%s", wxid, safeLoginInfoSummary(info))
+		return fmt.Sprintf("已将 %s 设置为当前登录账号，并已连接。\n\n%s\n\n%s", wxid, safeLoginInfoSummary(info), transitionStatus)
 	}
-	return fmt.Sprintf("已将 %s 设置为当前账号，但心跳检查未通过；缓存可能已过期。\n\n%s", wxid, safeLoginInfoSummary(info))
+	return fmt.Sprintf("已将 %s 设置为当前账号，但心跳检查未通过；缓存可能已过期。\n\n%s\n\n%s", wxid, safeLoginInfoSummary(info), transitionStatus)
 }
 
 func safeLoginInfoSummary(info remoteapi.LoginInfo) string {
@@ -716,8 +723,11 @@ func (s *Server) runLogin(ctx context.Context, room id.RoomID, owner id.UserID, 
 				return
 			}
 			s.notice(ctx, room, fmt.Sprintf("登录成功: %s\n登录协议: %s", step.Self, flowID))
-			if _, err := s.ensureAccountSpace(ctx, step.Self); err != nil {
-				s.notice(ctx, room, fmt.Sprintf("登录成功，但创建 Space 失败: %v", err))
+			transition, transitionErr := s.ensureAccountSpaceTransition(ctx, step.Self)
+			if transitionErr != nil {
+				s.notice(ctx, room, fmt.Sprintf("登录成功，但创建 Space 失败: %v\n\n%s", transitionErr, formatSpaceTransitionStatus(transition)))
+			} else {
+				s.notice(ctx, room, formatSpaceTransitionStatus(transition))
 			}
 			s.startRemote(ctx)
 			return
