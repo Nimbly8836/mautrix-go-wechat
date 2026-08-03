@@ -7,9 +7,11 @@ package matrixas
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -28,24 +30,48 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/wechat/textemoji"
 )
 
+type appServiceHTTPRuntime struct {
+	server         *http.Server
+	listener       net.Listener
+	done           chan struct{}
+	stopped        chan struct{}
+	stopOnce       sync.Once
+	serveErr       error
+	unixSocketPath string
+	unixSocketInfo os.FileInfo
+}
+
 // Server owns the Matrix appservice, the remote connector and the management
 // bot command loop.
 type Server struct {
-	cfg                            *config.Config
-	as                             *appservice.AppService
-	conn                           *connector.Connector
-	api                            remoteapi.PuppetAPI
-	apiCfg                         remoteapi.Config
-	sessionFile                    string
-	portals                        *portalStore
-	accounts                       *accountStore
-	contacts                       *contactStore
-	builtinEmojiStore              *builtinEmojiStore
-	newConnector                   func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error)
-	newBuiltinPackVisibilityClient func(id.UserID, string) (builtinPackVisibilityClient, error)
+	cfg                              *config.Config
+	as                               *appservice.AppService
+	conn                             *connector.Connector
+	api                              remoteapi.PuppetAPI
+	apiCfg                           remoteapi.Config
+	sessionFile                      string
+	portals                          *portalStore
+	accounts                         *accountStore
+	contacts                         *contactStore
+	builtinEmojiStore                *builtinEmojiStore
+	newConnector                     func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error)
+	newBuiltinPackVisibilityClient   func(id.UserID, string) (builtinPackVisibilityClient, error)
+	builtinEmojiImporterFactory      func() builtinEmojiImportRunner
+	builtinEmojiContextFactory       func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	builtinEmojiNoticeContextFactory func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	builtinEmojiSpaceResolver        func(context.Context, remoteapi.UserID) (id.RoomID, error)
+	builtinEmojiNotice               func(context.Context, id.RoomID, string)
+	builtinEmojiNow                  func() time.Time
+	appServiceListen                 func(network, address string) (net.Listener, error)
 
-	mu                  sync.Mutex
-	accountTransitionMu sync.Mutex
+	mu                    sync.Mutex
+	runMu                 sync.Mutex
+	appServiceLifecycleMu sync.Mutex
+	appServiceHTTP        *appServiceHTTPRuntime
+	accountTransitionMu   sync.Mutex
+	importMu              sync.Mutex
+	importRunning         bool
+	importRuntime         *builtinEmojiRuntime
 	// Lock order: spaceMu -> packMu -> accountDataMu -> accountStore.mu /
 	// builtin store mutex. Code holding packMu must never acquire spaceMu.
 	// Account-data transactions use lock-acquiring wrappers plus non-recursive
@@ -69,7 +95,10 @@ type Server struct {
 	puppetJoins            map[string]bool
 }
 
-const defaultMatrixOperationTimeout = 30 * time.Second
+const (
+	defaultMatrixOperationTimeout = 30 * time.Second
+	appServiceHTTPShutdownTimeout = 5 * time.Second
+)
 
 func (s *Server) matrixOperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	timeout := s.matrixOperationTimeout
@@ -144,12 +173,30 @@ func applyStartupSession(apiCfg remoteapi.Config, accounts *accountStore, legacy
 // Run starts the appservice HTTP listener, event loop and remote connector if
 // an existing backend session is already valid.
 func (s *Server) Run(ctx context.Context) error {
+	if !s.runMu.TryLock() {
+		return errors.New("server Run is already active")
+	}
+	defer s.runMu.Unlock()
+
+	runtime := s.captureBuiltinEmojiRuntime(ctx)
+	defer s.clearBuiltinEmojiRuntime(runtime)
+	ctx = runtime.ctx
+
 	if err := s.as.BotIntent().EnsureRegistered(ctx); err != nil {
 		log.Printf("warning: failed to ensure bot registered: %v", err)
 	}
 	s.as.Ready = true
+	httpRuntime, err := s.startAppServiceHTTP()
+	if err != nil {
+		s.as.Ready = false
+		return err
+	}
+	defer func() {
+		s.stopAppServiceHTTP(httpRuntime)
+		s.as.Ready = false
+	}()
+	defer s.stopRemote()
 
-	go s.as.Start()
 	go s.matrixLoop(ctx)
 
 	loggedIn, _ := s.api.IsLoggedIn(ctx)
@@ -158,11 +205,144 @@ func (s *Server) Run(ctx context.Context) error {
 		s.startRemote(ctx)
 	}
 
-	<-ctx.Done()
-	s.as.Ready = false
-	s.as.Stop()
-	s.stopRemote()
-	return ctx.Err()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-httpRuntime.done:
+		serveErr := s.appServiceHTTPServeError(httpRuntime)
+		if serveErr == nil || errors.Is(serveErr, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("appservice HTTP listener stopped: %w", serveErr)
+	}
+}
+
+func (s *Server) startAppServiceHTTP() (*appServiceHTTPRuntime, error) {
+	s.appServiceLifecycleMu.Lock()
+	defer s.appServiceLifecycleMu.Unlock()
+	if s.appServiceHTTP != nil {
+		return nil, errors.New("appservice HTTP listener is already running")
+	}
+	if s.as == nil {
+		return nil, errors.New("appservice is unavailable")
+	}
+
+	network := "tcp"
+	address := s.as.Host.Address()
+	unixSocketPath := ""
+	if s.as.Host.IsUnixSocket() {
+		network = "unix"
+		address = s.as.Host.Hostname
+		unixSocketPath = address
+		if err := requireUnixSocketPathAbsent(unixSocketPath); err != nil {
+			return nil, err
+		}
+	}
+	listen := s.appServiceListen
+	if listen == nil {
+		listen = net.Listen
+	}
+	listener, err := listen(network, address)
+	if err != nil {
+		return nil, fmt.Errorf("listen for appservice HTTP on %s: %w", address, err)
+	}
+
+	runtime := &appServiceHTTPRuntime{
+		server:         &http.Server{Handler: s.as.Router},
+		listener:       listener,
+		done:           make(chan struct{}),
+		stopped:        make(chan struct{}),
+		unixSocketPath: unixSocketPath,
+	}
+	if unixSocketPath != "" {
+		unixListener, ok := listener.(*net.UnixListener)
+		if !ok {
+			_ = listener.Close()
+			return nil, fmt.Errorf("appservice unix listener for %s has unexpected type %T", unixSocketPath, listener)
+		}
+		unixListener.SetUnlinkOnClose(false)
+		runtime.unixSocketInfo, err = boundUnixSocketInfo(unixSocketPath)
+		if err != nil {
+			_ = listener.Close()
+			return nil, err
+		}
+		s.as.Log.Info().Str("socket", unixSocketPath).Msg("Starting unix socket HTTP listener")
+	} else {
+		s.as.Log.Info().Str("address", listener.Addr().String()).Msg("Starting HTTP listener")
+	}
+	s.appServiceHTTP = runtime
+	go s.serveAppServiceHTTP(runtime)
+	return runtime, nil
+}
+
+func (s *Server) serveAppServiceHTTP(runtime *appServiceHTTPRuntime) {
+	err := runtime.server.Serve(runtime.listener)
+	s.appServiceLifecycleMu.Lock()
+	runtime.serveErr = err
+	close(runtime.done)
+	s.appServiceLifecycleMu.Unlock()
+}
+
+func (s *Server) appServiceHTTPServeError(runtime *appServiceHTTPRuntime) error {
+	s.appServiceLifecycleMu.Lock()
+	defer s.appServiceLifecycleMu.Unlock()
+	return runtime.serveErr
+}
+
+func (s *Server) stopAppServiceHTTP(runtime *appServiceHTTPRuntime) {
+	if runtime == nil {
+		return
+	}
+	runtime.stopOnce.Do(func() {
+		defer close(runtime.stopped)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), appServiceHTTPShutdownTimeout)
+		err := runtime.server.Shutdown(shutdownCtx)
+		cancel()
+		if err != nil {
+			_ = runtime.server.Close()
+		}
+		<-runtime.done
+		unlinkOwnedUnixSocket(runtime.unixSocketPath, runtime.unixSocketInfo)
+
+		s.appServiceLifecycleMu.Lock()
+		if s.appServiceHTTP == runtime {
+			s.appServiceHTTP = nil
+		}
+		s.appServiceLifecycleMu.Unlock()
+	})
+	<-runtime.stopped
+}
+
+func requireUnixSocketPathAbsent(socketPath string) error {
+	_, err := os.Lstat(socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect appservice unix socket path %s: %w", socketPath, err)
+	}
+	return fmt.Errorf("appservice unix socket path %s already exists; remove it manually after confirming no process is using it", socketPath)
+}
+
+func boundUnixSocketInfo(socketPath string) (os.FileInfo, error) {
+	owned, err := os.Lstat(socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect bound appservice unix socket %s: %w", socketPath, err)
+	}
+	if owned.Mode()&os.ModeSocket == 0 {
+		return nil, fmt.Errorf("bound appservice unix socket path %s is not a socket", socketPath)
+	}
+	return owned, nil
+}
+
+func unlinkOwnedUnixSocket(socketPath string, owned os.FileInfo) {
+	if socketPath == "" || owned == nil {
+		return
+	}
+	current, err := os.Lstat(socketPath)
+	if err == nil && os.SameFile(owned, current) {
+		_ = os.Remove(socketPath)
+	}
 }
 
 func (s *Server) bootstrapStartupSpaces(ctx context.Context, loggedIn bool) {

@@ -106,7 +106,11 @@ func mergeImagePackContent(dst, src *event.ImagePackEventContent) int {
 func (s *Server) handleStickersCommand(ctx context.Context, room id.RoomID, sender id.UserID, rest string) {
 	fields := strings.Fields(rest)
 	if len(fields) == 0 || fields[0] == "help" || fields[0] == "帮助" {
-		s.notice(ctx, room, fmt.Sprintf("用法:\n%s stickers add <shortcode> <mxc-or-image-url> [label]\n%s stickers status\n%s stickers repair\n\n会把图片加入当前微信账号 Space，并同步 Element 兼容 pack 到 portal rooms。", s.commandPrefix(), s.commandPrefix(), s.commandPrefix()))
+		s.notice(ctx, room, fmt.Sprintf("用法:\n%s stickers add <shortcode> <mxc-or-image-url> [label]\n%s stickers status\n%s stickers repair\n%s stickers import wechat --ack-no-license\n\n会把图片加入当前微信账号 Space，并同步 Element 兼容 pack 到 portal rooms。WeChat 内置表情源没有明确 license；导入会 copy/上传图片，确认风险不会授予任何权利。", s.commandPrefix(), s.commandPrefix(), s.commandPrefix(), s.commandPrefix()))
+		return
+	}
+	if fields[0] == "import" || fields[0] == "导入" {
+		s.handleBuiltinEmojiImportCommand(ctx, room, sender, rest)
 		return
 	}
 	account := s.currentAccountID(ctx)
