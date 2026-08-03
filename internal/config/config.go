@@ -229,11 +229,11 @@ func resolveComparablePath(path string) (string, error) {
 		}
 		canonical, err := filepath.EvalSymlinks(candidate)
 		if err != nil {
-			if !os.IsNotExist(err) {
-				return "", err
-			}
-			resolved = candidate
-			continue
+			// Lstat proved that this component exists. If evaluating it still
+			// fails (including ENOENT for a dangling symlink), treating it as an
+			// ordinary missing path would make later ".." components resolve
+			// differently once the symlink target appears. Fail closed instead.
+			return "", err
 		}
 		resolved = canonical
 	}

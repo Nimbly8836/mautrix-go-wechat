@@ -209,6 +209,40 @@ func TestBridgeWechatBuiltinEmojiFileRejectsSymlinkTraversalCollisions(t *testin
 		}
 	})
 
+	t.Run("dangling symlink fails closed", func(t *testing.T) {
+		danglingDir := filepath.Join(dir, "dangling")
+		if err := os.Mkdir(danglingDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		danglingLink := filepath.Join(danglingDir, "link")
+		if err := os.Symlink(filepath.Join(victimDir, "future-subdir"), danglingLink); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		absoluteCandidate := danglingLink + separator + ".." + separator + "config.yaml"
+		cfg := &Config{Bridge: Bridge{WechatBuiltinEmojiFile: absoluteCandidate}}
+		if err := cfg.ValidateBridgePathCollisions(protectedPath, ""); err == nil || !strings.Contains(err.Error(), "resolve bridge.wechat_builtin_emoji_file") {
+			t.Fatalf("dangling absolute symlink error = %v, want fail-closed resolution", err)
+		}
+
+		oldWorkingDir, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Chdir(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if chdirErr := os.Chdir(oldWorkingDir); chdirErr != nil {
+				t.Errorf("restore working directory: %v", chdirErr)
+			}
+		})
+		relativeCandidate := "dangling" + separator + "link" + separator + ".." + separator + "config.yaml"
+		cfg.Bridge.WechatBuiltinEmojiFile = relativeCandidate
+		if err = cfg.ValidateBridgePathCollisions(protectedPath, ""); err == nil || !strings.Contains(err.Error(), "resolve bridge.wechat_builtin_emoji_file") {
+			t.Fatalf("dangling relative symlink error = %v, want fail-closed resolution", err)
+		}
+	})
+
 	t.Run("nonexistent component without symlink", func(t *testing.T) {
 		nonColliding := safeDir + separator + "missing" + separator + ".." + separator + "config.yaml"
 		cfg := &Config{Bridge: Bridge{WechatBuiltinEmojiFile: nonColliding}}
