@@ -150,6 +150,92 @@ func TestBridgeWechatBuiltinEmojiFileRejectsRuntimeConfigPathSymlinkAlias(t *tes
 	}
 }
 
+func TestBridgeWechatBuiltinEmojiFileRejectsSymlinkTraversalCollisions(t *testing.T) {
+	dir := t.TempDir()
+	safeDir := filepath.Join(dir, "safe")
+	victimDir := filepath.Join(dir, "victim")
+	victimSubdir := filepath.Join(victimDir, "subdir")
+	if err := os.MkdirAll(safeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(victimSubdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(safeDir, "link")
+	if err := os.Symlink(victimSubdir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	protectedPath := filepath.Join(victimDir, "config.yaml")
+	if err := os.WriteFile(protectedPath, []byte("protected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	separator := string(os.PathSeparator)
+	candidate := link + separator + ".." + separator + "config.yaml"
+
+	t.Run("config path", func(t *testing.T) {
+		cfg := &Config{Bridge: Bridge{WechatBuiltinEmojiFile: candidate}}
+		if err := cfg.ValidateBridgePathCollisions(protectedPath, ""); err == nil || !strings.Contains(err.Error(), "config path") {
+			t.Fatalf("symlink traversal config collision error = %v", err)
+		}
+	})
+
+	t.Run("state path", func(t *testing.T) {
+		cfg := &Config{Bridge: Bridge{
+			SessionFile:            protectedPath,
+			WechatBuiltinEmojiFile: candidate,
+		}}
+		if err := cfg.ValidateBridgePathCollisions("", ""); err == nil || !strings.Contains(err.Error(), "session_file") {
+			t.Fatalf("symlink traversal state collision error = %v", err)
+		}
+	})
+
+	t.Run("relative path", func(t *testing.T) {
+		oldWorkingDir, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Chdir(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if chdirErr := os.Chdir(oldWorkingDir); chdirErr != nil {
+				t.Errorf("restore working directory: %v", chdirErr)
+			}
+		})
+		relativeCandidate := "safe" + separator + "link" + separator + ".." + separator + "config.yaml"
+		cfg := &Config{Bridge: Bridge{WechatBuiltinEmojiFile: relativeCandidate}}
+		if err = cfg.ValidateBridgePathCollisions(protectedPath, ""); err == nil || !strings.Contains(err.Error(), "config path") {
+			t.Fatalf("relative symlink traversal collision error = %v", err)
+		}
+	})
+
+	t.Run("nonexistent component without symlink", func(t *testing.T) {
+		nonColliding := safeDir + separator + "missing" + separator + ".." + separator + "config.yaml"
+		cfg := &Config{Bridge: Bridge{WechatBuiltinEmojiFile: nonColliding}}
+		if err := cfg.ValidateBridgePathCollisions(protectedPath, ""); err != nil {
+			t.Fatalf("distinct traversal path rejected: %v", err)
+		}
+	})
+}
+
+func TestResolveComparablePathPreservesUnicodeComponents(t *testing.T) {
+	dir := t.TempDir()
+	canonicalDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	separator := string(os.PathSeparator)
+	path := dir + separator + "\u012f" + separator + "future.yaml"
+	resolved, err := resolveComparablePath(path)
+	if err != nil {
+		t.Fatalf("resolveComparablePath() error = %v", err)
+	}
+	want := filepath.Join(canonicalDir, "\u012f", "future.yaml")
+	if resolved != want {
+		t.Fatalf("resolveComparablePath() = %q, want %q", resolved, want)
+	}
+}
+
 func TestBridgeWechatBuiltinEmojiFilePathResolutionFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	loop := filepath.Join(dir, "loop")

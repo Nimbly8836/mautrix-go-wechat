@@ -192,37 +192,52 @@ func (c *Config) ValidateBridgePathCollisions(configPath, registrationPath strin
 	return nil
 }
 
-// resolveComparablePath resolves aliases in the deepest existing ancestor and
-// appends any nonexistent suffix. This catches both an existing symlink leaf
-// and a future file below a symlinked directory without following or mutating
-// either path.
+// resolveComparablePath resolves path components in filesystem order so that
+// an existing symlink is followed before a subsequent ".." is applied. Missing
+// components are retained until later components (including "..") are handled.
 func resolveComparablePath(path string) (string, error) {
-	absolute, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return "", err
-	}
-	current := absolute
-	var suffix []string
-	for {
-		if _, statErr := os.Lstat(current); statErr == nil {
-			resolved, evalErr := filepath.EvalSymlinks(current)
-			if evalErr != nil {
-				return "", evalErr
-			}
-			for index := len(suffix) - 1; index >= 0; index-- {
-				resolved = filepath.Join(resolved, suffix[index])
-			}
-			return filepath.Clean(resolved), nil
-		} else if !os.IsNotExist(statErr) {
-			return "", statErr
+	absolute := path
+	if !filepath.IsAbs(absolute) {
+		workingDir, err := os.Getwd()
+		if err != nil {
+			return "", err
 		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", fmt.Errorf("no existing ancestor for %q", absolute)
-		}
-		suffix = append(suffix, filepath.Base(current))
-		current = parent
+		absolute = workingDir + string(os.PathSeparator) + absolute
 	}
+
+	volume := filepath.VolumeName(absolute)
+	resolved := volume + string(os.PathSeparator)
+	components := strings.FieldsFunc(absolute[len(volume):], func(character rune) bool {
+		return character == rune(os.PathSeparator) || os.PathSeparator == '\\' && character == '/'
+	})
+	for _, component := range components {
+		switch component {
+		case ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+
+		candidate := filepath.Join(resolved, component)
+		if _, err := os.Lstat(candidate); err != nil {
+			if !os.IsNotExist(err) {
+				return "", err
+			}
+			resolved = candidate
+			continue
+		}
+		canonical, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return "", err
+			}
+			resolved = candidate
+			continue
+		}
+		resolved = canonical
+	}
+	return filepath.Clean(resolved), nil
 }
 
 func (c *Config) validate() error {
