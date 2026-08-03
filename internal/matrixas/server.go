@@ -246,7 +246,7 @@ func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 		if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
 			return
 		}
-		s.handlePortalMessage(ctx, rec, evt.Sender, strings.TrimSpace(msg.Body))
+		s.handlePortalMessage(ctx, rec, evt.Sender, msg.Body)
 		return
 	}
 	if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {

@@ -8,6 +8,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
+	"github.com/leat/mautrix-go-wechat/internal/wechat/textemoji"
 )
 
 func matrixEventTypeFromRemote(m *remoteapi.InboundMessage) event.Type {
@@ -24,7 +25,7 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 	}
 	switch m.Type {
 	case remoteapi.MsgText:
-		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: textemoji.ToShortcodes(body)}
 	case remoteapi.MsgImage:
 		if m.Media != nil && len(m.Media.Data) > 0 {
 			return &event.MessageEventContent{MsgType: event.MsgImage, Body: body}

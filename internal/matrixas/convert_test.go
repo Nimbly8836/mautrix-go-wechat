@@ -109,6 +109,41 @@ func TestMessageIDAliasesIncludesRawMessageID(t *testing.T) {
 	}
 }
 
+func TestMatrixContentFromRemoteTextMapsWechatEmojiAliasesAndPreservesWhitespace(t *testing.T) {
+	content := matrixContentFromRemote(&remoteapi.InboundMessage{
+		Type: remoteapi.MsgText,
+		Text: "  before [Smile][微笑] after  ",
+	})
+	want := "  before :wechat_smile::wechat_smile: after  "
+	if content.Body != want {
+		t.Fatalf("unexpected text body: got %q want %q", content.Body, want)
+	}
+}
+
+func TestMatrixContentFromRemoteDoesNotMapWechatEmojiAliasesOutsideText(t *testing.T) {
+	const body = "prefix [Smile] :wechat_smile: suffix"
+	tests := []struct {
+		name  string
+		msg   *remoteapi.InboundMessage
+		label string
+	}{
+		{name: "MsgType47Emoji", msg: &remoteapi.InboundMessage{Type: remoteapi.MsgEmoji, Text: body}, label: "emoji body"},
+		{name: "ImageCaption", msg: &remoteapi.InboundMessage{Type: remoteapi.MsgImage, Text: body, Media: &remoteapi.Media{Data: []byte("image")}}, label: "image caption"},
+		{name: "VideoCaption", msg: &remoteapi.InboundMessage{Type: remoteapi.MsgVideo, Text: body, Media: &remoteapi.Media{Data: []byte("video")}}, label: "video caption"},
+		{name: "AudioCaption", msg: &remoteapi.InboundMessage{Type: remoteapi.MsgAudio, Text: body, Media: &remoteapi.Media{Data: []byte("audio")}}, label: "audio caption"},
+		{name: "FileCaption", msg: &remoteapi.InboundMessage{Type: remoteapi.MsgFile, Text: body, Media: &remoteapi.Media{Data: []byte("file")}}, label: "file caption"},
+		{name: "AppXMLNotice", msg: &remoteapi.InboundMessage{Type: remoteapi.MsgApp, Text: "<msg>[Smile]</msg>"}, label: "app/XML notice"},
+		{name: "SystemNotice", msg: &remoteapi.InboundMessage{Type: remoteapi.MessageType(99), Text: body}, label: "system notice"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matrixContentFromRemote(tt.msg).Body; got != tt.msg.Text {
+				t.Fatalf("%s changed: got %q want %q", tt.label, got, tt.msg.Text)
+			}
+		})
+	}
+}
+
 func TestMatrixContentFromRemoteVideoWithoutMediaFallsBackToText(t *testing.T) {
 	content := matrixContentFromRemote(&remoteapi.InboundMessage{
 		Type: remoteapi.MsgVideo,

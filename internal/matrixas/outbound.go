@@ -11,6 +11,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
+	"github.com/leat/mautrix-go-wechat/internal/wechat/textemoji"
 )
 
 func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord, sender id.UserID, msg *event.MessageEventContent, eventType event.Type) {
@@ -137,7 +138,7 @@ func isGIFMedia(data []byte, mimeType, fileName string) bool {
 }
 
 func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, sender id.UserID, body string) {
-	if body == "" {
+	if strings.TrimSpace(body) == "" {
 		return
 	}
 	if !s.allowed(sender) {
@@ -147,7 +148,8 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 	// Allow prefixed local portal commands without leaking them to WeChat.
 	cmd, _, ok := parsePortalCommand(body, s.commandPrefix())
 	if !ok {
-		msgID, err := s.api.SendMessage(ctx, rec.ChatID, remoteapi.OutgoingMessage{Type: remoteapi.MsgText, Text: body})
+		wechatText := textemoji.ToChineseTokens(body)
+		msgID, err := s.api.SendMessage(ctx, rec.ChatID, remoteapi.OutgoingMessage{Type: remoteapi.MsgText, Text: wechatText})
 		if err != nil {
 			log.Printf("failed to send Matrix msg to WeChat chat=%s sender=%s: %v", rec.ChatID, sender, err)
 			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
