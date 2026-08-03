@@ -25,6 +25,7 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/config"
 	"github.com/leat/mautrix-go-wechat/internal/connector"
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
+	"github.com/leat/mautrix-go-wechat/internal/wechat/textemoji"
 )
 
 // Server owns the Matrix appservice, the remote connector and the management
@@ -384,6 +385,14 @@ func (s *Server) OnMessage(ctx context.Context, m *remoteapi.InboundMessage) {
 	s.bridgeRemoteToPortal(ctx, rec, m)
 }
 
+func hasKnownWechatEmojiShortcode(body string) bool {
+	known := false
+	textemoji.ScanShortcodes(body, func(_, _ int, _ textemoji.Entry) {
+		known = true
+	})
+	return known
+}
+
 func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *remoteapi.InboundMessage) {
 	sender := m.Sender
 	if sender == "" {
@@ -395,6 +404,14 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	}
 	content := matrixContentFromRemote(m)
 	eventType := matrixEventTypeFromRemote(m)
+	if m.Type == remoteapi.MsgText && hasKnownWechatEmojiShortcode(content.Body) {
+		images := s.resolvePortalBuiltinEmoji(ctx, rec.RoomID)
+		if formatted, used := formatInlineWechatEmoji(content.Body, images); used {
+			content.MsgType = event.MsgText
+			content.Format = event.FormatHTML
+			content.FormattedBody = formatted
+		}
+	}
 	if shouldUploadRemoteMedia(m, eventType, content) {
 		mimeType := m.Media.MimeType
 		if mimeType == "" {
