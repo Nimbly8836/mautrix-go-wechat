@@ -20,16 +20,28 @@ import (
 
 type builtinEmojiCommandTestAPI struct {
 	remoteapi.PuppetAPI
-	loggedIn bool
-	err      error
-	calls    atomic.Int32
-	contexts chan context.Context
+	loggedIn       bool
+	err            error
+	calls          atomic.Int32
+	contexts       chan context.Context
+	entered        chan struct{}
+	waitForContext bool
 }
 
 func (api *builtinEmojiCommandTestAPI) IsLoggedIn(ctx context.Context) (bool, error) {
 	api.calls.Add(1)
 	if api.contexts != nil {
 		api.contexts <- ctx
+	}
+	if api.entered != nil {
+		select {
+		case api.entered <- struct{}{}:
+		default:
+		}
+	}
+	if api.waitForContext {
+		<-ctx.Done()
+		return false, ctx.Err()
 	}
 	return api.loggedIn, api.err
 }
@@ -245,6 +257,82 @@ func TestBuiltinEmojiCommandUnauthorizedAndUnacknowledgedDoNoWorkOrReset(t *test
 	}
 }
 
+func TestBuiltinEmojiCommandPreflightIsAsynchronousAndIncludedInOverallTimeout(t *testing.T) {
+	for _, phase := range []string{"IsLoggedIn", "Space ensure"} {
+		t.Run(phase, func(t *testing.T) {
+			recorder := newBuiltinEmojiCommandNoticeRecorder()
+			api := &builtinEmojiCommandTestAPI{loggedIn: true, entered: make(chan struct{}, 1)}
+			if phase == "IsLoggedIn" {
+				api.waitForContext = true
+			}
+			s := commandTestServer(t, api, recorder)
+			runtime := s.captureBuiltinEmojiRuntime(context.Background())
+			defer s.clearBuiltinEmojiRuntime(runtime)
+			preflightEntered := api.entered
+			if phase == "Space ensure" {
+				preflightEntered = make(chan struct{}, 1)
+				s.builtinEmojiSpaceResolver = func(ctx context.Context, _ remoteapi.UserID) (id.RoomID, error) {
+					preflightEntered <- struct{}{}
+					<-ctx.Done()
+					return "", ctx.Err()
+				}
+			}
+			var requestedTimeout time.Duration
+			s.builtinEmojiContextFactory = func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+				requestedTimeout = timeout
+				return context.WithTimeout(parent, 25*time.Millisecond)
+			}
+
+			handlerDone := make(chan struct{})
+			go func() {
+				s.handleBuiltinEmojiImportCommand(context.Background(), "!initiating:example.org", "@admin:example.org", "import wechat --ack-no-license")
+				close(handlerDone)
+			}()
+			select {
+			case <-preflightEntered:
+			case <-time.After(time.Second):
+				t.Fatalf("%s preflight did not start", phase)
+			}
+			select {
+			case <-handlerDone:
+			case <-time.After(100 * time.Millisecond):
+				t.Fatalf("command handler blocked on %s preflight", phase)
+			}
+			if requestedTimeout != builtinEmojiCommandTimeout {
+				t.Fatalf("overall timeout = %s, want %s", requestedTimeout, builtinEmojiCommandTimeout)
+			}
+			recorder.waitFor(t, "!initiating:example.org", "preflight canceled or timed out")
+			waitBuiltinEmojiCommandSlotReleased(t, s)
+		})
+	}
+}
+
+func TestBuiltinEmojiImportExistingSpacePreflightDoesNotReconcileGlobalPacks(t *testing.T) {
+	accounts := newAccountStore(filepath.Join(t.TempDir(), "accounts.json"))
+	folders := make(map[string]string, len(accountSpaceFolders))
+	for _, folder := range accountSpaceFolders {
+		folders[folder.Key] = "!" + folder.Key + ":example.org"
+	}
+	if err := accounts.put(savedAccount{ID: "wxid_a", SpaceRoom: "!space:example.org", SpaceFolders: folders}); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newSpacePersistenceTestServerWithRecorder(t, accounts)
+	state := newFakeRawImagePackState()
+	s.rawImagePackState = state
+	s.builtinEmojiStore = &builtinEmojiStore{data: builtinEmojiTestData(builtinEmojiRecord{Shortcode: "wechat_smile", MXC: "mxc://canonical.example/smile"})}
+
+	space, err := s.resolveBuiltinEmojiImportSpace(context.Background(), "wxid_a")
+	if err != nil || space != "!space:example.org" {
+		t.Fatalf("existing structural Space = %s, %v", space, err)
+	}
+	state.mu.Lock()
+	saves := state.saves
+	state.mu.Unlock()
+	if saves != 0 {
+		t.Fatalf("existing Space preflight performed %d global pack writes", saves)
+	}
+}
+
 func TestBuiltinEmojiCommandStartNoticeCapturesTargetAndRejectsConcurrentRetarget(t *testing.T) {
 	recorder := newBuiltinEmojiCommandNoticeRecorder()
 	runParent, cancelRunParent := context.WithCancel(context.Background())
@@ -283,7 +371,7 @@ func TestBuiltinEmojiCommandStartNoticeCapturesTargetAndRejectsConcurrentRetarge
 	s.handleBuiltinEmojiImportCommand(context.Background(), initiatingRoom, sender, "import wechat --ack-no-license")
 
 	start := recorder.waitFor(t, initiatingRoom, "109")
-	for _, want := range []string{builtinEmojiSourceRepository, builtinEmojiSourceCommit, builtinEmojiSourcePath, "no explicit license", "wxid_a", "!space-a:example.org"} {
+	for _, want := range []string{builtinEmojiSourceRepository, builtinEmojiSourceCommit, builtinEmojiSourcePath, "no explicit license", "10 minutes", "including login and Space preflight", "wxid_a", "!space-a:example.org"} {
 		if !strings.Contains(start.Body, want) {
 			t.Fatalf("start notice %q does not contain %q", start.Body, want)
 		}
@@ -298,8 +386,8 @@ func TestBuiltinEmojiCommandStartNoticeCapturesTargetAndRejectsConcurrentRetarge
 	if childCtx == context.Background() || childCtx == context.TODO() {
 		t.Fatal("importer received a detached context")
 	}
-	if got := waitBuiltinEmojiCommandContext(t, api.contexts); got != runtime.ctx {
-		t.Fatal("IsLoggedIn did not use the captured Run context")
+	if got := waitBuiltinEmojiCommandContext(t, api.contexts); got != childCtx {
+		t.Fatal("IsLoggedIn did not use the overall bounded import context")
 	}
 
 	if err := s.accounts.put(savedAccount{ID: "wxid_b", SpaceRoom: "!space-b:example.org"}); err != nil {
@@ -363,7 +451,7 @@ func TestImportLifecyclePreflightFailuresReleaseGlobalSlot(t *testing.T) {
 
 			s.handleBuiltinEmojiImportCommand(context.Background(), "!management:example.org", "@admin:example.org", "import wechat --ack-no-license")
 
-			assertBuiltinEmojiCommandSlotReleased(t, s)
+			waitBuiltinEmojiCommandSlotReleased(t, s)
 			if test.name != "importer factory unavailable" && test.name != "context factory unavailable" && factories.Load() != 0 {
 				t.Fatalf("preflight failure built %d importers", factories.Load())
 			}
@@ -881,6 +969,24 @@ func waitBuiltinEmojiCommandContext(t *testing.T, contexts <-chan context.Contex
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for context")
 		return nil
+	}
+}
+
+func waitBuiltinEmojiCommandSlotReleased(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		s.importMu.Lock()
+		running := s.importRunning
+		s.importMu.Unlock()
+		if !running {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("global built-in emoji import slot was not released")
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 

@@ -146,7 +146,7 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			s.notice(ctx, room, fmt.Sprintf("用法: use <wxid>。发送 `%s accounts` 查看已保存账号。", s.commandPrefix()))
 			return
 		}
-		if err := s.useSavedAccount(wxid); err != nil {
+		if err := s.useSavedAccount(ctx, wxid); err != nil {
 			s.notice(ctx, room, fmt.Sprintf("切换账号失败: %v", err))
 			return
 		}
@@ -170,7 +170,10 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			s.notice(ctx, room, fmt.Sprintf("退出失败: %v", err))
 			return
 		}
-		s.stopRemote()
+		if err := s.stopRemote(ctx); err != nil {
+			s.notice(ctx, room, fmt.Sprintf("已退出 WeChat，但等待旧连接停止失败: %v", err))
+			return
+		}
 		s.notice(ctx, room, "已退出 WeChat。")
 	case "contacts", "联系人":
 		s.handleContactsCommand(ctx, room, rest)
@@ -317,7 +320,7 @@ func (s *Server) handleRefreshLoginCommand(ctx context.Context, room id.RoomID, 
 		s.notice(ctx, room, fmt.Sprintf("二次登录失败: %v", err))
 		return
 	}
-	if err := s.saveSessionLocked("twice"); err != nil {
+	if err := s.saveSessionLocked(ctx, "twice"); err != nil {
 		s.notice(ctx, room, fmt.Sprintf("二次登录成功，但保存会话失败: %v", err))
 		return
 	}
@@ -569,7 +572,7 @@ func (s *Server) activateAccountText(ctx context.Context, wxid remoteapi.UserID)
 	if len(info.Fields) == 0 {
 		return fmt.Sprintf("%s 没有返回登录缓存信息，无法作为当前登录账号。", wxid)
 	}
-	if err := s.saveSessionLocked("cache"); err != nil {
+	if err := s.saveSessionLocked(ctx, "cache"); err != nil {
 		return fmt.Sprintf("已激活 %s 的登录缓存，但保存当前会话失败: %v", wxid, err)
 	}
 	transition := spaceTransitionResult{}
@@ -719,7 +722,7 @@ func (s *Server) runLogin(ctx context.Context, room id.RoomID, owner id.UserID, 
 			return
 		case remoteapi.LoginComplete:
 			s.portals.setOwner(owner)
-			if err := s.saveSessionLocked(flowID); err != nil {
+			if err := s.saveSessionLocked(ctx, flowID); err != nil {
 				s.notice(ctx, room, fmt.Sprintf("登录成功，但保存会话失败: %v", err))
 				return
 			}

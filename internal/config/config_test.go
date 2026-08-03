@@ -97,6 +97,54 @@ func TestBridgeWechatBuiltinEmojiFileRejectsBridgeStatePathCollisions(t *testing
 	}
 }
 
+func TestBridgeWechatBuiltinEmojiFileRejectsSymlinkAliasCollisions(t *testing.T) {
+	t.Run("existing file symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "state.json")
+		if err := os.WriteFile(target, []byte("state"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(dir, "manifest.json")
+		if err := os.Symlink(target, alias); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		body := strings.Replace(baseConfigYAML, "bridge:\n", fmt.Sprintf("bridge:\n  session_file: %s\n  wechat_builtin_emoji_file: %s\n", target, alias), 1)
+		if _, err := Load(writeConfig(t, fmt.Sprintf(body, ""))); err == nil || !strings.Contains(err.Error(), "session_file") {
+			t.Fatalf("existing symlink collision error = %v", err)
+		}
+	})
+
+	t.Run("symlinked parent for nonexistent leaf", func(t *testing.T) {
+		dir := t.TempDir()
+		realParent := filepath.Join(dir, "real")
+		if err := os.Mkdir(realParent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		aliasParent := filepath.Join(dir, "alias")
+		if err := os.Symlink(realParent, aliasParent); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		realLeaf := filepath.Join(realParent, "future.json")
+		aliasLeaf := filepath.Join(aliasParent, "future.json")
+		body := strings.Replace(baseConfigYAML, "bridge:\n", fmt.Sprintf("bridge:\n  account_file: %s\n  wechat_builtin_emoji_file: %s\n", realLeaf, aliasLeaf), 1)
+		if _, err := Load(writeConfig(t, fmt.Sprintf(body, ""))); err == nil || !strings.Contains(err.Error(), "account_file") {
+			t.Fatalf("parent symlink collision error = %v", err)
+		}
+	})
+}
+
+func TestBridgeWechatBuiltinEmojiFilePathResolutionFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	loop := filepath.Join(dir, "loop")
+	if err := os.Symlink("loop", loop); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	body := strings.Replace(baseConfigYAML, "bridge:\n", fmt.Sprintf("bridge:\n  wechat_builtin_emoji_file: %s\n", filepath.Join(loop, "manifest.json")), 1)
+	if _, err := Load(writeConfig(t, fmt.Sprintf(body, ""))); err == nil || !strings.Contains(err.Error(), "resolve bridge.wechat_builtin_emoji_file") {
+		t.Fatalf("path resolution error = %v, want fail-closed manifest resolution", err)
+	}
+}
+
 func TestBridgeWechatBuiltinEmojiFileRejectsDefaultStatePathCollisions(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

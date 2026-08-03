@@ -66,7 +66,8 @@ type Bridge struct {
 	UsernameTemplate    string            `yaml:"username_template"`
 	DisplaynameTemplate string            `yaml:"displayname_template"`
 	Permissions         map[string]string `yaml:"permissions"`
-	// SessionFile stores the opaque remoteapi session blob (WeChat wxid/sync key).
+	// SessionFile is a deprecated read-only startup fallback for a legacy
+	// opaque remoteapi session blob. AccountFile is authoritative.
 	SessionFile string `yaml:"session_file"`
 	// PortalFile stores Matrix room mappings for remote chats.
 	PortalFile string `yaml:"portal_file"`
@@ -154,7 +155,10 @@ func (c *Config) resolveBridgePathDefaults() {
 // aliases bridge state or the appservice registration file.
 func (c *Config) ValidateBridgePathCollisions(registrationPath string) error {
 	c.resolveBridgePathDefaults()
-	builtinPath := cleanAbsolutePath(c.Bridge.WechatBuiltinEmojiFile)
+	builtinPath, err := resolveComparablePath(c.Bridge.WechatBuiltinEmojiFile)
+	if err != nil {
+		return fmt.Errorf("resolve bridge.wechat_builtin_emoji_file %q: %w", c.Bridge.WechatBuiltinEmojiFile, err)
+	}
 	statePaths := []struct {
 		name string
 		path string
@@ -172,20 +176,48 @@ func (c *Config) ValidateBridgePathCollisions(registrationPath string) error {
 		}{name: "registration path", path: registrationPath})
 	}
 	for _, statePath := range statePaths {
-		if builtinPath == cleanAbsolutePath(statePath.path) {
+		resolved, resolveErr := resolveComparablePath(statePath.path)
+		if resolveErr != nil {
+			return fmt.Errorf("resolve %s %q: %w", statePath.name, statePath.path, resolveErr)
+		}
+		if builtinPath == resolved {
 			return fmt.Errorf("bridge.wechat_builtin_emoji_file collides with %s at %q", statePath.name, builtinPath)
 		}
 	}
 	return nil
 }
 
-func cleanAbsolutePath(path string) string {
-	cleaned := filepath.Clean(path)
-	absolute, err := filepath.Abs(cleaned)
-	if err == nil {
-		return absolute
+// resolveComparablePath resolves aliases in the deepest existing ancestor and
+// appends any nonexistent suffix. This catches both an existing symlink leaf
+// and a future file below a symlinked directory without following or mutating
+// either path.
+func resolveComparablePath(path string) (string, error) {
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
 	}
-	return cleaned
+	current := absolute
+	var suffix []string
+	for {
+		if _, statErr := os.Lstat(current); statErr == nil {
+			resolved, evalErr := filepath.EvalSymlinks(current)
+			if evalErr != nil {
+				return "", evalErr
+			}
+			for index := len(suffix) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, suffix[index])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("no existing ancestor for %q", absolute)
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }
 
 func (c *Config) validate() error {

@@ -227,12 +227,13 @@ type builtinEmojiImportProgress struct {
 }
 
 type builtinEmojiImportHooks struct {
-	WorkerStarted func(int)
-	WorkerStopped func(int)
-	JobDispatched func(int)
-	JobStarted    func(int, int)
-	BeforeFetch   func(int)
-	BeforeUpload  func(int)
+	ControllerStarted func()
+	WorkerStarted     func(int)
+	WorkerStopped     func(int)
+	JobDispatched     func(int)
+	JobStarted        func(int, int)
+	BeforeFetch       func(int)
+	BeforeUpload      func(int)
 }
 
 type builtinEmojiImporter struct {
@@ -344,13 +345,36 @@ func (importer *builtinEmojiImporter) Run(ctx context.Context) builtinEmojiImpor
 	}
 
 	workContext, cancelWork := context.WithCancel(ctx)
-	defer cancelWork()
 	jobs := make(chan builtinEmojiImportJob)
 	outcomes := make(chan builtinEmojiImportOutcome, builtinEmojiImportWorkerCount)
 	var workers sync.WaitGroup
 	workers.Add(builtinEmojiImportWorkerCount)
 	for workerIndex := 0; workerIndex < builtinEmojiImportWorkerCount; workerIndex++ {
 		go importer.runWorker(workContext, workerIndex, jobs, outcomes, &workers)
+	}
+	workersDone := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(workersDone)
+	}()
+	var closeJobsOnce sync.Once
+	closeJobs := func() { closeJobsOnce.Do(func() { close(jobs) }) }
+	drainWorkers := func() {
+		for {
+			select {
+			case <-outcomes:
+			case <-workersDone:
+				return
+			}
+		}
+	}
+	defer func() {
+		cancelWork()
+		closeJobs()
+		drainWorkers()
+	}()
+	if importer.hooks.ControllerStarted != nil {
+		importer.hooks.ControllerStarted()
 	}
 
 	nextDispatch := 0
@@ -428,8 +452,8 @@ func (importer *builtinEmojiImporter) Run(ctx context.Context) builtinEmojiImpor
 		}
 	}
 
-	close(jobs)
-	workers.Wait()
+	closeJobs()
+	drainWorkers()
 
 	if stopReason == builtinEmojiImportRunning && ctx.Err() != nil {
 		stop(builtinEmojiImportStoppedByCancellation)
@@ -533,6 +557,8 @@ func (importer *builtinEmojiImporter) runJob(ctx context.Context, workerIndex in
 		if safeReason == "" {
 			safeReason = safeBuiltinEmojiImportReason(failureCode)
 		}
+		outcome.failure.Reason = safeReason
+		outcome.failure.HTTPStatus = status
 		fields := builtinEmojiEntryLogFields(importer.account, job.entry, builtinEmojiImportStageFetch, builtinEmojiLogCodeFetchFailed)
 		fields.Reason = safeReason
 		fields.HTTPStatus = status
@@ -670,8 +696,18 @@ func (importer *builtinEmojiImporter) commitBatch(ctx context.Context, outcomes 
 		importer.recordBatch(batch, result)
 		return builtinEmojiImportCommitResult{stopReason: builtinEmojiImportStoppedByPersistence}
 	}
-	if ctx.Err() != nil {
+	locked := true
+	defer func() {
+		if locked {
+			locker.Unlock()
+		}
+	}()
+	unlock := func() {
 		locker.Unlock()
+		locked = false
+	}
+	if ctx.Err() != nil {
+		unlock()
 		return builtinEmojiImportCommitResult{stopReason: builtinEmojiImportStoppedByCancellation, remaining: outcomes}
 	}
 
@@ -680,7 +716,7 @@ func (importer *builtinEmojiImporter) commitBatch(ctx context.Context, outcomes 
 	recheckedOutcomes := make([]builtinEmojiImportOutcome, 0)
 	for index, outcome := range outcomes {
 		if ctx.Err() != nil {
-			locker.Unlock()
+			unlock()
 			importer.recordRecheckedOutcomes(recheckedOutcomes, result)
 			remaining := append(persistedOutcomes, outcomes[index:]...)
 			return builtinEmojiImportCommitResult{stopReason: builtinEmojiImportStoppedByCancellation, remaining: remaining}
@@ -699,7 +735,7 @@ func (importer *builtinEmojiImporter) commitBatch(ctx context.Context, outcomes 
 	}
 
 	if ctx.Err() != nil {
-		locker.Unlock()
+		unlock()
 		importer.recordRecheckedOutcomes(recheckedOutcomes, result)
 		return builtinEmojiImportCommitResult{stopReason: builtinEmojiImportStoppedByCancellation, remaining: persistedOutcomes}
 	}
@@ -710,7 +746,7 @@ func (importer *builtinEmojiImporter) commitBatch(ctx context.Context, outcomes 
 			err = errors.New("store persister unavailable")
 		} else {
 			if ctx.Err() != nil {
-				locker.Unlock()
+				unlock()
 				importer.recordRecheckedOutcomes(recheckedOutcomes, result)
 				result.BatchSizes = result.BatchSizes[:len(result.BatchSizes)-1]
 				return builtinEmojiImportCommitResult{stopReason: builtinEmojiImportStoppedByCancellation, remaining: persistedOutcomes}
@@ -718,7 +754,7 @@ func (importer *builtinEmojiImporter) commitBatch(ctx context.Context, outcomes 
 			err = importer.storePersister.PersistMerged(replacements)
 		}
 		if err != nil {
-			locker.Unlock()
+			unlock()
 			batch.Persistence = builtinEmojiPersistenceFailed
 			result.Persistence = builtinEmojiPersistenceFailed
 			importer.recordRecheckedOutcomes(recheckedOutcomes, result)
@@ -738,7 +774,7 @@ func (importer *builtinEmojiImporter) commitBatch(ctx context.Context, outcomes 
 		importer.logBuiltinEmojiReconciliation(batch.Reconciliation, batch.AccountData, result)
 		canceledAfterPersistence = ctx.Err() != nil
 	}
-	locker.Unlock()
+	unlock()
 
 	importer.recordRecheckedOutcomes(recheckedOutcomes, result)
 	if batch.Persisted > 0 {
@@ -844,12 +880,22 @@ func (importer *builtinEmojiImporter) finalReconcile(ctx context.Context, result
 		}
 		return
 	}
-	if ctx.Err() != nil {
+	locked := true
+	defer func() {
+		if locked {
+			locker.Unlock()
+		}
+	}()
+	unlock := func() {
 		locker.Unlock()
+		locked = false
+	}
+	if ctx.Err() != nil {
+		unlock()
 		return
 	}
 	reconciliation, accountData := importer.reconcileLocked(ctx)
-	locker.Unlock()
+	unlock()
 	result.FinalReconciliation = safeBuiltinEmojiReconciliationStatus(reconciliation)
 	result.AccountData = safeBuiltinEmojiAccountDataStatus(accountData)
 	importer.logBuiltinEmojiReconciliation(result.FinalReconciliation, result.AccountData, result)

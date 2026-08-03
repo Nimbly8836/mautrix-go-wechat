@@ -33,6 +33,7 @@ type builtinEmojiRuntime struct {
 }
 
 type builtinEmojiImportTarget struct {
+	api     remoteapi.PuppetAPI
 	account remoteapi.UserID
 	space   id.RoomID
 	room    id.RoomID
@@ -107,87 +108,40 @@ func (s *Server) handleBuiltinEmojiImportCommand(eventCtx context.Context, room 
 	if !ok {
 		return
 	}
-
-	if s.builtinEmojiStore == nil {
-		s.safeBuiltinEmojiNotice(runtime.ctx, room, "WeChat built-in emoji import cannot start because the canonical store is unavailable.")
-		return
-	}
-	if s.builtinEmojiStore.LoadError() != nil {
-		now := time.Now()
-		if s.builtinEmojiNow != nil {
-			now = s.builtinEmojiNow()
-		}
-		if err := s.builtinEmojiStore.ResetForAcknowledgedImport(now); err != nil {
-			s.safeBuiltinEmojiNotice(runtime.ctx, room, "WeChat built-in emoji import aborted: the invalid canonical store could not be quarantined and reset.")
-			return
-		}
-	}
-
-	runner := s.buildBuiltinEmojiImportRunner()
-	if runner == nil {
-		s.safeBuiltinEmojiNotice(runtime.ctx, room, "WeChat built-in emoji import cannot start because the importer is unavailable.")
-		return
-	}
-	if loggingRunner, ok := runner.(builtinEmojiImportLoggingRunner); ok {
-		loggingRunner.setBuiltinEmojiLogging(target.account, s.logBuiltinEmoji)
-	}
-
 	importCtx, cancelImport := s.newBuiltinEmojiImportContext(runtime.ctx)
 	if importCtx == nil || cancelImport == nil {
 		s.safeBuiltinEmojiNotice(runtime.ctx, room, "WeChat built-in emoji import cannot start because its bounded context is unavailable.")
 		return
 	}
-	runner.setProgressNotice(func(progress builtinEmojiImportProgress) {
-		s.safeBuiltinEmojiNotice(importCtx, target.room, formatBuiltinEmojiImportProgress(progress))
-	})
 
-	s.safeBuiltinEmojiNotice(runtime.ctx, target.room, builtinEmojiImportStartNotice(target))
-	s.logBuiltinEmoji(builtinEmojiLogFields{
-		Account: target.account,
-		Stage:   builtinEmojiImportStageImport,
-		Code:    builtinEmojiLogCodeStarted,
-		Total:   109,
-	})
 	launched = true
-	go s.runBuiltinEmojiImport(importCtx, cancelImport, runner, target)
+	go s.runBuiltinEmojiImport(importCtx, cancelImport, target)
 }
 
 func (s *Server) captureBuiltinEmojiImportTarget(ctx context.Context, room id.RoomID, sender id.UserID) (builtinEmojiImportTarget, bool) {
 	s.accountTransitionMu.Lock()
-	defer s.accountTransitionMu.Unlock()
-
+	s.mu.Lock()
 	api := s.api
+	s.mu.Unlock()
+	account, exists := s.accounts.current()
+	s.accountTransitionMu.Unlock()
+
 	if api == nil {
 		s.safeBuiltinEmojiNotice(ctx, room, "WeChat built-in emoji import requires a captured logged-in API session.")
 		return builtinEmojiImportTarget{}, false
 	}
-	loggedIn, err := api.IsLoggedIn(ctx)
-	if err != nil {
-		s.safeBuiltinEmojiNotice(ctx, room, "WeChat built-in emoji import could not verify the captured API login.")
-		return builtinEmojiImportTarget{}, false
-	}
-	if !loggedIn {
-		s.safeBuiltinEmojiNotice(ctx, room, "WeChat built-in emoji import requires a currently logged-in API session.")
-		return builtinEmojiImportTarget{}, false
-	}
-	account, exists := s.accounts.current()
 	if !exists || account.ID == "" {
 		s.safeBuiltinEmojiNotice(ctx, room, "WeChat built-in emoji import requires one current saved account.")
 		return builtinEmojiImportTarget{}, false
 	}
-	space, err := s.resolveBuiltinEmojiImportSpace(ctx, account.ID)
-	if err != nil || space == "" {
-		s.safeBuiltinEmojiNotice(ctx, room, "WeChat built-in emoji import requires an available Space for the captured account.")
-		return builtinEmojiImportTarget{}, false
-	}
-	return builtinEmojiImportTarget{account: account.ID, space: space, room: room, sender: sender}, true
+	return builtinEmojiImportTarget{api: api, account: account.ID, room: room, sender: sender}, true
 }
 
 func (s *Server) resolveBuiltinEmojiImportSpace(ctx context.Context, account remoteapi.UserID) (id.RoomID, error) {
 	if s.builtinEmojiSpaceResolver != nil {
 		return s.builtinEmojiSpaceResolver(ctx, account)
 	}
-	return s.ensureAccountSpace(ctx, account)
+	return s.ensureAccountSpaceStructural(ctx, account)
 }
 
 func (s *Server) buildBuiltinEmojiImportRunner() (runner builtinEmojiImportRunner) {
@@ -215,7 +169,7 @@ func (s *Server) newBuiltinEmojiImportContext(parent context.Context) (ctx conte
 	return context.WithTimeout(parent, builtinEmojiCommandTimeout)
 }
 
-func (s *Server) runBuiltinEmojiImport(importCtx context.Context, cancelImport context.CancelFunc, runner builtinEmojiImportRunner, target builtinEmojiImportTarget) {
+func (s *Server) runBuiltinEmojiImport(importCtx context.Context, cancelImport context.CancelFunc, target builtinEmojiImportTarget) {
 	var result builtinEmojiImportResult
 	var importErr error
 	completed := false
@@ -271,6 +225,77 @@ func (s *Server) runBuiltinEmojiImport(importCtx context.Context, cancelImport c
 		}
 	}()
 
+	preflightFailure := func(message string) {
+		s.safeBuiltinEmojiBestEffortNotice(target.room, message)
+	}
+	loggedIn, err := target.api.IsLoggedIn(importCtx)
+	if err != nil {
+		if importCtx.Err() != nil {
+			preflightFailure("WeChat built-in emoji import preflight canceled or timed out while checking the captured API login.")
+		} else {
+			preflightFailure("WeChat built-in emoji import could not verify the captured API login.")
+		}
+		return
+	}
+	if !loggedIn {
+		preflightFailure("WeChat built-in emoji import requires the captured API session to still be logged in.")
+		return
+	}
+	space, err := s.resolveBuiltinEmojiImportSpace(importCtx, target.account)
+	if err != nil || space == "" {
+		if importCtx.Err() != nil {
+			preflightFailure("WeChat built-in emoji import preflight canceled or timed out while ensuring the captured account Space.")
+		} else {
+			preflightFailure("WeChat built-in emoji import requires an available Space for the captured account.")
+		}
+		return
+	}
+	target.space = space
+	if importCtx.Err() != nil {
+		preflightFailure("WeChat built-in emoji import preflight canceled or timed out before importer startup.")
+		return
+	}
+	if s.builtinEmojiStore == nil {
+		preflightFailure("WeChat built-in emoji import cannot start because the canonical store is unavailable.")
+		return
+	}
+	if s.builtinEmojiStore.LoadError() != nil {
+		now := time.Now()
+		if s.builtinEmojiNow != nil {
+			now = s.builtinEmojiNow()
+		}
+		if err = s.builtinEmojiStore.ResetForAcknowledgedImport(now); err != nil {
+			preflightFailure("WeChat built-in emoji import aborted: the invalid canonical store could not be quarantined and reset.")
+			return
+		}
+	}
+	if importCtx.Err() != nil {
+		preflightFailure("WeChat built-in emoji import preflight canceled or timed out before importer startup.")
+		return
+	}
+	runner := s.buildBuiltinEmojiImportRunner()
+	if runner == nil {
+		preflightFailure("WeChat built-in emoji import cannot start because the importer is unavailable.")
+		return
+	}
+	if loggingRunner, ok := runner.(builtinEmojiImportLoggingRunner); ok {
+		loggingRunner.setBuiltinEmojiLogging(target.account, s.logBuiltinEmoji)
+	}
+	runner.setProgressNotice(func(progress builtinEmojiImportProgress) {
+		s.safeBuiltinEmojiNotice(importCtx, target.room, formatBuiltinEmojiImportProgress(progress))
+	})
+
+	s.safeBuiltinEmojiNotice(importCtx, target.room, builtinEmojiImportStartNotice(target))
+	if importCtx.Err() != nil {
+		preflightFailure("WeChat built-in emoji import preflight canceled or timed out before importer startup.")
+		return
+	}
+	s.logBuiltinEmoji(builtinEmojiLogFields{
+		Account: target.account,
+		Stage:   builtinEmojiImportStageImport,
+		Code:    builtinEmojiLogCodeStarted,
+		Total:   109,
+	})
 	result = runner.Run(importCtx)
 	importErr = importCtx.Err()
 	completed = true
@@ -384,7 +409,7 @@ func builtinEmojiImportRiskNotice(prefix string) string {
 }
 
 func builtinEmojiImportStartNotice(target builtinEmojiImportTarget) string {
-	return fmt.Sprintf("Starting WeChat built-in emoji import.\nSource repository: %s\nPinned commit: %s\nSource path: %s\nWarning: no explicit license was found; copying and possible redistribution are at the operator's risk and acknowledgment grants no rights.\nTotal: 109\nCaptured account: %s\nCaptured Space: %s", builtinEmojiSourceRepository, builtinEmojiSourceCommit, builtinEmojiSourcePath, target.account, target.space)
+	return fmt.Sprintf("Starting WeChat built-in emoji import.\nSource repository: %s\nPinned commit: %s\nSource path: %s\nWarning: no explicit license was found; copying and possible redistribution are at the operator's risk and acknowledgment grants no rights.\nTotal: 109\nOverall time limit: 10 minutes, including login and Space preflight.\nCaptured account: %s\nCaptured Space: %s", builtinEmojiSourceRepository, builtinEmojiSourceCommit, builtinEmojiSourcePath, target.account, target.space)
 }
 
 func formatBuiltinEmojiImportProgress(progress builtinEmojiImportProgress) string {

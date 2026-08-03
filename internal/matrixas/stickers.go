@@ -486,12 +486,49 @@ func stickerImageRaw(sticker wechatStickerImage) (string, json.RawMessage, error
 	return shortcode, raw, err
 }
 
-func mergeRawPackImageSets(dst map[string]json.RawMessage, raw json.RawMessage) {
+func mergeRawPackImageSets(dst map[string]json.RawMessage, raw json.RawMessage, includeBuiltinRegistry bool) {
+	registry := builtinEmojiRegistryIndexes()
 	for shortcode, image := range rawPackImageObjects(raw) {
+		if !includeBuiltinRegistry {
+			if _, builtin := registry[shortcode]; builtin {
+				continue
+			}
+		}
 		if _, exists := dst[shortcode]; !exists {
 			dst[shortcode] = image
 		}
 	}
+}
+
+// sanitizeStickerPackReplacementsLocked makes the local built-in manifest
+// authoritative for every registry shortcode touched by an account-specific
+// writer. Callers must hold packMu. A registry shortcode that has not been
+// imported yet retains the account-specific replacement.
+func (s *Server) sanitizeStickerPackReplacementsLocked(replacements map[string]json.RawMessage) map[string]json.RawMessage {
+	sanitized := make(map[string]json.RawMessage, len(replacements))
+	for shortcode, replacement := range replacements {
+		sanitized[shortcode] = append(json.RawMessage(nil), replacement...)
+	}
+	if s.builtinEmojiStore == nil || s.builtinEmojiStore.LoadError() != nil {
+		return sanitized
+	}
+	registry := builtinEmojiRegistryIndexes()
+	for shortcode, replacement := range sanitized {
+		if _, builtin := registry[shortcode]; !builtin {
+			continue
+		}
+		mxc, ok := s.builtinEmojiStore.Get(shortcode)
+		if _, valid := validMXC(mxc); !ok || !valid {
+			continue
+		}
+		image := make(map[string]json.RawMessage)
+		if json.Unmarshal(replacement, &image) != nil || image == nil {
+			image = make(map[string]json.RawMessage)
+		}
+		image["url"], _ = json.Marshal(mxc)
+		sanitized[shortcode], _ = json.Marshal(image)
+	}
+	return sanitized
 }
 
 func (s *Server) savePackImageReplacementsLocked(ctx context.Context, account remoteapi.UserID, room id.RoomID, target imagePackStateEventTarget, replacements map[string]json.RawMessage) (json.RawMessage, error) {
@@ -499,7 +536,7 @@ func (s *Server) savePackImageReplacementsLocked(ctx context.Context, account re
 	if err != nil {
 		return nil, err
 	}
-	merged, err := mergePackImages(raw, replacements)
+	merged, err := mergePackImages(raw, s.sanitizeStickerPackReplacementsLocked(replacements))
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +569,8 @@ func (s *Server) repairStickerPacksForAccountLocked(ctx context.Context, account
 	replacements := make(map[string]json.RawMessage)
 	for _, target := range imagePackStateEventTargets(stateKey) {
 		if raw, err := s.packState().Load(ctx, space, target.EventType, target.StateKey); err == nil {
-			mergeRawPackImageSets(replacements, raw)
+			includeBuiltinRegistry := target.EventType != event.StateUnstableImagePack || target.StateKey != ""
+			mergeRawPackImageSets(replacements, raw, includeBuiltinRegistry)
 		}
 	}
 	if s.as != nil && s.as.BotIntent() != nil && s.as.BotIntent().Client != nil {
@@ -544,7 +582,8 @@ func (s *Server) repairStickerPacksForAccountLocked(ctx context.Context, account
 				for _, target := range imagePackStateEventTargets(stateKey) {
 					for _, alias := range target.Aliases {
 						if raw, loadErr := s.packState().Load(ctx, room, target.EventType, alias); loadErr == nil {
-							mergeRawPackImageSets(replacements, raw)
+							includeBuiltinRegistry := target.EventType != event.StateUnstableImagePack || alias != ""
+							mergeRawPackImageSets(replacements, raw, includeBuiltinRegistry)
 						}
 					}
 				}
@@ -689,6 +728,7 @@ func (s *Server) removeStickerPackFromRoomLocked(ctx context.Context, account re
 func (s *Server) patchStickerPackImagesToRoomLocked(ctx context.Context, account remoteapi.UserID, room id.RoomID, replacements map[string]json.RawMessage) (json.RawMessage, error) {
 	stateKey := wechatStickerPackStateKey(account)
 	targets := imagePackStateEventTargets(stateKey)
+	replacements = s.sanitizeStickerPackReplacementsLocked(replacements)
 	prepared := make([]json.RawMessage, len(targets))
 	for index, target := range targets {
 		raw, err := s.loadStickerPackOrBaseLocked(ctx, account, room, target.EventType, target.StateKey)

@@ -439,10 +439,10 @@ func TestBuiltinEmojiImportReportsSortedBoundedPartialFailuresTimeoutsAndWorkerP
 	}
 	result := importer.Run(context.Background())
 	want := []builtinEmojiImportFailure{
-		{RegistryIndex: 1, Shortcode: "wechat_smile", Stage: builtinEmojiImportStageFetch, Code: builtinEmojiImportCodeFetchFailed},
+		{RegistryIndex: 1, Shortcode: "wechat_smile", Stage: builtinEmojiImportStageFetch, Code: builtinEmojiImportCodeFetchFailed, Reason: builtinEmojiSafeReason(builtinEmojiImportCodeFetchFailed)},
 		{RegistryIndex: 2, Shortcode: "wechat_grimace", Stage: builtinEmojiImportStageUpload, Code: builtinEmojiImportCodeUploadFailed},
 		{RegistryIndex: 3, Shortcode: "wechat_drool", Stage: builtinEmojiImportStageWorker, Code: builtinEmojiImportCodeWorkerPanic},
-		{RegistryIndex: 4, Shortcode: "wechat_scowl", Stage: builtinEmojiImportStageFetch, Code: builtinEmojiImportCodeOperationTimeout},
+		{RegistryIndex: 4, Shortcode: "wechat_scowl", Stage: builtinEmojiImportStageFetch, Code: builtinEmojiImportCodeOperationTimeout, Reason: builtinEmojiSafeReason(builtinEmojiImportCodeOperationTimeout)},
 		{RegistryIndex: 5, Shortcode: "wechat_chill", Stage: builtinEmojiImportStageUpload, Code: builtinEmojiImportCodeOperationTimeout},
 	}
 	if !reflect.DeepEqual(result.Failures, want) {

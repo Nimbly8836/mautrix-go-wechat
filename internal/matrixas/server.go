@@ -41,12 +41,17 @@ type appServiceHTTPRuntime struct {
 	unixSocketInfo os.FileInfo
 }
 
+type remoteConnector interface {
+	Run(context.Context) error
+	API() remoteapi.PuppetAPI
+}
+
 // Server owns the Matrix appservice, the remote connector and the management
 // bot command loop.
 type Server struct {
 	cfg                              *config.Config
 	as                               *appservice.AppService
-	conn                             *connector.Connector
+	conn                             remoteConnector
 	api                              remoteapi.PuppetAPI
 	apiCfg                           remoteapi.Config
 	sessionFile                      string
@@ -54,7 +59,7 @@ type Server struct {
 	accounts                         *accountStore
 	contacts                         *contactStore
 	builtinEmojiStore                *builtinEmojiStore
-	newConnector                     func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error)
+	newConnector                     func(string, remoteapi.Config, connector.EventSink) (remoteConnector, error)
 	newBuiltinPackVisibilityClient   func(id.UserID, string) (builtinPackVisibilityClient, error)
 	builtinEmojiImporterFactory      func() builtinEmojiImportRunner
 	builtinEmojiContextFactory       func(context.Context, time.Duration) (context.Context, context.CancelFunc)
@@ -85,19 +90,24 @@ type Server struct {
 	afterPortalSnapshot    func([]portalRecord)
 	beforePackLock         func()
 	beforeAccountDataLock  func()
+	beforeRemoteRun        func(uint64)
 	matrixOperationTimeout time.Duration
+	remoteStopTimeout      time.Duration
 	rawImagePackState      rawImagePackState
 	rooms                  map[id.RoomID]bool
 	messageEvents          map[string]id.EventID
 	remoteRun              bool
 	remoteCtx              context.Context
 	remoteStop             context.CancelFunc
+	remoteGeneration       uint64
+	remoteDone             chan struct{}
 	contactRefresh         map[string]bool
 	puppetJoins            map[string]bool
 }
 
 const (
 	defaultMatrixOperationTimeout = 30 * time.Second
+	defaultRemoteStopTimeout      = 30 * time.Second
 	appServiceHTTPShutdownTimeout = 5 * time.Second
 )
 
@@ -196,7 +206,11 @@ func (s *Server) Run(ctx context.Context) error {
 		s.stopAppServiceHTTP(httpRuntime)
 		s.as.Ready = false
 	}()
-	defer s.stopRemote()
+	defer func() {
+		if stopErr := s.stopRemote(ctx); stopErr != nil {
+			log.Printf("failed to stop remote connector during server shutdown: %v", stopErr)
+		}
+	}()
 
 	go s.matrixLoop(ctx)
 
@@ -766,34 +780,78 @@ func (s *Server) OnDisconnected(ctx context.Context, err error) {
 }
 
 func (s *Server) startRemote(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.remoteRun {
+	if s.remoteRun || s.conn == nil {
+		s.mu.Unlock()
 		return
 	}
+	conn := s.conn
+	s.remoteGeneration++
+	generation := s.remoteGeneration
 	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	beforeRun := s.beforeRemoteRun
 	s.remoteCtx = rctx
 	s.remoteStop = cancel
+	s.remoteDone = done
 	s.remoteRun = true
+	s.mu.Unlock()
+
 	go func() {
 		defer func() {
 			s.mu.Lock()
-			s.remoteRun = false
+			if s.remoteGeneration == generation && s.remoteDone == done {
+				s.remoteRun = false
+				s.remoteCtx = nil
+				s.remoteStop = nil
+				s.remoteDone = nil
+			}
 			s.mu.Unlock()
+			close(done)
 		}()
-		if err := s.conn.Run(rctx); err != nil && rctx.Err() == nil {
-			log.Printf("remote connector stopped: %v", err)
+		if beforeRun != nil {
+			beforeRun(generation)
+		}
+		if err := conn.Run(rctx); err != nil && rctx.Err() == nil {
+			log.Printf("remote connector generation %d stopped: %v", generation, err)
 		}
 	}()
 }
 
-func (s *Server) stopRemote() {
+func (s *Server) stopRemote(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.remoteStop != nil {
-		s.remoteStop()
+	if !s.remoteRun || s.remoteDone == nil {
+		s.mu.Unlock()
+		return nil
 	}
-	s.remoteRun = false
+	generation := s.remoteGeneration
+	cancel := s.remoteStop
+	done := s.remoteDone
+	timeout := s.remoteStopTimeout
+	if timeout <= 0 {
+		timeout = defaultRemoteStopTimeout
+	}
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
+	waitCtx, cancelWait := context.WithTimeout(ctx, timeout)
+	defer cancelWait()
+	select {
+	case <-done:
+		return nil
+	case <-waitCtx.Done():
+		return fmt.Errorf("stop remote connector generation %d: %w", generation, waitCtx.Err())
+	}
 }
 
 func (s *Server) currentProtocol() string {
@@ -802,31 +860,35 @@ func (s *Server) currentProtocol() string {
 	return s.cfg.Network.Protocol
 }
 
-func (s *Server) switchProtocol(protocol string) error {
+func (s *Server) switchProtocol(ctx context.Context, protocol string) error {
 	if protocol == "" || protocol == s.currentProtocol() {
 		return nil
 	}
-	return s.rebuildConnector(protocol, nil)
+	return s.rebuildConnector(ctx, protocol, nil)
 }
 
-func (s *Server) buildConnector(protocol string, cfg remoteapi.Config) (*connector.Connector, error) {
+func (s *Server) buildConnector(protocol string, cfg remoteapi.Config) (remoteConnector, error) {
 	if s.newConnector != nil {
 		return s.newConnector(protocol, cfg, s)
 	}
 	return connector.New(protocol, cfg, s)
 }
 
-func (s *Server) rebuildConnector(protocol string, session []byte) error {
+func (s *Server) rebuildConnector(ctx context.Context, protocol string, session []byte) error {
 	s.accountTransitionMu.Lock()
 	defer s.accountTransitionMu.Unlock()
 
-	s.stopRemote()
+	s.mu.Lock()
 	cfg := s.apiCfg
+	s.mu.Unlock()
 	if session != nil {
-		cfg.Session = session
+		cfg.Session = append([]byte(nil), session...)
 	}
 	conn, err := s.buildConnector(protocol, cfg)
 	if err != nil {
+		return err
+	}
+	if err = s.stopRemote(ctx); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -838,7 +900,7 @@ func (s *Server) rebuildConnector(protocol string, session []byte) error {
 	return nil
 }
 
-func (s *Server) useSavedAccount(id remoteapi.UserID) error {
+func (s *Server) useSavedAccount(ctx context.Context, id remoteapi.UserID) error {
 	s.accountTransitionMu.Lock()
 	defer s.accountTransitionMu.Unlock()
 
@@ -850,12 +912,15 @@ func (s *Server) useSavedAccount(id remoteapi.UserID) error {
 	if protocol == "" {
 		protocol = s.currentProtocol()
 	}
+	s.mu.Lock()
 	cfg := s.apiCfg
+	s.mu.Unlock()
 	cfg.Session = append([]byte(nil), acc.Session...)
 	conn, err := s.buildConnector(protocol, cfg)
 	if err != nil {
 		return err
 	}
+	previous, hadPrevious := s.accounts.current()
 	changed, err := s.accounts.setCurrent(id)
 	if err != nil {
 		return fmt.Errorf("persist current account %s: %w", id, err)
@@ -864,7 +929,15 @@ func (s *Server) useSavedAccount(id remoteapi.UserID) error {
 		return fmt.Errorf("unknown account %s", id)
 	}
 	// Current is durable before the live connector is stopped or replaced.
-	s.stopRemote()
+	if err = s.stopRemote(ctx); err != nil {
+		if hadPrevious {
+			_, rollbackErr := s.accounts.setCurrent(previous.ID)
+			if rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("restore current account %s: %w", previous.ID, rollbackErr))
+			}
+		}
+		return err
+	}
 	s.mu.Lock()
 	s.cfg.Network.Protocol = protocol
 	s.apiCfg = cfg
@@ -874,15 +947,15 @@ func (s *Server) useSavedAccount(id remoteapi.UserID) error {
 	return nil
 }
 
-func (s *Server) saveSession(loginFlow string) error {
+func (s *Server) saveSession(ctx context.Context, loginFlow string) error {
 	s.accountTransitionMu.Lock()
 	defer s.accountTransitionMu.Unlock()
-	return s.saveSessionLocked(loginFlow)
+	return s.saveSessionLocked(ctx, loginFlow)
 }
 
 // saveSessionLocked requires accountTransitionMu to be held exactly once by
 // the caller, including callers persisting the result of login/relogin work.
-func (s *Server) saveSessionLocked(loginFlow string) error {
+func (s *Server) saveSessionLocked(ctx context.Context, loginFlow string) error {
 	// Capture the live API and protocol together once. Holding the account
 	// transition lock through API reads and persistence prevents durable Current
 	// from referring to a different account than the published connector.
@@ -897,7 +970,9 @@ func (s *Server) saveSessionLocked(loginFlow string) error {
 	if err != nil {
 		return fmt.Errorf("dump session: %w", err)
 	}
-	self, err := api.Self(context.Background())
+	selfCtx, cancelSelf := s.matrixOperationContext(ctx)
+	self, err := api.Self(selfCtx)
+	cancelSelf()
 	if err != nil {
 		return fmt.Errorf("get current account for session: %w", err)
 	}

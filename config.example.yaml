@@ -46,7 +46,9 @@ network:
 bridge:
     username_template: "wechat_{{.}}"
     displayname_template: "{{.}} (WeChat)"
-    # Opaque backend session blob. Generated after successful Matrix `login`.
+    # Deprecated, read-only startup fallback for a legacy opaque session blob.
+    # New logins update only account_file; this file is never refreshed. Rolling
+    # back to an older bridge may therefore load stale login state from it.
     session_file: /data/session.json
     # Matrix portal-room mappings for remote WeChat chats.
     portal_file: /data/portals.json

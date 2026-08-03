@@ -113,9 +113,12 @@ Portal-room commands:
 
 `account <wxid>` calls the backend's `/Login/GetCacheInfo?wxid=...` endpoint.
 If the API returns login cache for that wxid, the bridge activates it as the
-current logged-in account, saves it to `/data/session.json` and `/data/accounts.json`,
-then starts the sync loop. Sensitive session/key/token fields are not printed in
-Matrix.
+current logged-in account and saves it only to the authoritative
+`/data/accounts.json` store, then starts the sync loop. `bridge.session_file`
+(`/data/session.json`) is a deprecated, read-only startup fallback and is not
+updated after login. A rollback to an older bridge version may therefore read
+stale login state from that legacy file. Sensitive session/key/token fields are
+not printed in Matrix.
 
 If commands don't respond, check whether the room is encrypted. This MVP does
 not decrypt Matrix E2EE rooms yet; use an unencrypted management/portal room.
@@ -157,8 +160,9 @@ The importer fetches exactly 109 WebP files from
 `https://github.com/airinghost/wechat-emoji` at pinned commit
 `2896eb55348041f5c5a66e4eccfb4882ab9cda0c`, directory
 `web.wechat.com/compressed-cwebp/lossless-z9`. It uses 4 workers, persistence
-batches of 16, a 10-minute overall limit, and 30-second per-fetch/upload limits.
-The origin, redirects, MIME type, WebP signature, and 256 KiB maximum are fixed
+batches of 16, a 10-minute overall limit that includes login and account-Space
+preflight, and 30-second per-fetch/upload limits. The origin, redirects, MIME
+type, WebP signature, and 256 KiB maximum are fixed
 and validated.
 
 The upstream repository has no explicit `LICENSE` or `COPYING` grant.

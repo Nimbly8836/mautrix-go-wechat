@@ -268,6 +268,58 @@ func (api *accountSessionAPI) DumpSession() ([]byte, error) {
 	return append([]byte(nil), api.session...), nil
 }
 
+type stalledAccountSelfAPI struct {
+	accountSessionAPI
+	started chan struct{}
+}
+
+func (api *stalledAccountSelfAPI) Self(ctx context.Context) (remoteapi.UserID, error) {
+	select {
+	case api.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestSaveSessionBoundsSelfByCallerAndReleasesAccountTransition(t *testing.T) {
+	as, _ := seededAccountStore(t)
+	stalled := &stalledAccountSelfAPI{
+		accountSessionAPI: accountSessionAPI{self: "wxid_old", session: []byte("old-session")},
+		started:           make(chan struct{}, 1),
+	}
+	s := &Server{
+		accounts:               as,
+		api:                    stalled,
+		cfg:                    &config.Config{Network: config.Network{Protocol: "wechat"}},
+		matrixOperationTimeout: 20 * time.Millisecond,
+		newConnector: func(string, remoteapi.Config, connector.EventSink) (remoteConnector, error) {
+			return &connector.Connector{}, nil
+		},
+	}
+
+	err := s.saveSession(context.Background(), "cache")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("saveSession error = %v, want bounded Self deadline", err)
+	}
+	select {
+	case <-stalled.started:
+	default:
+		t.Fatal("saveSession did not call Self")
+	}
+
+	transitionDone := make(chan error, 1)
+	go func() { transitionDone <- s.useSavedAccount(context.Background(), "wxid_other") }()
+	select {
+	case transitionErr := <-transitionDone:
+		if transitionErr != nil {
+			t.Fatalf("later account transition failed: %v", transitionErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("later account transition remained blocked after Self cancellation")
+	}
+}
+
 func TestUseSavedAccountPersistenceFailureKeepsLiveConnectorAndCurrentAccount(t *testing.T) {
 	as, _ := seededAccountStore(t)
 	injected := errors.New("persist current failed")
@@ -278,12 +330,12 @@ func TestUseSavedAccountPersistenceFailureKeepsLiveConnectorAndCurrentAccount(t 
 		accounts: as,
 		conn:     oldConn,
 		api:      oldAPI,
-		newConnector: func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error) {
+		newConnector: func(string, remoteapi.Config, connector.EventSink) (remoteConnector, error) {
 			return &connector.Connector{}, nil
 		},
 	}
 
-	err := s.useSavedAccount("wxid_other")
+	err := s.useSavedAccount(context.Background(), "wxid_other")
 	if !errors.Is(err, injected) {
 		t.Fatalf("useSavedAccount error = %v, want persistence failure", err)
 	}
@@ -306,7 +358,7 @@ func TestUseSavedAccountPersistsCurrentBeforeReplacingConnector(t *testing.T) {
 		conn:     oldConn,
 		api:      oldAPI,
 		cfg:      &config.Config{Network: config.Network{Protocol: "wechat"}},
-		newConnector: func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error) {
+		newConnector: func(string, remoteapi.Config, connector.EventSink) (remoteConnector, error) {
 			return newConn, nil
 		},
 	}
@@ -325,7 +377,7 @@ func TestUseSavedAccountPersistsCurrentBeforeReplacingConnector(t *testing.T) {
 		return originalPersist(path, data, mode)
 	}
 
-	if err := s.useSavedAccount("wxid_other"); err != nil {
+	if err := s.useSavedAccount(context.Background(), "wxid_other"); err != nil {
 		t.Fatalf("useSavedAccount: %v", err)
 	}
 	if s.conn != newConn {
@@ -353,12 +405,12 @@ func TestUseSavedAccountConnectorBuildFailureKeepsLiveConnectorAndCurrentAccount
 		conn:     oldConn,
 		api:      oldAPI,
 		cfg:      &config.Config{Network: config.Network{Protocol: "wechat"}},
-		newConnector: func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error) {
+		newConnector: func(string, remoteapi.Config, connector.EventSink) (remoteConnector, error) {
 			return nil, errors.New("connector build failed")
 		},
 	}
 
-	if err := s.useSavedAccount("wxid_other"); err == nil {
+	if err := s.useSavedAccount(context.Background(), "wxid_other"); err == nil {
 		t.Fatal("expected connector build failure")
 	}
 	if s.conn != oldConn || s.api != oldAPI {
@@ -394,13 +446,13 @@ func TestAccountTransitionBlocksSessionSnapshotUntilSavedAccountPersistenceFinis
 		conn:     oldConn,
 		api:      oldAPI,
 		cfg:      &config.Config{Network: config.Network{Protocol: "wechat"}},
-		newConnector: func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error) {
+		newConnector: func(string, remoteapi.Config, connector.EventSink) (remoteConnector, error) {
 			return &connector.Connector{}, nil
 		},
 	}
 
 	useDone := make(chan error, 1)
-	go func() { useDone <- s.useSavedAccount("wxid_other") }()
+	go func() { useDone <- s.useSavedAccount(context.Background(), "wxid_other") }()
 	select {
 	case <-persistStarted:
 	case <-time.After(time.Second):
@@ -408,7 +460,7 @@ func TestAccountTransitionBlocksSessionSnapshotUntilSavedAccountPersistenceFinis
 	}
 
 	saveDone := make(chan error, 1)
-	go func() { saveDone <- s.saveSession("cache") }()
+	go func() { saveDone <- s.saveSession(context.Background(), "cache") }()
 	select {
 	case <-dumpCalled:
 		t.Fatal("saveSession read the live API while account transition persistence was blocked")
@@ -466,14 +518,14 @@ func TestAccountTransitionBlocksSavedAccountSwitchUntilAPISnapshotPersists(t *te
 		conn:     &connector.Connector{},
 		api:      oldAPI,
 		cfg:      &config.Config{Network: config.Network{Protocol: "wechat"}},
-		newConnector: func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error) {
+		newConnector: func(string, remoteapi.Config, connector.EventSink) (remoteConnector, error) {
 			buildCalled <- struct{}{}
 			return newConn, nil
 		},
 	}
 
 	saveDone := make(chan error, 1)
-	go func() { saveDone <- s.saveSession("cache") }()
+	go func() { saveDone <- s.saveSession(context.Background(), "cache") }()
 	select {
 	case <-dumpCalled:
 	case <-time.After(time.Second):
@@ -481,7 +533,7 @@ func TestAccountTransitionBlocksSavedAccountSwitchUntilAPISnapshotPersists(t *te
 	}
 
 	useDone := make(chan error, 1)
-	go func() { useDone <- s.useSavedAccount("wxid_other") }()
+	go func() { useDone <- s.useSavedAccount(context.Background(), "wxid_other") }()
 	select {
 	case <-buildCalled:
 		t.Fatal("saved-account transition began before the old API snapshot persisted")
@@ -527,7 +579,7 @@ func TestSaveSessionReturnsPersistenceFailureWithoutPublishing(t *testing.T) {
 		cfg:      &config.Config{Network: config.Network{Protocol: "wechat"}},
 	}
 
-	err = s.saveSession("cache")
+	err = s.saveSession(context.Background(), "cache")
 	if !errors.Is(err, injected) {
 		t.Fatalf("saveSession error = %v, want persistence failure", err)
 	}

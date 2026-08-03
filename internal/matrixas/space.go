@@ -133,6 +133,16 @@ func (s *Server) ensureAccountSpaceTransition(ctx context.Context, account remot
 	return s.ensureAccountSpaceLocked(ctx, account)
 }
 
+// ensureAccountSpaceStructural creates a missing account Space transactionally,
+// but an existing Space only receives structural folder/admin repairs. Global
+// built-in reconciliation belongs to the importer after preflight.
+func (s *Server) ensureAccountSpaceStructural(ctx context.Context, account remoteapi.UserID) (id.RoomID, error) {
+	s.spaceMu.Lock()
+	defer s.spaceMu.Unlock()
+	result, err := s.ensureAccountSpaceStructuralLocked(ctx, account)
+	return result.Space, err
+}
+
 func (s *Server) bootstrapNewAccountSpaceLocked(ctx context.Context, room id.RoomID, reconcileOthers bool, persist func() error) (reconciliationResult, accountDataVisibilityResult, error) {
 	s.lockImagePack()
 	defer s.packMu.Unlock()

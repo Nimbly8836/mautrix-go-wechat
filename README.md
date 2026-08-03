@@ -93,8 +93,12 @@ protocols (iPad/Windows/Mac/etc), then e.g. `!wx login ipad` or `!wx login win`.
 accounts can be listed with `!wx accounts`. `!wx account <wxid>` calls the WeChat
 `/Login/GetCacheInfo?wxid=...` API and, if cached login data exists, activates
 that wxid as the current logged-in account. Locally saved accounts can also be
-switched with `!wx use <wxid>`. After login/activation, portal rooms are created for WeChat chats. Creation can
-be automatic or manually confirmed via bot commands (`!wx portal-mode manual`,
+switched with `!wx use <wxid>`. `bridge.account_file` (`accounts.json`) is the
+authoritative session store. `bridge.session_file` is a deprecated, read-only
+startup fallback and is not updated after login; rolling back to an older bridge
+version may therefore expose stale login state from that legacy file. After
+login/activation, portal rooms are created for WeChat chats. Creation can be
+automatic or manually confirmed via bot commands (`!wx portal-mode manual`,
 `!wx pending`, `!wx create <chat>`), similar to mautrix-telegram.
 
 ## Importing WeChat built-in emoji
@@ -115,8 +119,9 @@ The source is fixed in code to
 [`airinghost/wechat-emoji`](https://github.com/airinghost/wechat-emoji), commit
 `2896eb55348041f5c5a66e4eccfb4882ab9cda0c`, path
 `web.wechat.com/compressed-cwebp/lossless-z9`. The importer uses 4 workers,
-commits batches of 16, allows 10 minutes for the run and 30 seconds for each
-fetch/upload, and validates the pinned HTTPS origin, MIME type, WebP signature,
+commits batches of 16, allows 10 minutes total including login and account-Space
+preflight, allows 30 seconds for each fetch/upload, and validates the pinned
+HTTPS origin, MIME type, WebP signature,
 and 256 KiB size limit.
 
 The source repository has no explicit `LICENSE` or `COPYING` grant. Runtime
