@@ -30,16 +30,17 @@ import (
 // Server owns the Matrix appservice, the remote connector and the management
 // bot command loop.
 type Server struct {
-	cfg          *config.Config
-	as           *appservice.AppService
-	conn         *connector.Connector
-	api          remoteapi.PuppetAPI
-	apiCfg       remoteapi.Config
-	sessionFile  string
-	portals      *portalStore
-	accounts     *accountStore
-	contacts     *contactStore
-	newConnector func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error)
+	cfg               *config.Config
+	as                *appservice.AppService
+	conn              *connector.Connector
+	api               remoteapi.PuppetAPI
+	apiCfg            remoteapi.Config
+	sessionFile       string
+	portals           *portalStore
+	accounts          *accountStore
+	contacts          *contactStore
+	builtinEmojiStore *builtinEmojiStore
+	newConnector      func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error)
 
 	mu                  sync.Mutex
 	accountTransitionMu sync.Mutex
@@ -63,6 +64,9 @@ type Server struct {
 
 // New creates the appservice and remote connector from config + registration.
 func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, error) {
+	if err := cfg.ValidateBridgePathCollisions(regPath); err != nil {
+		return nil, err
+	}
 	reg, err := appservice.LoadRegistration(regPath)
 	if err != nil {
 		return nil, fmt.Errorf("load registration: %w", err)
@@ -84,25 +88,11 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	as.QueryHandler = queryHandler{bot: id.NewUserID(reg.SenderLocalpart, cfg.Homeserver.Domain), domain: cfg.Homeserver.Domain, prefix: reg.ID + "_"}
 
 	s := &Server{cfg: cfg, as: as, apiCfg: apiCfg, sessionFile: cfg.Bridge.SessionFile, rooms: map[id.RoomID]bool{}, messageEvents: map[string]id.EventID{}, contactRefresh: map[string]bool{}, puppetJoins: map[string]bool{}}
-	if s.sessionFile == "" {
-		s.sessionFile = "/data/session.json"
-	}
-	portalFile := cfg.Bridge.PortalFile
-	if portalFile == "" {
-		portalFile = "/data/portals.json"
-	}
-	s.portals = newPortalStore(portalFile)
-	accountFile := cfg.Bridge.AccountFile
-	if accountFile == "" {
-		accountFile = "/data/accounts.json"
-	}
-	s.accounts = newAccountStore(accountFile)
+	s.builtinEmojiStore = newBuiltinEmojiStore(cfg.Bridge.WechatBuiltinEmojiFile)
+	s.portals = newPortalStore(cfg.Bridge.PortalFile)
+	s.accounts = newAccountStore(cfg.Bridge.AccountFile)
 	s.apiCfg = applyStartupSession(s.apiCfg, s.accounts, s.sessionFile)
-	contactFile := cfg.Bridge.ContactFile
-	if contactFile == "" {
-		contactFile = "/data/contacts.json"
-	}
-	s.contacts = newContactStore(contactFile)
+	s.contacts = newContactStore(cfg.Bridge.ContactFile)
 
 	conn, err := connector.New(cfg.Network.Protocol, s.apiCfg, s)
 	if err != nil {

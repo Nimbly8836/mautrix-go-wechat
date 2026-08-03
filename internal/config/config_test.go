@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -61,6 +62,116 @@ func TestBridgeCommandPrefixDefaultsToWx(t *testing.T) {
 	}
 	if cfg.Bridge.CommandPrefix != "!wx" {
 		t.Fatalf("expected default command prefix !wx, got %q", cfg.Bridge.CommandPrefix)
+	}
+}
+
+func TestBridgeWechatBuiltinEmojiFileDefaultsForLegacyConfig(t *testing.T) {
+	cfg, err := Load(writeConfig(t, fmt.Sprintf(baseConfigYAML, "")))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Bridge.WechatBuiltinEmojiFile != "/data/wechat-builtin-emoji-pack.json" {
+		t.Fatalf("expected default built-in emoji file, got %q", cfg.Bridge.WechatBuiltinEmojiFile)
+	}
+}
+
+func TestBridgeWechatBuiltinEmojiFileRejectsBridgeStatePathCollisions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		stateField string
+	}{
+		{name: "session file", stateField: "session_file"},
+		{name: "portal file", stateField: "portal_file"},
+		{name: "account file", stateField: "account_file"},
+		{name: "contact file", stateField: "contact_file"},
+		{name: "emoji directory", stateField: "emoji_dir"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bridgePaths := fmt.Sprintf("bridge:\n  %s: /custom/shared-state\n  wechat_builtin_emoji_file: /custom/../custom/shared-state\n", tc.stateField)
+			body := strings.Replace(baseConfigYAML, "bridge:\n", bridgePaths, 1)
+			_, err := Load(writeConfig(t, fmt.Sprintf(body, "")))
+			if err == nil || !strings.Contains(err.Error(), "wechat_builtin_emoji_file") || !strings.Contains(err.Error(), tc.stateField) {
+				t.Fatalf("Load collision error = %v, want built-in/store path names", err)
+			}
+		})
+	}
+}
+
+func TestBridgeWechatBuiltinEmojiFileRejectsDefaultStatePathCollisions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		stateField string
+		path       string
+	}{
+		{name: "session file", stateField: "session_file", path: "/data/session.json"},
+		{name: "portal file", stateField: "portal_file", path: "/data/portals.json"},
+		{name: "account file", stateField: "account_file", path: "/data/accounts.json"},
+		{name: "contact file", stateField: "contact_file", path: "/data/contacts.json"},
+		{name: "emoji directory", stateField: "emoji_dir", path: "/data/emojis"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bridgePaths := fmt.Sprintf("bridge:\n  wechat_builtin_emoji_file: %s\n", tc.path)
+			body := strings.Replace(baseConfigYAML, "bridge:\n", bridgePaths, 1)
+			_, err := Load(writeConfig(t, fmt.Sprintf(body, "")))
+			if err == nil || !strings.Contains(err.Error(), tc.stateField) {
+				t.Fatalf("Load default collision error = %v, want %s collision", err, tc.stateField)
+			}
+		})
+	}
+}
+
+func TestBridgeStatePathDefaultsRemainRuntimeDefaults(t *testing.T) {
+	cfg, err := Load(writeConfig(t, fmt.Sprintf(baseConfigYAML, "")))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	got := []string{
+		cfg.Bridge.SessionFile,
+		cfg.Bridge.PortalFile,
+		cfg.Bridge.AccountFile,
+		cfg.Bridge.ContactFile,
+		cfg.Bridge.EmojiDir,
+		cfg.Bridge.WechatBuiltinEmojiFile,
+	}
+	want := []string{
+		"/data/session.json",
+		"/data/portals.json",
+		"/data/accounts.json",
+		"/data/contacts.json",
+		"/data/emojis",
+		"/data/wechat-builtin-emoji-pack.json",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved bridge paths = %v, want %v", got, want)
+	}
+}
+
+func TestBridgeWechatBuiltinEmojiFilePreservesCustomPath(t *testing.T) {
+	body := strings.Replace(baseConfigYAML, "bridge:\n", "bridge:\n  wechat_builtin_emoji_file: /custom/wechat-pack.json\n", 1)
+	cfg, err := Load(writeConfig(t, fmt.Sprintf(body, "")))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Bridge.WechatBuiltinEmojiFile != "/custom/wechat-pack.json" {
+		t.Fatalf("expected custom built-in emoji file, got %q", cfg.Bridge.WechatBuiltinEmojiFile)
+	}
+}
+
+func TestBridgeWechatBuiltinEmojiFileAllowsDistinctCustomBridgePaths(t *testing.T) {
+	body := strings.Replace(baseConfigYAML, "bridge:\n", `bridge:
+  session_file: /custom/session.json
+  portal_file: /custom/portals.json
+  account_file: /custom/accounts.json
+  contact_file: /custom/contacts.json
+  emoji_dir: /custom/emojis
+  wechat_builtin_emoji_file: /custom/builtin.json
+`, 1)
+	cfg, err := Load(writeConfig(t, fmt.Sprintf(body, "")))
+	if err != nil {
+		t.Fatalf("Load returned error for distinct paths: %v", err)
+	}
+	if cfg.Bridge.WechatBuiltinEmojiFile != "/custom/builtin.json" {
+		t.Fatalf("custom built-in path = %q", cfg.Bridge.WechatBuiltinEmojiFile)
 	}
 }
 

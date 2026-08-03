@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -75,6 +76,8 @@ type Bridge struct {
 	ContactFile string `yaml:"contact_file"`
 	// EmojiDir stores shared WeChat emoji/sticker files across all accounts.
 	EmojiDir string `yaml:"emoji_dir"`
+	// WechatBuiltinEmojiFile stores the canonical global shortcode-to-MXC manifest.
+	WechatBuiltinEmojiFile string `yaml:"wechat_builtin_emoji_file"`
 	// PortalCreation controls how new remote chats become Matrix portal rooms.
 	// Values: "auto" (default) or "manual".
 	PortalCreation string `yaml:"portal_creation"`
@@ -117,6 +120,74 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+const (
+	defaultSessionFile            = "/data/session.json"
+	defaultPortalFile             = "/data/portals.json"
+	defaultAccountFile            = "/data/accounts.json"
+	defaultContactFile            = "/data/contacts.json"
+	defaultEmojiDir               = "/data/emojis"
+	defaultWechatBuiltinEmojiFile = "/data/wechat-builtin-emoji-pack.json"
+)
+
+func (c *Config) resolveBridgePathDefaults() {
+	if c.Bridge.SessionFile == "" {
+		c.Bridge.SessionFile = defaultSessionFile
+	}
+	if c.Bridge.PortalFile == "" {
+		c.Bridge.PortalFile = defaultPortalFile
+	}
+	if c.Bridge.AccountFile == "" {
+		c.Bridge.AccountFile = defaultAccountFile
+	}
+	if c.Bridge.ContactFile == "" {
+		c.Bridge.ContactFile = defaultContactFile
+	}
+	if c.Bridge.EmojiDir == "" {
+		c.Bridge.EmojiDir = defaultEmojiDir
+	}
+	if c.Bridge.WechatBuiltinEmojiFile == "" {
+		c.Bridge.WechatBuiltinEmojiFile = defaultWechatBuiltinEmojiFile
+	}
+}
+
+// ValidateBridgePathCollisions rejects a built-in emoji manifest path that
+// aliases bridge state or the appservice registration file.
+func (c *Config) ValidateBridgePathCollisions(registrationPath string) error {
+	c.resolveBridgePathDefaults()
+	builtinPath := cleanAbsolutePath(c.Bridge.WechatBuiltinEmojiFile)
+	statePaths := []struct {
+		name string
+		path string
+	}{
+		{name: "session_file", path: c.Bridge.SessionFile},
+		{name: "portal_file", path: c.Bridge.PortalFile},
+		{name: "account_file", path: c.Bridge.AccountFile},
+		{name: "contact_file", path: c.Bridge.ContactFile},
+		{name: "emoji_dir", path: c.Bridge.EmojiDir},
+	}
+	if registrationPath != "" {
+		statePaths = append(statePaths, struct {
+			name string
+			path string
+		}{name: "registration path", path: registrationPath})
+	}
+	for _, statePath := range statePaths {
+		if builtinPath == cleanAbsolutePath(statePath.path) {
+			return fmt.Errorf("bridge.wechat_builtin_emoji_file collides with %s at %q", statePath.name, builtinPath)
+		}
+	}
+	return nil
+}
+
+func cleanAbsolutePath(path string) string {
+	cleaned := filepath.Clean(path)
+	absolute, err := filepath.Abs(cleaned)
+	if err == nil {
+		return absolute
+	}
+	return cleaned
+}
+
 func (c *Config) validate() error {
 	if c.Homeserver.Address == "" {
 		return fmt.Errorf("homeserver.address is required")
@@ -148,11 +219,8 @@ func (c *Config) validate() error {
 		c.Bridge.CommandPrefix = "!wx"
 	}
 	c.Bridge.OfficialAccountMode = normalizeOfficialAccountModeForConfig(c.Bridge.OfficialAccountMode)
-	if c.Bridge.ContactFile == "" {
-		c.Bridge.ContactFile = "/data/contacts.json"
-	}
-	if c.Bridge.EmojiDir == "" {
-		c.Bridge.EmojiDir = "/data/emojis"
+	if err := c.ValidateBridgePathCollisions(""); err != nil {
+		return err
 	}
 	if c.Bridge.CommandPrefix[0] != '!' {
 		c.Bridge.CommandPrefix = "!" + c.Bridge.CommandPrefix

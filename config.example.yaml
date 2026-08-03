@@ -52,6 +52,8 @@ bridge:
     portal_file: /data/portals.json
     # Saved login sessions for multiple WeChat accounts.
     account_file: /data/accounts.json
+    # Canonical global shortcode-to-MXC manifest for imported WeChat built-in emoji.
+    wechat_builtin_emoji_file: /data/wechat-builtin-emoji-pack.json
     # Shared WeChat emoji/sticker cache directory. All accounts reuse files here.
     emoji_dir: /data/emojis
     # Bridge command prefix for management and portal-local commands.
