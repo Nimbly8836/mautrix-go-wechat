@@ -175,7 +175,10 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 		chat = normalizePortalChat(rec, chat)
 		s.applyPortalMetadata(ctx, rec, chat)
 		joined, memberFailed := s.syncPortalMembers(ctx, rec, chat, true, puppetProfileUpdateCommand)
-		s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
+		if err := s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec); err != nil {
+			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("已刷新当前 portal 房间元数据，但更新账号 Space 失败: %v", err))
+			return
+		}
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("已刷新当前 portal 房间元数据。%s", s.portalRefreshDebug(chat, joined, memberFailed)))
 		return
 	default:

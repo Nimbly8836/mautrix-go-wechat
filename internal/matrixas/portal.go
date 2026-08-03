@@ -385,7 +385,9 @@ func (s *Server) applyPortalMetadata(ctx context.Context, rec portalRecord, chat
 // ensurePortal returns the Matrix room for a remote chat, creating it if needed.
 func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (portalRecord, error) {
 	if rec, ok := s.portals.get(chatID); ok && rec.RoomID != "" {
-		s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
+		if err := s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec); err != nil {
+			s.reportPortalSpaceAttachmentFailure(ctx, rec, err)
+		}
 		return rec, nil
 	}
 
@@ -426,8 +428,15 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 	s.applyPortalMetadata(ctx, rec, chat)
 	s.syncPortalMembers(ctx, rec, chat, true, puppetProfileUpdateAuto)
 	log.Printf("created portal room: chat=%s room=%s", chatID, resp.RoomID)
-	s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec)
+	if err := s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec); err != nil {
+		s.reportPortalSpaceAttachmentFailure(ctx, rec, err)
+	}
 	return rec, nil
+}
+
+func (s *Server) reportPortalSpaceAttachmentFailure(ctx context.Context, rec portalRecord, err error) {
+	log.Printf("portal created/available but account Space metadata attachment failed: chat=%s room=%s: %v", rec.ChatID, rec.RoomID, err)
+	s.notifyManagement(ctx, fmt.Sprintf("Portal 房间已创建并可继续桥接消息，但账号 Space 元数据更新失败:\n- chat: %s\n- room: %s\n- error: %v", rec.ChatID, rec.RoomID, err))
 }
 
 type puppetProfileUpdateMode int

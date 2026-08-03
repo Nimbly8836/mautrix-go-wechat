@@ -30,25 +30,27 @@ import (
 // Server owns the Matrix appservice, the remote connector and the management
 // bot command loop.
 type Server struct {
-	cfg         *config.Config
-	as          *appservice.AppService
-	conn        *connector.Connector
-	api         remoteapi.PuppetAPI
-	apiCfg      remoteapi.Config
-	sessionFile string
-	portals     *portalStore
-	accounts    *accountStore
-	contacts    *contactStore
+	cfg          *config.Config
+	as           *appservice.AppService
+	conn         *connector.Connector
+	api          remoteapi.PuppetAPI
+	apiCfg       remoteapi.Config
+	sessionFile  string
+	portals      *portalStore
+	accounts     *accountStore
+	contacts     *contactStore
+	newConnector func(string, remoteapi.Config, connector.EventSink) (*connector.Connector, error)
 
-	mu             sync.Mutex
-	spaceMu        sync.Mutex
-	rooms          map[id.RoomID]bool
-	messageEvents  map[string]id.EventID
-	remoteRun      bool
-	remoteCtx      context.Context
-	remoteStop     context.CancelFunc
-	contactRefresh map[string]bool
-	puppetJoins    map[string]bool
+	mu                  sync.Mutex
+	accountTransitionMu sync.Mutex
+	spaceMu             sync.Mutex
+	rooms               map[id.RoomID]bool
+	messageEvents       map[string]id.EventID
+	remoteRun           bool
+	remoteCtx           context.Context
+	remoteStop          context.CancelFunc
+	contactRefresh      map[string]bool
+	puppetJoins         map[string]bool
 }
 
 // New creates the appservice and remote connector from config + registration.
@@ -87,7 +89,7 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 		accountFile = "/data/accounts.json"
 	}
 	s.accounts = newAccountStore(accountFile)
-	s.apiCfg = applyCurrentAccountSessionFallback(s.apiCfg, s.accounts)
+	s.apiCfg = applyStartupSession(s.apiCfg, s.accounts, s.sessionFile)
 	contactFile := cfg.Bridge.ContactFile
 	if contactFile == "" {
 		contactFile = "/data/contacts.json"
@@ -106,16 +108,21 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	return s, nil
 }
 
-func applyCurrentAccountSessionFallback(apiCfg remoteapi.Config, accounts *accountStore) remoteapi.Config {
-	if len(apiCfg.Session) > 0 || accounts == nil {
+func applyStartupSession(apiCfg remoteapi.Config, accounts *accountStore, legacySessionFile string) remoteapi.Config {
+	if accounts != nil {
+		if acc, ok := accounts.current(); ok {
+			apiCfg.Session = append([]byte(nil), acc.Session...)
+			log.Printf("using authoritative current account session for %s", acc.ID)
+			return apiCfg
+		}
+	}
+	if len(apiCfg.Session) > 0 || legacySessionFile == "" {
 		return apiCfg
 	}
-	acc, ok := accounts.current()
-	if !ok || len(acc.Session) == 0 {
-		return apiCfg
+	if session, err := os.ReadFile(legacySessionFile); err == nil {
+		apiCfg.Session = session
+		log.Printf("using legacy session fallback because no current account exists")
 	}
-	apiCfg.Session = acc.Session
-	log.Printf("using saved current account session fallback for %s", acc.ID)
 	return apiCfg
 }
 
@@ -579,13 +586,23 @@ func (s *Server) switchProtocol(protocol string) error {
 	return s.rebuildConnector(protocol, nil)
 }
 
+func (s *Server) buildConnector(protocol string, cfg remoteapi.Config) (*connector.Connector, error) {
+	if s.newConnector != nil {
+		return s.newConnector(protocol, cfg, s)
+	}
+	return connector.New(protocol, cfg, s)
+}
+
 func (s *Server) rebuildConnector(protocol string, session []byte) error {
+	s.accountTransitionMu.Lock()
+	defer s.accountTransitionMu.Unlock()
+
 	s.stopRemote()
 	cfg := s.apiCfg
 	if session != nil {
 		cfg.Session = session
 	}
-	conn, err := connector.New(protocol, cfg, s)
+	conn, err := s.buildConnector(protocol, cfg)
 	if err != nil {
 		return err
 	}
@@ -599,38 +616,76 @@ func (s *Server) rebuildConnector(protocol string, session []byte) error {
 }
 
 func (s *Server) useSavedAccount(id remoteapi.UserID) error {
+	s.accountTransitionMu.Lock()
+	defer s.accountTransitionMu.Unlock()
+
 	acc, ok := s.accounts.get(id)
 	if !ok {
 		return fmt.Errorf("unknown account %s", id)
 	}
 	protocol := acc.Protocol
 	if protocol == "" {
-		protocol = s.cfg.Network.Protocol
+		protocol = s.currentProtocol()
 	}
-	if err := s.rebuildConnector(protocol, acc.Session); err != nil {
+	cfg := s.apiCfg
+	cfg.Session = append([]byte(nil), acc.Session...)
+	conn, err := s.buildConnector(protocol, cfg)
+	if err != nil {
 		return err
 	}
-	s.accounts.setCurrent(id)
-	if err := os.WriteFile(s.sessionFile, acc.Session, 0o600); err != nil {
-		log.Printf("write current session %s: %v", s.sessionFile, err)
+	changed, err := s.accounts.setCurrent(id)
+	if err != nil {
+		return fmt.Errorf("persist current account %s: %w", id, err)
 	}
+	if !changed {
+		return fmt.Errorf("unknown account %s", id)
+	}
+	// Current is durable before the live connector is stopped or replaced.
+	s.stopRemote()
+	s.mu.Lock()
+	s.cfg.Network.Protocol = protocol
+	s.apiCfg = cfg
+	s.conn = conn
+	s.api = conn.API()
+	s.mu.Unlock()
 	return nil
 }
 
-func (s *Server) saveSession(loginFlow string) {
-	blob, err := s.api.DumpSession()
+func (s *Server) saveSession(loginFlow string) error {
+	s.accountTransitionMu.Lock()
+	defer s.accountTransitionMu.Unlock()
+	return s.saveSessionLocked(loginFlow)
+}
+
+// saveSessionLocked requires accountTransitionMu to be held exactly once by
+// the caller, including callers persisting the result of login/relogin work.
+func (s *Server) saveSessionLocked(loginFlow string) error {
+	// Capture the live API and protocol together once. Holding the account
+	// transition lock through API reads and persistence prevents durable Current
+	// from referring to a different account than the published connector.
+	s.mu.Lock()
+	api := s.api
+	protocol := s.cfg.Network.Protocol
+	s.mu.Unlock()
+	if api == nil {
+		return fmt.Errorf("dump session: live API is unavailable")
+	}
+	blob, err := api.DumpSession()
 	if err != nil {
-		log.Printf("dump session: %v", err)
-		return
+		return fmt.Errorf("dump session: %w", err)
 	}
-	if err := os.WriteFile(s.sessionFile, blob, 0o600); err != nil {
-		log.Printf("write session %s: %v", s.sessionFile, err)
+	self, err := api.Self(context.Background())
+	if err != nil {
+		return fmt.Errorf("get current account for session: %w", err)
 	}
-	self, err := s.api.Self(context.Background())
-	if err != nil || self == "" {
-		return
+	if self == "" {
+		return fmt.Errorf("get current account for session: empty account id")
 	}
-	s.accounts.put(savedAccount{ID: self, Protocol: s.cfg.Network.Protocol, LoginFlow: loginFlow, Session: blob})
+	snapshot := savedAccount{ID: self, Protocol: protocol, LoginFlow: loginFlow, Session: append([]byte(nil), blob...)}
+	if err := s.accounts.put(snapshot); err != nil {
+		return fmt.Errorf("persist session for %s: %w", self, err)
+	}
+	return nil
 }
 
 func decodeQR(data string) ([]byte, bool) {

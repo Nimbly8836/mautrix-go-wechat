@@ -222,11 +222,18 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			return
 		}
 		if subcmd == "repair" || subcmd == "修复" {
-			fixed := s.repairAccountSpace(ctx, account, sender)
+			fixed, err := s.repairAccountSpace(ctx, account, sender)
+			if err != nil {
+				s.notice(ctx, room, fmt.Sprintf("修复 Space 失败: %v", err))
+				return
+			}
 			s.notice(ctx, room, fmt.Sprintf("已修复当前账号 Space/分类/portal 挂载和权限。处理 portal: %d\nSpace: %s\n分类:\n- 联系人: %s\n- 公众号: %s\n- 群聊: %s", fixed, space, folders[spaceFolderContacts], folders[spaceFolderOfficial], folders[spaceFolderGroups]))
 			return
 		}
-		s.attachExistingPortalsToAccountSpace(ctx, account, space)
+		if err := s.attachExistingPortalsToAccountSpace(ctx, account, space); err != nil {
+			s.notice(ctx, room, fmt.Sprintf("整理已有 portal 到 Space 失败: %v", err))
+			return
+		}
 		s.ensureRoomAdminPower(ctx, sender, space)
 		for _, folder := range folders {
 			s.ensureRoomAdminPower(ctx, sender, folder)
@@ -286,6 +293,9 @@ func (s *Server) finishContactRefresh(key string) {
 }
 
 func (s *Server) handleRefreshLoginCommand(ctx context.Context, room id.RoomID, rest string) {
+	s.accountTransitionMu.Lock()
+	defer s.accountTransitionMu.Unlock()
+
 	wxid := remoteapi.UserID(strings.TrimSpace(rest))
 	if wxid == "" {
 		wxid = s.currentAccountID(ctx)
@@ -303,7 +313,10 @@ func (s *Server) handleRefreshLoginCommand(ctx context.Context, room id.RoomID, 
 		s.notice(ctx, room, fmt.Sprintf("二次登录失败: %v", err))
 		return
 	}
-	s.saveSession("twice")
+	if err := s.saveSessionLocked("twice"); err != nil {
+		s.notice(ctx, room, fmt.Sprintf("二次登录成功，但保存会话失败: %v", err))
+		return
+	}
 	if _, err := s.ensureAccountSpace(ctx, wxid); err != nil {
 		s.notice(ctx, room, fmt.Sprintf("二次登录成功，但创建 Space 失败: %v", err))
 	}
@@ -377,7 +390,10 @@ func (s *Server) startSingleContactRefresh(ctx context.Context, room id.RoomID, 
 			chat = normalizePortalChat(rec, chat)
 			s.applyPortalMetadata(bg, rec, chat)
 			joined, failed := s.syncPortalMembers(bg, rec, chat, true, puppetProfileUpdateCommand)
-			s.addPortalToAccountSpace(bg, account, rec)
+			if err := s.addPortalToAccountSpace(bg, account, rec); err != nil {
+				s.notice(ctx, room, fmt.Sprintf("已刷新 %s，但更新账号 Space 失败: %v", chatID, err))
+				return
+			}
 			s.notice(ctx, room, fmt.Sprintf("已刷新 %s。%s", chatID, s.portalRefreshDebug(chat, joined, failed)))
 			return
 		}
@@ -534,6 +550,9 @@ func (s *Server) loginInfoText(ctx context.Context, wxid remoteapi.UserID) strin
 }
 
 func (s *Server) activateAccountText(ctx context.Context, wxid remoteapi.UserID) string {
+	s.accountTransitionMu.Lock()
+	defer s.accountTransitionMu.Unlock()
+
 	activator, ok := s.api.(remoteapi.CachedLoginActivator)
 	if !ok {
 		return s.loginInfoText(ctx, wxid)
@@ -545,7 +564,9 @@ func (s *Server) activateAccountText(ctx context.Context, wxid remoteapi.UserID)
 	if len(info.Fields) == 0 {
 		return fmt.Sprintf("%s 没有返回登录缓存信息，无法作为当前登录账号。", wxid)
 	}
-	s.saveSession("cache")
+	if err := s.saveSessionLocked("cache"); err != nil {
+		return fmt.Sprintf("已激活 %s 的登录缓存，但保存当前会话失败: %v", wxid, err)
+	}
 	if account := s.currentAccountID(ctx); account != "" {
 		if _, err := s.ensureAccountSpace(ctx, account); err != nil {
 			return fmt.Sprintf("已读取并保存 %s 的登录缓存，但创建 Space 失败: %v\n\n%s", wxid, err, safeLoginInfoSummary(info))
@@ -655,6 +676,9 @@ func (s *Server) allowed(sender id.UserID) bool {
 }
 
 func (s *Server) runLogin(ctx context.Context, room id.RoomID, owner id.UserID, flowID string) {
+	s.accountTransitionMu.Lock()
+	defer s.accountTransitionMu.Unlock()
+
 	flows := s.api.LoginFlows()
 	if len(flows) == 0 {
 		s.notice(ctx, room, "后端没有提供登录 flow。")
@@ -686,9 +710,12 @@ func (s *Server) runLogin(ctx context.Context, room id.RoomID, owner id.UserID, 
 			s.notice(ctx, room, "当前 flow 需要输入验证码/密码，但 Matrix 输入步骤尚未持久化。请先使用 QR 登录。")
 			return
 		case remoteapi.LoginComplete:
-			s.notice(ctx, room, fmt.Sprintf("登录成功: %s\n登录协议: %s", step.Self, flowID))
 			s.portals.setOwner(owner)
-			s.saveSession(flowID)
+			if err := s.saveSessionLocked(flowID); err != nil {
+				s.notice(ctx, room, fmt.Sprintf("登录成功，但保存会话失败: %v", err))
+				return
+			}
+			s.notice(ctx, room, fmt.Sprintf("登录成功: %s\n登录协议: %s", step.Self, flowID))
 			if _, err := s.ensureAccountSpace(ctx, step.Self); err != nil {
 				s.notice(ctx, room, fmt.Sprintf("登录成功，但创建 Space 失败: %v", err))
 			}

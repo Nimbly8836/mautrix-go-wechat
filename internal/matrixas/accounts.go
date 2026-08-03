@@ -2,6 +2,7 @@ package matrixas
 
 import (
 	"encoding/json"
+	"io/fs"
 	"log"
 	"os"
 	"sync"
@@ -10,10 +11,13 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
 
+type accountStorePersist func(path string, data []byte, mode fs.FileMode) error
+
 type accountStore struct {
-	mu   sync.Mutex
-	path string
-	data accountStoreData
+	mu      sync.Mutex
+	path    string
+	data    accountStoreData
+	persist accountStorePersist
 }
 
 type accountStoreData struct {
@@ -32,7 +36,11 @@ type savedAccount struct {
 }
 
 func newAccountStore(path string) *accountStore {
-	as := &accountStore{path: path, data: accountStoreData{Accounts: map[string]savedAccount{}}}
+	as := &accountStore{
+		path:    path,
+		data:    accountStoreData{Accounts: map[string]savedAccount{}},
+		persist: writeFileAtomic,
+	}
 	as.load()
 	return as
 }
@@ -51,39 +59,73 @@ func (as *accountStore) load() {
 	}
 }
 
-func (as *accountStore) saveLocked() {
-	b, err := json.MarshalIndent(as.data, "", "  ")
-	if err != nil {
-		log.Printf("marshal account store: %v", err)
-		return
+func cloneSavedAccount(acc savedAccount) savedAccount {
+	acc.Session = append([]byte(nil), acc.Session...)
+	if acc.SpaceFolders != nil {
+		folders := make(map[string]string, len(acc.SpaceFolders))
+		for key, room := range acc.SpaceFolders {
+			folders[key] = room
+		}
+		acc.SpaceFolders = folders
 	}
-	if err := os.WriteFile(as.path, b, 0o600); err != nil {
-		log.Printf("write account store %s: %v", as.path, err)
-	}
+	return acc
 }
 
-func (as *accountStore) put(acc savedAccount) {
+func cloneAccountStoreData(data accountStoreData) accountStoreData {
+	clone := accountStoreData{Current: data.Current, Accounts: make(map[string]savedAccount, len(data.Accounts))}
+	for key, acc := range data.Accounts {
+		clone.Accounts[key] = cloneSavedAccount(acc)
+	}
+	return clone
+}
+
+// mutateLocked performs the account store transaction while the caller holds
+// as.mu: mutate a complete clone, atomically persist it, then publish it.
+func (as *accountStore) mutateLocked(mutate func(*accountStoreData) error) error {
+	clone := cloneAccountStoreData(as.data)
+	if err := mutate(&clone); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(clone, "", "  ")
+	if err != nil {
+		return err
+	}
+	persist := as.persist
+	if persist == nil {
+		persist = writeFileAtomic
+	}
+	if err := persist(as.path, data, 0o600); err != nil {
+		return err
+	}
+	as.data = clone
+	return nil
+}
+
+func (as *accountStore) put(acc savedAccount) error {
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	if old, ok := as.data.Accounts[string(acc.ID)]; ok {
-		if acc.SpaceRoom == "" {
-			acc.SpaceRoom = old.SpaceRoom
+	acc = cloneSavedAccount(acc)
+	return as.mutateLocked(func(data *accountStoreData) error {
+		if old, ok := data.Accounts[string(acc.ID)]; ok {
+			if acc.SpaceRoom == "" {
+				acc.SpaceRoom = old.SpaceRoom
+			}
+			if acc.SpaceFolders == nil {
+				acc.SpaceFolders = cloneSavedAccount(old).SpaceFolders
+			}
 		}
-		if acc.SpaceFolders == nil {
-			acc.SpaceFolders = old.SpaceFolders
-		}
-	}
-	acc.UpdatedAt = time.Now()
-	as.data.Accounts[string(acc.ID)] = acc
-	as.data.Current = acc.ID
-	as.saveLocked()
+		acc.UpdatedAt = time.Now()
+		data.Accounts[string(acc.ID)] = cloneSavedAccount(acc)
+		data.Current = acc.ID
+		return nil
+	})
 }
 
 func (as *accountStore) get(id remoteapi.UserID) (savedAccount, bool) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	acc, ok := as.data.Accounts[string(id)]
-	return acc, ok
+	return cloneSavedAccount(acc), ok
 }
 
 func (as *accountStore) current() (savedAccount, bool) {
@@ -93,61 +135,72 @@ func (as *accountStore) current() (savedAccount, bool) {
 		return savedAccount{}, false
 	}
 	acc, ok := as.data.Accounts[string(as.data.Current)]
-	return acc, ok
+	return cloneSavedAccount(acc), ok
 }
 
-func (as *accountStore) setSpace(id remoteapi.UserID, roomID string) {
+func (as *accountStore) setSpace(id remoteapi.UserID, roomID string) error {
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	acc, ok := as.data.Accounts[string(id)]
-	if !ok {
-		acc = savedAccount{ID: id}
-	}
-	acc.SpaceRoom = roomID
-	acc.UpdatedAt = time.Now()
-	as.data.Accounts[string(id)] = acc
-	as.saveLocked()
+	return as.mutateLocked(func(data *accountStoreData) error {
+		acc, ok := data.Accounts[string(id)]
+		if !ok {
+			acc = savedAccount{ID: id}
+		}
+		acc.SpaceRoom = roomID
+		acc.UpdatedAt = time.Now()
+		data.Accounts[string(id)] = acc
+		return nil
+	})
 }
 
-func (as *accountStore) setSpaceFolder(id remoteapi.UserID, folder, roomID string) {
+func (as *accountStore) setSpaceFolder(id remoteapi.UserID, folder, roomID string) error {
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	acc, ok := as.data.Accounts[string(id)]
-	if !ok {
-		acc = savedAccount{ID: id}
-	}
-	if acc.SpaceFolders == nil {
-		acc.SpaceFolders = map[string]string{}
-	}
-	acc.SpaceFolders[folder] = roomID
-	acc.UpdatedAt = time.Now()
-	as.data.Accounts[string(id)] = acc
-	as.saveLocked()
+	return as.mutateLocked(func(data *accountStoreData) error {
+		acc, ok := data.Accounts[string(id)]
+		if !ok {
+			acc = savedAccount{ID: id}
+		}
+		if acc.SpaceFolders == nil {
+			acc.SpaceFolders = map[string]string{}
+		}
+		acc.SpaceFolders[folder] = roomID
+		acc.UpdatedAt = time.Now()
+		data.Accounts[string(id)] = acc
+		return nil
+	})
 }
 
-func (as *accountStore) replaceSpace(id remoteapi.UserID, roomID string, folders map[string]string) {
+func (as *accountStore) replaceSpace(id remoteapi.UserID, roomID string, folders map[string]string) error {
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	acc, ok := as.data.Accounts[string(id)]
-	if !ok {
-		acc = savedAccount{ID: id}
-	}
-	acc.SpaceRoom = roomID
-	acc.SpaceFolders = folders
-	acc.UpdatedAt = time.Now()
-	as.data.Accounts[string(id)] = acc
-	as.saveLocked()
+	folders = cloneSavedAccount(savedAccount{SpaceFolders: folders}).SpaceFolders
+	return as.mutateLocked(func(data *accountStoreData) error {
+		acc, ok := data.Accounts[string(id)]
+		if !ok {
+			acc = savedAccount{ID: id}
+		}
+		acc.SpaceRoom = roomID
+		acc.SpaceFolders = folders
+		acc.UpdatedAt = time.Now()
+		data.Accounts[string(id)] = acc
+		return nil
+	})
 }
 
-func (as *accountStore) setCurrent(id remoteapi.UserID) bool {
+func (as *accountStore) setCurrent(id remoteapi.UserID) (bool, error) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if _, ok := as.data.Accounts[string(id)]; !ok {
-		return false
+		return false, nil
 	}
-	as.data.Current = id
-	as.saveLocked()
-	return true
+	if err := as.mutateLocked(func(data *accountStoreData) error {
+		data.Current = id
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (as *accountStore) list() []savedAccount {
@@ -155,7 +208,7 @@ func (as *accountStore) list() []savedAccount {
 	defer as.mu.Unlock()
 	out := make([]savedAccount, 0, len(as.data.Accounts))
 	for _, acc := range as.data.Accounts {
-		out = append(out, acc)
+		out = append(out, cloneSavedAccount(acc))
 	}
 	return out
 }

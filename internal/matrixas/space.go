@@ -104,7 +104,10 @@ func (s *Server) ensureAccountSpaceLocked(ctx context.Context, account remoteapi
 	if err != nil {
 		return "", fmt.Errorf("create account space for %s: %w", account, err)
 	}
-	s.accounts.setSpace(account, resp.RoomID.String())
+	if err := s.accounts.setSpace(account, resp.RoomID.String()); err != nil {
+		rooms, cleanupFailures := s.cleanupCreatedAccountSpaces(ctx, resp.RoomID, nil, true)
+		return "", createdSpacePersistenceError(fmt.Sprintf("persist account Space %s for %s", resp.RoomID, account), err, rooms, cleanupFailures)
+	}
 	if owner := s.portals.owner(); owner != "" {
 		s.ensureRoomAdminPower(ctx, owner, resp.RoomID)
 	}
@@ -213,7 +216,10 @@ func (s *Server) ensureAccountSpaceFoldersLocked(ctx context.Context, account re
 				return out, err
 			}
 			roomID = created
-			s.accounts.setSpaceFolder(account, folder.Key, roomID.String())
+			if err := s.accounts.setSpaceFolder(account, folder.Key, roomID.String()); err != nil {
+				rooms, cleanupFailures := s.cleanupCreatedAccountSpaces(ctx, parent, map[string]id.RoomID{folder.Key: roomID}, false)
+				return out, createdSpacePersistenceError(fmt.Sprintf("persist account folder Space %s (%s) for %s", folder.Key, roomID, account), err, rooms, cleanupFailures)
+			}
 			log.Printf("created account folder space: account=%s folder=%s room=%s", account, folder.Key, roomID)
 		}
 		out[folder.Key] = roomID
@@ -308,13 +314,16 @@ func (s *Server) createAccountFolderSpace(ctx context.Context, account remoteapi
 	return resp.RoomID, nil
 }
 
-func (s *Server) attachExistingPortalsToAccountSpace(ctx context.Context, account remoteapi.UserID, space id.RoomID) {
+func (s *Server) attachExistingPortalsToAccountSpace(ctx context.Context, account remoteapi.UserID, space id.RoomID) error {
 	if space == "" || s.portals == nil {
-		return
+		return nil
 	}
 	for _, portal := range s.portals.list() {
-		s.addPortalToAccountSpace(ctx, account, portal)
+		if err := s.addPortalToAccountSpace(ctx, account, portal); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (s *Server) rebuildAccountSpace(ctx context.Context, account remoteapi.UserID, owner id.UserID) (id.RoomID, map[string]id.RoomID, int, error) {
@@ -335,8 +344,9 @@ func (s *Server) rebuildAccountSpace(ctx context.Context, account remoteapi.User
 	for _, folder := range accountSpaceFolders {
 		room, err := s.createAccountFolderSpace(ctx, account, folder)
 		if err != nil {
+			rooms, cleanupFailures := s.cleanupCreatedAccountSpaces(ctx, space, folders, true)
 			s.spaceMu.Unlock()
-			return space, folders, 0, err
+			return "", nil, 0, createdSpacePersistenceError(fmt.Sprintf("create rebuilt account folder Space %s for %s", folder.Key, account), err, rooms, cleanupFailures)
 		}
 		folders[folder.Key] = room
 		folderStrings[folder.Key] = room.String()
@@ -344,7 +354,11 @@ func (s *Server) rebuildAccountSpace(ctx context.Context, account remoteapi.User
 		s.setSpaceParent(ctx, room, space, false)
 		s.ensureRoomAdminPower(ctx, owner, room)
 	}
-	s.accounts.replaceSpace(account, space.String(), folderStrings)
+	if err := s.accounts.replaceSpace(account, space.String(), folderStrings); err != nil {
+		rooms, cleanupFailures := s.cleanupCreatedAccountSpaces(ctx, space, folders, true)
+		s.spaceMu.Unlock()
+		return "", nil, 0, createdSpacePersistenceError(fmt.Sprintf("persist rebuilt account Space for %s", account), err, rooms, cleanupFailures)
+	}
 	s.ensureRoomAdminPower(ctx, owner, space)
 	s.spaceMu.Unlock()
 
@@ -360,18 +374,19 @@ func (s *Server) rebuildAccountSpace(ctx context.Context, account remoteapi.User
 			s.removeSpaceChild(ctx, oldFolder, portal.RoomID)
 			s.removeSpaceParent(ctx, portal.RoomID, oldFolder)
 		}
-		s.addPortalToAccountSpace(ctx, account, portal)
+		if err := s.addPortalToAccountSpace(ctx, account, portal); err != nil {
+			return space, folders, count, err
+		}
 		s.ensureRoomAdminPower(ctx, owner, portal.RoomID)
 		count++
 	}
 	return space, folders, count, nil
 }
 
-func (s *Server) repairAccountSpace(ctx context.Context, account remoteapi.UserID, owner id.UserID) int {
+func (s *Server) repairAccountSpace(ctx context.Context, account remoteapi.UserID, owner id.UserID) (int, error) {
 	space, folders, err := s.ensureAccountSpaceVisibleTo(ctx, account, owner)
 	if err != nil {
-		log.Printf("failed to repair account space account=%s owner=%s: %v", account, owner, err)
-		return 0
+		return 0, err
 	}
 	s.ensureRoomAdminPower(ctx, owner, space)
 	for _, folder := range folders {
@@ -379,30 +394,30 @@ func (s *Server) repairAccountSpace(ctx context.Context, account remoteapi.UserI
 	}
 	count := 0
 	for _, portal := range s.portals.list() {
-		s.addPortalToAccountSpace(ctx, account, portal)
+		if err := s.addPortalToAccountSpace(ctx, account, portal); err != nil {
+			return count, err
+		}
 		s.ensureRoomAdminPower(ctx, owner, portal.RoomID)
 		count++
 	}
 	s.repairStickerPacksForAccount(ctx, account, space, owner)
-	return count
+	return count, nil
 }
 
-func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.UserID, portal portalRecord) {
+func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.UserID, portal portalRecord) error {
 	if account == "" || portal.RoomID == "" {
-		return
+		return nil
 	}
 	if owner := s.portals.owner(); owner != "" {
 		s.ensureRoomAdminPower(ctx, owner, portal.RoomID)
 	}
 	space, err := s.ensureAccountSpace(ctx, account)
 	if err != nil {
-		log.Printf("failed to ensure space for account %s: %v", account, err)
-		return
+		return fmt.Errorf("ensure Space for account %s: %w", account, err)
 	}
 	folders, err := s.ensureAccountSpaceFolders(ctx, account, space)
 	if err != nil {
-		log.Printf("failed to ensure folder spaces for account %s: %v", account, err)
-		return
+		return fmt.Errorf("ensure folder Spaces for account %s: %w", account, err)
 	}
 	folder := s.portalSpaceFolder(ctx, portal)
 	folderSpace := folders[folder]
@@ -420,6 +435,7 @@ func (s *Server) addPortalToAccountSpace(ctx context.Context, account remoteapi.
 		s.removeStickerPackFromRoom(ctx, account, room)
 	}
 	s.mirrorStickerPackToElementPortal(ctx, account, space, portal.RoomID)
+	return nil
 }
 
 func (s *Server) portalSpaceFolder(ctx context.Context, portal portalRecord) string {
@@ -483,21 +499,95 @@ func (s *Server) setSpaceParent(ctx context.Context, room, parent id.RoomID, can
 }
 
 func (s *Server) removeSpaceChild(ctx context.Context, space, child id.RoomID) {
-	if space == "" || child == "" {
-		return
-	}
-	_, err := s.as.BotIntent().SendStateEvent(ctx, space, event.StateSpaceChild, child.String(), map[string]any{})
-	if err != nil {
+	if err := s.removeSpaceChildWithError(ctx, space, child); err != nil {
 		log.Printf("failed to remove child %s from space %s: %v", child, space, err)
 	}
 }
 
-func (s *Server) removeSpaceParent(ctx context.Context, room, parent id.RoomID) {
-	if room == "" || parent == "" {
-		return
+func (s *Server) removeSpaceChildWithError(ctx context.Context, space, child id.RoomID) error {
+	if space == "" || child == "" {
+		return nil
 	}
-	_, err := s.as.BotIntent().SendStateEvent(ctx, room, event.StateSpaceParent, parent.String(), map[string]any{})
-	if err != nil {
+	_, err := s.as.BotIntent().SendStateEvent(ctx, space, event.StateSpaceChild, child.String(), map[string]any{})
+	return err
+}
+
+func (s *Server) removeSpaceParent(ctx context.Context, room, parent id.RoomID) {
+	if err := s.removeSpaceParentWithError(ctx, room, parent); err != nil {
 		log.Printf("failed to remove space parent %s from room %s: %v", parent, room, err)
 	}
+}
+
+func (s *Server) removeSpaceParentWithError(ctx context.Context, room, parent id.RoomID) error {
+	if room == "" || parent == "" {
+		return nil
+	}
+	_, err := s.as.BotIntent().SendStateEvent(ctx, room, event.StateSpaceParent, parent.String(), map[string]any{})
+	return err
+}
+
+// Matrix rooms cannot be deleted. When persistence fails after room creation,
+// cleanup is therefore best-effort: remove links and make the bot leave so an
+// untracked room is not reused by a later retry.
+func (s *Server) cleanupCreatedAccountSpaces(ctx context.Context, root id.RoomID, folders map[string]id.RoomID, leaveRoot bool) ([]id.RoomID, []error) {
+	rooms := make([]id.RoomID, 0, len(folders)+1)
+	seen := map[id.RoomID]bool{}
+	for _, folder := range accountSpaceFolders {
+		room := folders[folder.Key]
+		if room == "" || seen[room] {
+			continue
+		}
+		seen[room] = true
+		rooms = append(rooms, room)
+	}
+	extraKeys := make([]string, 0, len(folders))
+	for key, room := range folders {
+		if room != "" && !seen[room] {
+			extraKeys = append(extraKeys, key)
+		}
+	}
+	sort.Strings(extraKeys)
+	for _, key := range extraKeys {
+		room := folders[key]
+		seen[room] = true
+		rooms = append(rooms, room)
+	}
+
+	failures := make([]error, 0)
+	for _, room := range rooms {
+		if root != "" {
+			if err := s.removeSpaceChildWithError(ctx, root, room); err != nil {
+				failures = append(failures, fmt.Errorf("remove child link %s -> %s: %w", root, room, err))
+			}
+			if err := s.removeSpaceParentWithError(ctx, room, root); err != nil {
+				failures = append(failures, fmt.Errorf("remove parent link %s -> %s: %w", room, root, err))
+			}
+		}
+	}
+	if leaveRoot && root != "" && !seen[root] {
+		rooms = append(rooms, root)
+	}
+	for _, room := range rooms {
+		if _, err := s.as.BotIntent().LeaveRoom(ctx, room); err != nil {
+			failures = append(failures, fmt.Errorf("bot leave %s: %w", room, err))
+		}
+	}
+	log.Printf("best-effort Matrix cleanup after account Space failure (rooms cannot be deleted): rooms=%v failures=%v", rooms, failures)
+	return rooms, failures
+}
+
+func createdSpacePersistenceError(action string, cause error, rooms []id.RoomID, cleanupFailures []error) error {
+	roomNames := make([]string, len(rooms))
+	for i, room := range rooms {
+		roomNames[i] = room.String()
+	}
+	cleanup := "best-effort links removed and bot left rooms; Matrix rooms cannot be deleted"
+	if len(cleanupFailures) > 0 {
+		failureNames := make([]string, len(cleanupFailures))
+		for i, failure := range cleanupFailures {
+			failureNames[i] = failure.Error()
+		}
+		cleanup += "; cleanup failures: " + strings.Join(failureNames, "; ")
+	}
+	return fmt.Errorf("%s: %w; created Matrix room IDs: [%s]; cleanup: %s", action, cause, strings.Join(roomNames, ", "), cleanup)
 }

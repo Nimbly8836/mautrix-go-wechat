@@ -70,10 +70,8 @@ func main() {
 		ReceiveMode: cfg.Network.Receive.Mode,
 		Extra:       cfg.Network.Extra,
 	}
-	if session, err := os.ReadFile(cfg.Bridge.SessionFile); err == nil {
-		apiCfg.Session = session
-	}
-
+	// matrixas.New loads the current account-store session first and only uses
+	// the legacy session_file when no current account exists.
 	srv, err := matrixas.New(cfg, *regPath, apiCfg)
 	if err != nil {
 		log.Fatal(err)
