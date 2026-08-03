@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,10 @@ type builtinEmojiCommandTestAPI struct {
 	contexts       chan context.Context
 	entered        chan struct{}
 	waitForContext bool
+}
+
+func (api *builtinEmojiCommandTestAPI) Logout(context.Context) error {
+	return nil
 }
 
 func (api *builtinEmojiCommandTestAPI) IsLoggedIn(ctx context.Context) (bool, error) {
@@ -333,6 +339,95 @@ func TestBuiltinEmojiImportExistingSpacePreflightDoesNotReconcileGlobalPacks(t *
 	}
 }
 
+func TestBuiltinEmojiCommandCaptureRejectsImmediatelyAfterLogout(t *testing.T) {
+	recorder := newBuiltinEmojiCommandNoticeRecorder()
+	s := commandTestServer(t, &builtinEmojiCommandTestAPI{loggedIn: true}, recorder)
+	homeserver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"event_id":"$logout"}`))
+	}))
+	defer homeserver.Close()
+	s.as = testAppservice(t, homeserver.URL)
+	room := id.RoomID("!logout:example.org")
+	s.handleCommand(context.Background(), room, "@admin:example.org", "!wx logout")
+
+	s.mu.Lock()
+	active := s.activeAccount
+	s.mu.Unlock()
+	if active != "" {
+		t.Fatalf("active account after logout = %q, want empty", active)
+	}
+	if target, ok := s.captureBuiltinEmojiImportTarget(context.Background(), room, "@admin:example.org"); ok {
+		t.Fatalf("captured import target after logout: %#v", target)
+	}
+	recorder.waitFor(t, room, "active saved account")
+}
+
+func TestBuiltinEmojiCommandCaptureDoesNotWaitForAccountTransitionAndUsesPublishedGeneration(t *testing.T) {
+	recorder := newBuiltinEmojiCommandNoticeRecorder()
+	api := &builtinEmojiCommandTestAPI{loggedIn: true, contexts: make(chan context.Context, 1)}
+	release := make(chan struct{})
+	runner := &builtinEmojiCommandTestRunner{
+		started: make(chan context.Context, 1),
+		release: release,
+		result: builtinEmojiImportResult{
+			TotalConsidered: 109,
+			Imported:        109,
+			Persisted:       109,
+			Persistence:     builtinEmojiPersistenceSuccess,
+		},
+	}
+	s := commandTestServer(t, api, recorder)
+	if err := s.accounts.put(savedAccount{ID: "wxid_next", SpaceRoom: "!space-next:example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.activeAccount = "wxid_a"
+	s.mu.Unlock()
+	runtime := s.captureBuiltinEmojiRuntime(context.Background())
+	defer s.clearBuiltinEmojiRuntime(runtime)
+	s.builtinEmojiImporterFactory = func() builtinEmojiImportRunner { return runner }
+
+	s.accountTransitionMu.Lock()
+	transitionLocked := true
+	defer func() {
+		if transitionLocked {
+			s.accountTransitionMu.Unlock()
+		}
+	}()
+	room := id.RoomID("!prompt:example.org")
+	dispatched := make(chan struct{})
+	go func() {
+		s.handleBuiltinEmojiImportCommand(context.Background(), room, "@admin:example.org", "import wechat --ack-no-license")
+		close(dispatched)
+	}()
+	select {
+	case <-dispatched:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("import command dispatch waited for accountTransitionMu")
+	}
+
+	start := recorder.waitFor(t, room, "wxid_a")
+	if strings.Contains(start.Body, "wxid_next") {
+		t.Fatalf("import target followed durable transition instead of published generation: %q", start.Body)
+	}
+	select {
+	case <-api.contexts:
+	case <-time.After(time.Second):
+		t.Fatal("captured API generation was not validated asynchronously")
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("importer did not start for the captured generation")
+	}
+
+	s.accountTransitionMu.Unlock()
+	transitionLocked = false
+	close(release)
+	recorder.waitFor(t, room, "completed")
+	assertBuiltinEmojiCommandSlotReleased(t, s)
+}
+
 func TestBuiltinEmojiCommandStartNoticeCapturesTargetAndRejectsConcurrentRetarget(t *testing.T) {
 	recorder := newBuiltinEmojiCommandNoticeRecorder()
 	runParent, cancelRunParent := context.WithCancel(context.Background())
@@ -423,8 +518,10 @@ func TestImportLifecyclePreflightFailuresReleaseGlobalSlot(t *testing.T) {
 		{name: "Run context unavailable", configure: func(s *Server, _ *builtinEmojiCommandTestAPI) { s.clearBuiltinEmojiRuntime(s.importRuntime) }},
 		{name: "login check error", configure: func(_ *Server, api *builtinEmojiCommandTestAPI) { api.err = injected }},
 		{name: "logged out", configure: func(_ *Server, api *builtinEmojiCommandTestAPI) { api.loggedIn = false }},
-		{name: "current account unavailable", configure: func(s *Server, _ *builtinEmojiCommandTestAPI) {
-			s.accounts = newAccountStore(filepath.Join(t.TempDir(), "empty-accounts.json"))
+		{name: "active account unavailable", configure: func(s *Server, _ *builtinEmojiCommandTestAPI) {
+			s.mu.Lock()
+			s.activeAccount = ""
+			s.mu.Unlock()
 		}},
 		{name: "Space unavailable", configure: func(s *Server, _ *builtinEmojiCommandTestAPI) {
 			s.builtinEmojiSpaceResolver = func(context.Context, remoteapi.UserID) (id.RoomID, error) { return "", injected }
@@ -536,7 +633,7 @@ func TestBuiltinEmojiCommandAcknowledgedImportResetsOnlyInvalidStoreAndAbortsOnQ
 			if test.wantPersist && store.LoadError() != nil {
 				t.Fatalf("reset store still has load error: %v", store.LoadError())
 			}
-			assertBuiltinEmojiCommandSlotReleased(t, s)
+			waitBuiltinEmojiCommandSlotReleased(t, s)
 		})
 	}
 }
@@ -946,6 +1043,7 @@ func commandTestServer(t *testing.T, api *builtinEmojiCommandTestAPI, recorder *
 	s := &Server{
 		cfg:                &config.Config{Bridge: config.Bridge{Permissions: map[string]string{"@admin:example.org": "admin"}}},
 		api:                api,
+		activeAccount:      "wxid_a",
 		accounts:           accounts,
 		portals:            &portalStore{data: portalState{Portals: map[string]portalRecord{}, Pending: map[string]pendingPortal{}}},
 		builtinEmojiStore:  commandTestBuiltinEmojiStore(t),

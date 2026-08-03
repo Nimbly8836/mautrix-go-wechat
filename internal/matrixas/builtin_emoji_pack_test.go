@@ -51,7 +51,7 @@ func TestBuiltinEmojiPackMetadataAndRegistryOrderAreStable(t *testing.T) {
 	}
 }
 
-func TestBuiltinEmojiPackReconcilesEveryRoomPreservingUnrelatedContent(t *testing.T) {
+func TestBuiltinEmojiPackReconcilesEveryRoomPreservingPartialStoreAndUnrelatedContent(t *testing.T) {
 	data := builtinEmojiTestData(
 		builtinEmojiRecord{Shortcode: "wechat_smile", MXC: "mxc://example.org/new-smile"},
 	)
@@ -103,9 +103,7 @@ func TestBuiltinEmojiPackReconcilesEveryRoomPreservingUnrelatedContent(t *testin
 		stableImages := rawJSONObjectForTest(t, stable["images"])
 		assertJSONPathEqual(t, stableImages["party"], map[string]any{"url": "mxc://example.org/party", "org.example.image": true})
 		assertJSONPathEqual(t, stableImages["wechat_smile"], map[string]any{"url": "mxc://example.org/new-smile"})
-		if _, ok := stableImages["wechat_grimace"]; ok {
-			t.Fatalf("stable room %s retained stale canonical image", room)
-		}
+		assertJSONPathEqual(t, stableImages["wechat_grimace"], map[string]any{"url": "mxc://example.org/stale"})
 		assertJSONPathEqual(t, stable["pack"], map[string]any{
 			"display_name":        "WeChat built-in emoji",
 			"usage":               []any{"sticker", "emoticon"},
@@ -117,9 +115,7 @@ func TestBuiltinEmojiPackReconcilesEveryRoomPreservingUnrelatedContent(t *testin
 		compatImages := rawJSONObjectForTest(t, compat["images"])
 		assertJSONPathEqual(t, compatImages["party"], map[string]any{"url": "mxc://example.org/party", "org.example.image": true})
 		assertJSONPathEqual(t, compatImages["wechat_smile"], map[string]any{"url": "mxc://example.org/new-smile", "old": true})
-		if _, ok := compatImages["wechat_grimace"]; ok {
-			t.Fatalf("compat room %s retained stale canonical image", room)
-		}
+		assertJSONPathEqual(t, compatImages["wechat_grimace"], map[string]any{"url": "mxc://example.org/stale"})
 		assertJSONPathEqual(t, compat["pack"], map[string]any{"display_name": "shared metadata", "org.example.pack": true})
 		assertJSONPathEqual(t, compat["org.example.top"], map[string]any{"keep": true})
 	}
@@ -525,6 +521,76 @@ func TestBuiltinEmojiVisibilityOperationDeadlinesReleasePackLock(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuiltinAccountDataTransactionalAcquisitionReleasesLockOnPanic(t *testing.T) {
+	data := builtinEmojiTestData(builtinEmojiRecord{Shortcode: "wechat_smile", MXC: "mxc://example.org/smile"})
+	room := id.RoomID("!space:example.org")
+	state := newFakeRawImagePackState()
+	seedBuiltinPackRoom(t, state, room, data)
+	s := builtinEmojiPackTestServer(data, state)
+	s.cfg.Bridge.PersonalStickerUserID = "@personal:example.org"
+	s.cfg.Bridge.PersonalStickerAccessToken = "token"
+	visibility := &fakeBuiltinPackVisibilityClient{
+		members:      map[id.RoomID]event.Membership{room: event.MembershipJoin},
+		memberErrors: map[id.RoomID]error{},
+		accountData:  map[string]event.ImagePackRoomsEventContent{},
+		getErrors:    map[string]error{},
+		setErrors:    map[string]error{},
+		beforeGet: func(string) {
+			panic("account-data read panic")
+		},
+	}
+	s.newBuiltinPackVisibilityClient = func(id.UserID, string) (builtinPackVisibilityClient, error) { return visibility, nil }
+
+	didPanic := false
+	s.packMu.Lock()
+	func() {
+		defer func() { didPanic = recover() != nil }()
+		_, _ = s.registerBuiltinPackAccountDataForSpacesTransactionalLocked(context.Background(), []id.RoomID{room})
+	}()
+	s.packMu.Unlock()
+	if !didPanic {
+		t.Fatal("transactional account-data acquisition did not propagate panic")
+	}
+	assertMutexAvailable(t, &s.accountDataMu, "accountDataMu after transactional acquisition panic")
+}
+
+func TestBuiltinAccountDataCallerReleasesLockWhenPersistencePanics(t *testing.T) {
+	data := builtinEmojiTestData(builtinEmojiRecord{Shortcode: "wechat_smile", MXC: "mxc://example.org/smile"})
+	room := id.RoomID("!space:example.org")
+	s := builtinEmojiPackTestServer(data, newFakeRawImagePackState())
+	s.cfg.Bridge.PersonalStickerUserID = "@personal:example.org"
+	s.cfg.Bridge.PersonalStickerAccessToken = "token"
+	visibility := &fakeBuiltinPackVisibilityClient{
+		members:      map[id.RoomID]event.Membership{room: event.MembershipJoin},
+		memberErrors: map[id.RoomID]error{},
+		accountData:  map[string]event.ImagePackRoomsEventContent{},
+		getErrors:    map[string]error{},
+		setErrors:    map[string]error{},
+	}
+	s.newBuiltinPackVisibilityClient = func(id.UserID, string) (builtinPackVisibilityClient, error) { return visibility, nil }
+
+	didPanic := false
+	func() {
+		defer func() { didPanic = recover() != nil }()
+		_, _, _ = s.bootstrapNewAccountSpaceLocked(context.Background(), room, false, func() error {
+			panic("account persistence panic")
+		})
+	}()
+	if !didPanic {
+		t.Fatal("account Space persistence did not propagate panic")
+	}
+	assertMutexAvailable(t, &s.accountDataMu, "accountDataMu after caller panic")
+	assertMutexAvailable(t, &s.packMu, "packMu after caller panic")
+}
+
+func assertMutexAvailable(t *testing.T, mutex *sync.Mutex, name string) {
+	t.Helper()
+	if !mutex.TryLock() {
+		t.Fatalf("%s remained locked", name)
+	}
+	mutex.Unlock()
 }
 
 func TestBuiltinAccountDataRMWWaitsForManualTransaction(t *testing.T) {

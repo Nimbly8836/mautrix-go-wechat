@@ -133,6 +133,23 @@ func TestBridgeWechatBuiltinEmojiFileRejectsSymlinkAliasCollisions(t *testing.T)
 	})
 }
 
+func TestBridgeWechatBuiltinEmojiFileRejectsRuntimeConfigPathSymlinkAlias(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifestAlias := filepath.Join(dir, "manifest.json")
+	if err := os.Symlink(configPath, manifestAlias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := &Config{Bridge: Bridge{WechatBuiltinEmojiFile: manifestAlias}}
+
+	if err := cfg.ValidateBridgePathCollisions(configPath, ""); err == nil || !strings.Contains(err.Error(), "config path") {
+		t.Fatalf("config path collision error = %v", err)
+	}
+}
+
 func TestBridgeWechatBuiltinEmojiFilePathResolutionFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	loop := filepath.Join(dir, "loop")

@@ -150,6 +150,7 @@ func (s *Server) bootstrapNewAccountSpaceLocked(ctx context.Context, room id.Roo
 	packResult := reconciliationResult{Status: builtinPackStatusSkipped}
 	accountData := accountDataVisibilityResult{Status: builtinPackStatusSkipped}
 	transaction := accountDataWriteTransaction{}
+	defer s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
 	if skipReason != "" {
 		packResult.Warnings = []string{skipReason}
 	} else {
@@ -593,6 +594,7 @@ func (s *Server) rebuildAccountSpace(ctx context.Context, account remoteapi.User
 		result.BuiltinPack = reconciliationResult{Status: builtinPackStatusSuccess, AttemptedRooms: 1, ReconciledRooms: 1}
 	}
 	transaction := accountDataWriteTransaction{}
+	defer s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
 	if skipReason == "" {
 		result.AccountData, transaction = s.registerBuiltinPackAccountDataForSpacesTransactionalExcludingLocked(ctx, []id.RoomID{space}, []id.RoomID{oldSpace})
 		if oldSpace != space {

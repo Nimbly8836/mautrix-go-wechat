@@ -137,18 +137,22 @@ func buildBuiltinEmojiPackWithUnrelated(data builtinEmojiStoreData, unrelated ma
 	out.WriteString(`{"images":{`)
 	first := true
 	for _, entry := range textemoji.Entries() {
-		image, ok := canonical[entry.Shortcode]
-		if !ok {
-			continue
+		var value json.RawMessage
+		if image, ok := canonical[entry.Shortcode]; ok {
+			value, _ = json.Marshal(struct {
+				URL string `json:"url"`
+			}{URL: image.MXC})
+		} else {
+			value = unrelated[entry.Shortcode]
+			if !json.Valid(value) {
+				continue
+			}
 		}
 		if !first {
 			out.WriteByte(',')
 		}
 		first = false
-		key, _ := json.Marshal(image.Shortcode)
-		value, _ := json.Marshal(struct {
-			URL string `json:"url"`
-		}{URL: image.MXC})
+		key, _ := json.Marshal(entry.Shortcode)
 		out.Write(key)
 		out.WriteByte(':')
 		out.Write(value)
@@ -205,10 +209,7 @@ func rawImagePackImages(raw json.RawMessage) map[string]json.RawMessage {
 }
 
 func builtinEmojiImageReplacements(data builtinEmojiStoreData) map[string]json.RawMessage {
-	replacements := make(map[string]json.RawMessage, len(textemoji.Entries()))
-	for _, entry := range textemoji.Entries() {
-		replacements[entry.Shortcode] = nil
-	}
+	replacements := make(map[string]json.RawMessage, len(data.Images))
 	for _, image := range data.Images {
 		encoded, _ := json.Marshal(struct {
 			URL string `json:"url"`
@@ -525,13 +526,13 @@ func mergeAccountDataVisibilityResults(initial, final accountDataVisibilityResul
 
 func (s *Server) registerBuiltinPackAccountDataLocked(ctx context.Context) accountDataVisibilityResult {
 	result, transaction := s.registerBuiltinPackAccountDataForSpacesTransactionalLocked(ctx, nil)
-	s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
+	defer s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
 	return result
 }
 
 func (s *Server) registerBuiltinPackAccountDataForSpacesLocked(ctx context.Context, extraSpaces []id.RoomID) accountDataVisibilityResult {
 	result, transaction := s.registerBuiltinPackAccountDataForSpacesTransactionalLocked(ctx, extraSpaces)
-	s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
+	defer s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
 	return result
 }
 
@@ -557,7 +558,14 @@ func (s *Server) registerBuiltinPackAccountDataForSpacesTransactionalLocked(ctx 
 func (s *Server) registerBuiltinPackAccountDataForSpacesTransactionalExcludingLocked(ctx context.Context, extraSpaces, excludedRooms []id.RoomID) (accountDataVisibilityResult, accountDataWriteTransaction) {
 	s.lockAccountData()
 	transaction := accountDataWriteTransaction{accountDataLock: true}
+	returned := false
+	defer func() {
+		if !returned {
+			s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
+		}
+	}()
 	result := s.registerBuiltinPackAccountDataForSpacesTransactionAccountDataLocked(ctx, extraSpaces, excludedRooms, &transaction)
+	returned = true
 	return result, transaction
 }
 
@@ -737,6 +745,7 @@ func (s *Server) pendingRetiredSpaceRooms() []id.RoomID {
 
 func (s *Server) reconcileBuiltinPackAccountDataLocked(ctx context.Context) accountDataVisibilityResult {
 	result, transaction := s.registerBuiltinPackAccountDataForSpacesTransactionalLocked(ctx, nil)
+	defer s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
 	retired := s.pendingRetiredSpaceRooms()
 	cleared := make([]string, 0, len(retired))
 	for _, room := range retired {
@@ -750,7 +759,6 @@ func (s *Server) reconcileBuiltinPackAccountDataLocked(ctx context.Context) acco
 			result.Warnings = append(result.Warnings, fmt.Sprintf("persist cleared retired Space account-data sources %v: %v", cleared, err))
 		}
 	}
-	s.finishBuiltinPackAccountDataTransactionLocked(&transaction)
 	return result
 }
 

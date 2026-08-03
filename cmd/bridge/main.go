@@ -45,7 +45,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-	if err = cfg.ValidateBridgePathCollisions(*regPath); err != nil {
+	if err = cfg.ValidateBridgePathCollisions(*configPath, *regPath); err != nil {
 		log.Fatalf("validate bridge paths: %v", err)
 	}
 	if cfg.Bridge.SessionFile == "" {
@@ -97,7 +97,7 @@ func generateRegistration(configPath, regPath string) error {
 			return err
 		}
 	}
-	if err = cfg.ValidateBridgePathCollisions(regPath); err != nil {
+	if err = cfg.ValidateBridgePathCollisions(configPath, regPath); err != nil {
 		return err
 	}
 	reg := cfg.GenerateRegistration()

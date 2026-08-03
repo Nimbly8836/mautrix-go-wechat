@@ -152,8 +152,8 @@ func (c *Config) resolveBridgePathDefaults() {
 }
 
 // ValidateBridgePathCollisions rejects a built-in emoji manifest path that
-// aliases bridge state or the appservice registration file.
-func (c *Config) ValidateBridgePathCollisions(registrationPath string) error {
+// aliases bridge state, the bridge config, or the appservice registration file.
+func (c *Config) ValidateBridgePathCollisions(configPath, registrationPath string) error {
 	c.resolveBridgePathDefaults()
 	builtinPath, err := resolveComparablePath(c.Bridge.WechatBuiltinEmojiFile)
 	if err != nil {
@@ -169,11 +169,16 @@ func (c *Config) ValidateBridgePathCollisions(registrationPath string) error {
 		{name: "contact_file", path: c.Bridge.ContactFile},
 		{name: "emoji_dir", path: c.Bridge.EmojiDir},
 	}
-	if registrationPath != "" {
-		statePaths = append(statePaths, struct {
-			name string
-			path string
-		}{name: "registration path", path: registrationPath})
+	for _, runtimePath := range []struct {
+		name string
+		path string
+	}{
+		{name: "config path", path: configPath},
+		{name: "registration path", path: registrationPath},
+	} {
+		if runtimePath.path != "" {
+			statePaths = append(statePaths, runtimePath)
+		}
 	}
 	for _, statePath := range statePaths {
 		resolved, resolveErr := resolveComparablePath(statePath.path)
@@ -251,7 +256,7 @@ func (c *Config) validate() error {
 		c.Bridge.CommandPrefix = "!wx"
 	}
 	c.Bridge.OfficialAccountMode = normalizeOfficialAccountModeForConfig(c.Bridge.OfficialAccountMode)
-	if err := c.ValidateBridgePathCollisions(""); err != nil {
+	if err := c.ValidateBridgePathCollisions("", ""); err != nil {
 		return err
 	}
 	if c.Bridge.CommandPrefix[0] != '!' {

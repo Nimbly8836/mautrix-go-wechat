@@ -166,10 +166,24 @@ func (s *Server) handleCommand(ctx context.Context, room id.RoomID, sender id.Us
 			s.notice(ctx, room, fmt.Sprintf("已切换到账号 %s，但 session 可能已失效，请重新 `%s login <flow>`。\n\n%s", wxid, s.commandPrefix(), formatSpaceTransitionStatus(transition)))
 		}
 	case "logout", "登出", "退出":
-		if err := s.api.Logout(ctx); err != nil {
+		s.accountTransitionMu.Lock()
+		defer s.accountTransitionMu.Unlock()
+		s.mu.Lock()
+		api := s.api
+		s.mu.Unlock()
+		if api == nil {
+			s.notice(ctx, room, "退出失败: WeChat API 不可用。")
+			return
+		}
+		transitionGeneration := s.beginRemoteTransition()
+		defer s.clearRemoteTransition(transitionGeneration)
+		if err := api.Logout(ctx); err != nil {
 			s.notice(ctx, room, fmt.Sprintf("退出失败: %v", err))
 			return
 		}
+		s.mu.Lock()
+		s.activeAccount = ""
+		s.mu.Unlock()
 		if err := s.stopRemote(ctx); err != nil {
 			s.notice(ctx, room, fmt.Sprintf("已退出 WeChat，但等待旧连接停止失败: %v", err))
 			return

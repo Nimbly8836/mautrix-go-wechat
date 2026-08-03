@@ -126,6 +126,77 @@ func TestUseSavedAccountWaitsForOldGenerationBeforePublishingOrStartingReplaceme
 	}
 }
 
+func TestUseSavedAccountTransitionGapCannotRestartStoppedConnector(t *testing.T) {
+	accounts, _ := seededAccountStore(t)
+	releaseOld := make(chan struct{})
+	gapReached := make(chan struct{})
+	releasePublish := make(chan struct{})
+	oldAPI := &accountSessionAPI{self: "wxid_old"}
+	oldConn := &blockedRemoteConnector{api: oldAPI, started: make(chan struct{}, 2), canceled: make(chan struct{}, 1), releaseAfterCancel: releaseOld}
+	newAPI := &accountSessionAPI{self: "wxid_other"}
+	newConn := &blockedRemoteConnector{api: newAPI, started: make(chan struct{}, 1), canceled: make(chan struct{}, 1)}
+	s := &Server{
+		accounts:      accounts,
+		cfg:           &config.Config{Network: config.Network{Protocol: "wechat"}},
+		conn:          oldConn,
+		api:           oldAPI,
+		activeAccount: "wxid_old",
+		newConnector: func(string, remoteapi.Config, connector.EventSink) (remoteConnector, error) {
+			return newConn, nil
+		},
+		beforeRemotePublish: func() {
+			close(gapReached)
+			<-releasePublish
+		},
+		remoteStopTimeout: time.Second,
+	}
+	s.startRemote(context.Background())
+	waitRemoteSignal(t, oldConn.started, "old connector start")
+
+	transitionDone := make(chan error, 1)
+	go func() { transitionDone <- s.useSavedAccount(context.Background(), "wxid_other") }()
+	waitRemoteSignal(t, oldConn.canceled, "old connector cancellation")
+	close(releaseOld)
+	waitRemoteSignal(t, gapReached, "joined-stop/publish transition gap")
+
+	s.startRemote(context.Background())
+	s.mu.Lock()
+	restarted := s.remoteRun
+	transitioning := s.remoteTransition
+	publishedConn := s.conn
+	publishedAccount := s.activeAccount
+	s.mu.Unlock()
+	if restarted || oldConn.runs.Load() != 1 {
+		t.Fatalf("stopped connector restarted in transition gap: remoteRun=%v runs=%d", restarted, oldConn.runs.Load())
+	}
+	if !transitioning || publishedConn != oldConn || publishedAccount != "wxid_old" {
+		t.Fatalf("gap publication = transitioning=%v conn=%T account=%q", transitioning, publishedConn, publishedAccount)
+	}
+
+	close(releasePublish)
+	select {
+	case err := <-transitionDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("account transition did not publish replacement")
+	}
+	s.mu.Lock()
+	transitioning = s.remoteTransition
+	publishedConn = s.conn
+	publishedAccount = s.activeAccount
+	s.mu.Unlock()
+	if transitioning || publishedConn != newConn || publishedAccount != "wxid_other" {
+		t.Fatalf("replacement publication = transitioning=%v conn=%T account=%q", transitioning, publishedConn, publishedAccount)
+	}
+	s.startRemote(context.Background())
+	waitRemoteSignal(t, newConn.started, "replacement connector start")
+	if err := s.stopRemote(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUseSavedAccountStopTimeoutDoesNotReplaceRunningGeneration(t *testing.T) {
 	accounts, _ := seededAccountStore(t)
 	releaseOld := make(chan struct{})

@@ -119,22 +119,20 @@ func (s *Server) handleBuiltinEmojiImportCommand(eventCtx context.Context, room 
 }
 
 func (s *Server) captureBuiltinEmojiImportTarget(ctx context.Context, room id.RoomID, sender id.UserID) (builtinEmojiImportTarget, bool) {
-	s.accountTransitionMu.Lock()
 	s.mu.Lock()
 	api := s.api
+	account := s.activeAccount
 	s.mu.Unlock()
-	account, exists := s.accounts.current()
-	s.accountTransitionMu.Unlock()
 
 	if api == nil {
 		s.safeBuiltinEmojiNotice(ctx, room, "WeChat built-in emoji import requires a captured logged-in API session.")
 		return builtinEmojiImportTarget{}, false
 	}
-	if !exists || account.ID == "" {
-		s.safeBuiltinEmojiNotice(ctx, room, "WeChat built-in emoji import requires one current saved account.")
+	if account == "" {
+		s.safeBuiltinEmojiNotice(ctx, room, "WeChat built-in emoji import requires one active saved account.")
 		return builtinEmojiImportTarget{}, false
 	}
-	return builtinEmojiImportTarget{api: api, account: account.ID, room: room, sender: sender}, true
+	return builtinEmojiImportTarget{api: api, account: account, room: room, sender: sender}, true
 }
 
 func (s *Server) resolveBuiltinEmojiImportSpace(ctx context.Context, account remoteapi.UserID) (id.RoomID, error) {

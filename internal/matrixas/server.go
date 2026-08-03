@@ -87,22 +87,26 @@ type Server struct {
 	accountDataMu sync.Mutex
 	// Test barriers invoked after a portal snapshot and immediately before the
 	// corresponding image-pack lock.
-	afterPortalSnapshot    func([]portalRecord)
-	beforePackLock         func()
-	beforeAccountDataLock  func()
-	beforeRemoteRun        func(uint64)
-	matrixOperationTimeout time.Duration
-	remoteStopTimeout      time.Duration
-	rawImagePackState      rawImagePackState
-	rooms                  map[id.RoomID]bool
-	messageEvents          map[string]id.EventID
-	remoteRun              bool
-	remoteCtx              context.Context
-	remoteStop             context.CancelFunc
-	remoteGeneration       uint64
-	remoteDone             chan struct{}
-	contactRefresh         map[string]bool
-	puppetJoins            map[string]bool
+	afterPortalSnapshot        func([]portalRecord)
+	beforePackLock             func()
+	beforeAccountDataLock      func()
+	beforeRemoteRun            func(uint64)
+	beforeRemotePublish        func()
+	matrixOperationTimeout     time.Duration
+	remoteStopTimeout          time.Duration
+	rawImagePackState          rawImagePackState
+	rooms                      map[id.RoomID]bool
+	messageEvents              map[string]id.EventID
+	remoteRun                  bool
+	remoteCtx                  context.Context
+	remoteStop                 context.CancelFunc
+	remoteGeneration           uint64
+	remoteDone                 chan struct{}
+	remoteTransition           bool
+	remoteTransitionGeneration uint64
+	activeAccount              remoteapi.UserID
+	contactRefresh             map[string]bool
+	puppetJoins                map[string]bool
 }
 
 const (
@@ -121,7 +125,7 @@ func (s *Server) matrixOperationContext(ctx context.Context) (context.Context, c
 
 // New creates the appservice and remote connector from config + registration.
 func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, error) {
-	if err := cfg.ValidateBridgePathCollisions(regPath); err != nil {
+	if err := cfg.ValidateBridgePathCollisions("", regPath); err != nil {
 		return nil, err
 	}
 	reg, err := appservice.LoadRegistration(regPath)
@@ -149,6 +153,9 @@ func New(cfg *config.Config, regPath string, apiCfg remoteapi.Config) (*Server, 
 	s.portals = newPortalStore(cfg.Bridge.PortalFile)
 	s.accounts = newAccountStore(cfg.Bridge.AccountFile)
 	s.apiCfg = applyStartupSession(s.apiCfg, s.accounts, s.sessionFile)
+	if current, ok := s.accounts.current(); ok {
+		s.activeAccount = current.ID
+	}
 	s.contacts = newContactStore(cfg.Bridge.ContactFile)
 
 	conn, err := connector.New(cfg.Network.Protocol, s.apiCfg, s)
@@ -784,7 +791,7 @@ func (s *Server) startRemote(ctx context.Context) {
 		ctx = context.Background()
 	}
 	s.mu.Lock()
-	if s.remoteRun || s.conn == nil {
+	if s.remoteRun || s.remoteTransition || s.conn == nil {
 		s.mu.Unlock()
 		return
 	}
@@ -854,6 +861,22 @@ func (s *Server) stopRemote(ctx context.Context) error {
 	}
 }
 
+func (s *Server) beginRemoteTransition() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.remoteTransitionGeneration++
+	s.remoteTransition = true
+	return s.remoteTransitionGeneration
+}
+
+func (s *Server) clearRemoteTransition(generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.remoteTransitionGeneration == generation {
+		s.remoteTransition = false
+	}
+}
+
 func (s *Server) currentProtocol() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -888,15 +911,32 @@ func (s *Server) rebuildConnector(ctx context.Context, protocol string, session 
 	if err != nil {
 		return err
 	}
+	transitionGeneration := s.beginRemoteTransition()
+	published := false
+	defer func() {
+		if !published {
+			s.clearRemoteTransition(transitionGeneration)
+		}
+	}()
 	if err = s.stopRemote(ctx); err != nil {
 		return err
+	}
+	s.mu.Lock()
+	beforePublish := s.beforeRemotePublish
+	s.mu.Unlock()
+	if beforePublish != nil {
+		beforePublish()
 	}
 	s.mu.Lock()
 	s.cfg.Network.Protocol = protocol
 	s.apiCfg = cfg
 	s.conn = conn
 	s.api = conn.API()
+	if s.remoteTransitionGeneration == transitionGeneration {
+		s.remoteTransition = false
+	}
 	s.mu.Unlock()
+	published = true
 	return nil
 }
 
@@ -929,6 +969,13 @@ func (s *Server) useSavedAccount(ctx context.Context, id remoteapi.UserID) error
 		return fmt.Errorf("unknown account %s", id)
 	}
 	// Current is durable before the live connector is stopped or replaced.
+	transitionGeneration := s.beginRemoteTransition()
+	published := false
+	defer func() {
+		if !published {
+			s.clearRemoteTransition(transitionGeneration)
+		}
+	}()
 	if err = s.stopRemote(ctx); err != nil {
 		if hadPrevious {
 			_, rollbackErr := s.accounts.setCurrent(previous.ID)
@@ -939,11 +986,22 @@ func (s *Server) useSavedAccount(ctx context.Context, id remoteapi.UserID) error
 		return err
 	}
 	s.mu.Lock()
+	beforePublish := s.beforeRemotePublish
+	s.mu.Unlock()
+	if beforePublish != nil {
+		beforePublish()
+	}
+	s.mu.Lock()
 	s.cfg.Network.Protocol = protocol
 	s.apiCfg = cfg
 	s.conn = conn
 	s.api = conn.API()
+	s.activeAccount = id
+	if s.remoteTransitionGeneration == transitionGeneration {
+		s.remoteTransition = false
+	}
 	s.mu.Unlock()
+	published = true
 	return nil
 }
 
@@ -983,6 +1041,9 @@ func (s *Server) saveSessionLocked(ctx context.Context, loginFlow string) error 
 	if err := s.accounts.put(snapshot); err != nil {
 		return fmt.Errorf("persist session for %s: %w", self, err)
 	}
+	s.mu.Lock()
+	s.activeAccount = self
+	s.mu.Unlock()
 	return nil
 }
 
