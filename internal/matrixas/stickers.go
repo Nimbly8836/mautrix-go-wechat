@@ -2,6 +2,8 @@ package matrixas
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -157,13 +159,24 @@ func (s *Server) handleStickersCommand(ctx context.Context, room id.RoomID, send
 }
 
 func (s *Server) stickerStatusText(ctx context.Context, account remoteapi.UserID) string {
+	if s == nil {
+		return "Sticker 状态: unavailable"
+	}
+	s.lockImagePack()
+	defer s.packMu.Unlock()
+	return s.stickerStatusTextLocked(ctx, account)
+}
+
+func (s *Server) stickerStatusTextLocked(ctx context.Context, account remoteapi.UserID) string {
 	stateKey := wechatStickerPackStateKey(account)
 	space := id.RoomID("")
-	if acc, ok := s.accounts.get(account); ok {
-		space = id.RoomID(acc.SpaceRoom)
+	if s.accounts != nil {
+		if acc, ok := s.accounts.get(account); ok {
+			space = id.RoomID(acc.SpaceRoom)
+		}
 	}
-	spaceCount := s.imagePackCount(ctx, space, event.StateImagePack, stateKey)
-	legacySpaceCount := s.imagePackCount(ctx, space, event.StateUnstableImagePack, "")
+	spaceCount := s.imagePackCountLocked(ctx, space, event.StateImagePack, stateKey)
+	legacySpaceCount := s.imagePackCountLocked(ctx, space, event.StateUnstableImagePack, "")
 	portalRooms := 0
 	portalLegacyWithPack := 0
 	portalLegacyTotal := 0
@@ -173,7 +186,7 @@ func (s *Server) stickerStatusText(ctx context.Context, account remoteapi.UserID
 				continue
 			}
 			portalRooms++
-			count := s.imagePackCount(ctx, portal.RoomID, event.StateUnstableImagePack, "")
+			count := s.imagePackCountLocked(ctx, portal.RoomID, event.StateUnstableImagePack, "")
 			if count > 0 {
 				portalLegacyWithPack++
 				portalLegacyTotal += count
@@ -188,18 +201,36 @@ func (s *Server) stickerStatusText(ctx context.Context, account remoteapi.UserID
 }
 
 func (s *Server) imagePackCount(ctx context.Context, room id.RoomID, eventType event.Type, stateKey string) int {
-	if room == "" || s == nil || s.as == nil || s.as.BotIntent() == nil {
+	if s == nil {
 		return 0
 	}
-	var content event.ImagePackEventContent
-	if err := s.as.BotIntent().StateEvent(ctx, room, eventType, stateKey, &content); err != nil {
+	s.lockImagePack()
+	defer s.packMu.Unlock()
+	return s.imagePackCountLocked(ctx, room, eventType, stateKey)
+}
+
+func (s *Server) imagePackCountLocked(ctx context.Context, room id.RoomID, eventType event.Type, stateKey string) int {
+	if room == "" {
 		return 0
 	}
-	return len(content.Images)
+	raw, err := s.packState().Load(ctx, room, eventType, stateKey)
+	if err != nil {
+		return 0
+	}
+	return len(parsePackImages(raw))
 }
 
 func (s *Server) syncStickerToElementPortals(ctx context.Context, account remoteapi.UserID, sticker wechatStickerImage) int {
-	if s == nil || s.portals == nil {
+	if s == nil {
+		return 0
+	}
+	s.lockImagePack()
+	defer s.packMu.Unlock()
+	return s.syncStickerToElementPortalsLocked(ctx, account, sticker)
+}
+
+func (s *Server) syncStickerToElementPortalsLocked(ctx context.Context, account remoteapi.UserID, sticker wechatStickerImage) int {
+	if s.portals == nil {
 		return 0
 	}
 	count := 0
@@ -207,7 +238,7 @@ func (s *Server) syncStickerToElementPortals(ctx context.Context, account remote
 		if portal.RoomID == "" {
 			continue
 		}
-		s.addStickerToElementPortal(ctx, account, portal.RoomID, sticker)
+		s.addStickerToElementPortalLocked(ctx, account, portal.RoomID, sticker)
 		count++
 	}
 	return count
@@ -345,110 +376,273 @@ func (s *Server) ensureUserSeesImagePackRoom(ctx context.Context, user id.UserID
 	}
 }
 
+func (s *Server) lockImagePack() {
+	if s.beforePackLock != nil {
+		s.beforePackLock()
+	}
+	s.packMu.Lock()
+}
+
+func (s *Server) packState() rawImagePackState {
+	if s.rawImagePackState != nil {
+		return s.rawImagePackState
+	}
+	return matrixRawImagePackState{server: s}
+}
+
+func (s *Server) baseStickerPackRaw(account remoteapi.UserID) json.RawMessage {
+	raw, err := json.Marshal(buildWechatStickerPackContent(account, nil))
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
+func rawJSONObject(raw json.RawMessage) bool {
+	var object map[string]json.RawMessage
+	return json.Unmarshal(raw, &object) == nil && object != nil
+}
+
+func (s *Server) loadStickerPackOrBaseLocked(ctx context.Context, account remoteapi.UserID, room id.RoomID, eventType event.Type, stateKey string) (json.RawMessage, error) {
+	raw, err := s.packState().Load(ctx, room, eventType, stateKey)
+	if errors.Is(err, errImagePackStateNotFound) {
+		return s.initialStickerPackRaw(account, eventType, stateKey), nil
+	} else if err != nil {
+		return nil, fmt.Errorf("load image pack type=%s room=%s state_key=%s: %w", eventType.Type, room, stateKey, err)
+	} else if !rawJSONObject(raw) {
+		return s.initialStickerPackRaw(account, eventType, stateKey), nil
+	}
+	return raw, nil
+}
+
+func (s *Server) initialStickerPackRaw(account remoteapi.UserID, eventType event.Type, stateKey string) json.RawMessage {
+	// The shared Element compatibility event must contain only images. Account-
+	// specific metadata belongs exclusively to the namespaced stable pack.
+	if eventType == event.StateUnstableImagePack && stateKey == "" {
+		return json.RawMessage(`{}`)
+	}
+	return s.baseStickerPackRaw(account)
+}
+
+func rawPackImageObjects(raw json.RawMessage) map[string]json.RawMessage {
+	var content struct {
+		Images map[string]json.RawMessage `json:"images"`
+	}
+	if json.Unmarshal(raw, &content) != nil {
+		return map[string]json.RawMessage{}
+	}
+	images := make(map[string]json.RawMessage, len(content.Images))
+	for shortcode, rawImage := range content.Images {
+		var image struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal(rawImage, &image) != nil {
+			continue
+		}
+		if _, ok := validMXC(image.URL); !ok {
+			continue
+		}
+		shortcode = normalizeStickerShortcode(shortcode)
+		if shortcode == "" {
+			continue
+		}
+		images[shortcode] = append(json.RawMessage(nil), rawImage...)
+	}
+	return images
+}
+
+func stickerImageRaw(sticker wechatStickerImage) (string, json.RawMessage, error) {
+	shortcode := normalizeStickerShortcode(sticker.Shortcode)
+	if shortcode == "" {
+		return "", nil, fmt.Errorf("empty sticker shortcode")
+	}
+	if _, ok := validMXC(string(sticker.URL)); !ok {
+		return "", nil, fmt.Errorf("invalid sticker MXC URL %q", sticker.URL)
+	}
+	body := strings.TrimSpace(sticker.Body)
+	if body == "" {
+		body = shortcode
+	}
+	raw, err := json.Marshal(&event.ImagePackImage{URL: sticker.URL, Body: body})
+	return shortcode, raw, err
+}
+
+func mergeRawPackImageSets(dst map[string]json.RawMessage, raw json.RawMessage) {
+	for shortcode, image := range rawPackImageObjects(raw) {
+		if _, exists := dst[shortcode]; !exists {
+			dst[shortcode] = image
+		}
+	}
+}
+
+func (s *Server) savePackImageReplacementsLocked(ctx context.Context, account remoteapi.UserID, room id.RoomID, target imagePackStateEventTarget, replacements map[string]json.RawMessage) (json.RawMessage, error) {
+	raw, err := s.loadStickerPackOrBaseLocked(ctx, account, room, target.EventType, target.StateKey)
+	if err != nil {
+		return nil, err
+	}
+	merged, err := mergePackImages(raw, replacements)
+	if err != nil {
+		return nil, err
+	}
+	if err = s.packState().Save(ctx, room, target.EventType, target.StateKey, merged); err != nil {
+		return nil, err
+	}
+	return merged, nil
+}
+
 func (s *Server) repairStickerPacksForAccount(ctx context.Context, account remoteapi.UserID, space id.RoomID, owner id.UserID) int {
-	if account == "" || space == "" || s == nil || s.as == nil || s.as.BotIntent() == nil || s.as.BotIntent().Client == nil {
+	if s == nil {
+		return 0
+	}
+	s.lockImagePack()
+	count := s.repairStickerPacksForAccountLocked(ctx, account, space)
+	s.packMu.Unlock()
+	if count > 0 && owner != "" {
+		s.ensureUserSeesImagePackRoom(ctx, owner, space, wechatStickerPackStateKey(account))
+	}
+	return count
+}
+
+func (s *Server) repairStickerPacksForAccountLocked(ctx context.Context, account remoteapi.UserID, space id.RoomID) int {
+	if account == "" || space == "" {
 		return 0
 	}
 	stateKey := wechatStickerPackStateKey(account)
-	merged := buildWechatStickerPackContent(account, nil)
+	replacements := make(map[string]json.RawMessage)
 	for _, target := range imagePackStateEventTargets(stateKey) {
-		var existing event.ImagePackEventContent
-		if err := s.as.BotIntent().StateEvent(ctx, space, target.EventType, target.StateKey, &existing); err == nil {
-			mergeImagePackContent(merged, &existing)
+		if raw, err := s.packState().Load(ctx, space, target.EventType, target.StateKey); err == nil {
+			mergeRawPackImageSets(replacements, raw)
 		}
 	}
-	joined, err := s.as.BotIntent().Client.JoinedRooms(ctx)
-	if err != nil {
-		log.Printf("failed to list joined rooms for sticker pack repair account=%s: %v", account, err)
-	} else {
-		for _, room := range joined.JoinedRooms {
-			for _, target := range imagePackStateEventTargets(stateKey) {
-				for _, alias := range target.Aliases {
-					var existing event.ImagePackEventContent
-					if err := s.as.BotIntent().StateEvent(ctx, room, target.EventType, alias, &existing); err == nil {
-						mergeImagePackContent(merged, &existing)
+	if s.as != nil && s.as.BotIntent() != nil && s.as.BotIntent().Client != nil {
+		joined, err := s.as.BotIntent().Client.JoinedRooms(ctx)
+		if err != nil {
+			log.Printf("failed to list joined rooms for sticker pack repair account=%s: %v", account, err)
+		} else {
+			for _, room := range joined.JoinedRooms {
+				for _, target := range imagePackStateEventTargets(stateKey) {
+					for _, alias := range target.Aliases {
+						if raw, loadErr := s.packState().Load(ctx, room, target.EventType, alias); loadErr == nil {
+							mergeRawPackImageSets(replacements, raw)
+						}
 					}
 				}
 			}
 		}
 	}
-	if len(merged.Images) == 0 {
+	if len(replacements) == 0 {
 		return 0
 	}
-	merged.Metadata = buildWechatStickerPackContent(account, nil).Metadata
-	if err := s.writeStickerPackToRoom(ctx, account, space, merged); err != nil {
+	if _, err := s.patchStickerPackImagesToRoomLocked(ctx, account, space, replacements); err != nil {
 		log.Printf("failed to write repaired account sticker pack account=%s space=%s: %v", account, space, err)
 		return 0
 	}
-	if owner != "" {
-		s.ensureUserSeesImagePackRoom(ctx, owner, space, stateKey)
-	}
 	if s.portals != nil {
 		for _, portal := range s.portals.list() {
-			s.mirrorStickerPackToElementPortal(ctx, account, space, portal.RoomID)
+			s.mirrorStickerPackToElementPortalLocked(ctx, account, space, portal.RoomID)
 		}
 	}
-	return len(merged.Images)
+	return len(replacements)
 }
 
 func (s *Server) repairStickerPackCompatibility(ctx context.Context, account remoteapi.UserID, room id.RoomID, owner id.UserID) {
-	if account == "" || room == "" || s == nil || s.as == nil || s.as.BotIntent() == nil {
+	if s == nil {
 		return
 	}
-	stateKey := wechatStickerPackStateKey(account)
-	var content event.ImagePackEventContent
-	if err := s.as.BotIntent().StateEvent(ctx, room, event.StateImagePack, stateKey, &content); err != nil || len(content.Images) == 0 {
-		return
-	}
-	if err := s.writeStickerPackToRoom(ctx, account, room, &content); err != nil {
-		log.Printf("failed to repair sticker pack compatibility account=%s room=%s: %v", account, room, err)
-	}
-	if owner != "" {
-		s.ensureUserSeesImagePackRoom(ctx, owner, room, stateKey)
+	s.lockImagePack()
+	repaired := s.repairStickerPackCompatibilityLocked(ctx, account, room)
+	s.packMu.Unlock()
+	if repaired && owner != "" {
+		s.ensureUserSeesImagePackRoom(ctx, owner, room, wechatStickerPackStateKey(account))
 	}
 }
 
+func (s *Server) repairStickerPackCompatibilityLocked(ctx context.Context, account remoteapi.UserID, room id.RoomID) bool {
+	if account == "" || room == "" {
+		return false
+	}
+	raw, err := s.packState().Load(ctx, room, event.StateImagePack, wechatStickerPackStateKey(account))
+	if err != nil {
+		return false
+	}
+	replacements := rawPackImageObjects(raw)
+	if len(replacements) == 0 {
+		return false
+	}
+	if _, err = s.patchStickerPackImagesToRoomLocked(ctx, account, room, replacements); err != nil {
+		log.Printf("failed to repair sticker pack compatibility account=%s room=%s: %v", account, room, err)
+		return false
+	}
+	return true
+}
+
 func (s *Server) mirrorStickerPackToElementPortal(ctx context.Context, account remoteapi.UserID, source, portal id.RoomID) {
-	if account == "" || source == "" || portal == "" || source == portal || s == nil || s.as == nil || s.as.BotIntent() == nil {
+	if s == nil {
 		return
 	}
-	stateKey := wechatStickerPackStateKey(account)
-	var content event.ImagePackEventContent
-	if err := s.as.BotIntent().StateEvent(ctx, source, event.StateImagePack, stateKey, &content); err != nil || len(content.Images) == 0 {
+	s.lockImagePack()
+	defer s.packMu.Unlock()
+	s.mirrorStickerPackToElementPortalLocked(ctx, account, source, portal)
+}
+
+func (s *Server) mirrorStickerPackToElementPortalLocked(ctx context.Context, account remoteapi.UserID, source, portal id.RoomID) {
+	if account == "" || source == "" || portal == "" || source == portal {
+		return
+	}
+	raw, err := s.packState().Load(ctx, source, event.StateImagePack, wechatStickerPackStateKey(account))
+	if err != nil {
+		return
+	}
+	replacements := rawPackImageObjects(raw)
+	if len(replacements) == 0 {
 		return
 	}
 	for _, target := range imagePackPortalMirrorTargets() {
-		if _, err := s.as.BotIntent().SendStateEvent(ctx, portal, target.EventType, target.StateKey, &content); err != nil {
+		if _, err = s.savePackImageReplacementsLocked(ctx, account, portal, target, replacements); err != nil {
 			log.Printf("failed to mirror sticker pack to Element portal type=%s account=%s portal=%s state_key=%s: %v", target.EventType.Type, account, portal, target.StateKey, err)
 		}
 	}
 }
 
 func (s *Server) addStickerToElementPortal(ctx context.Context, account remoteapi.UserID, portal id.RoomID, sticker wechatStickerImage) {
-	if account == "" || portal == "" || s == nil || s.as == nil || s.as.BotIntent() == nil {
+	if s == nil {
 		return
 	}
-	content := buildWechatStickerPackContent(account, nil)
-	var existing event.ImagePackEventContent
-	if err := s.as.BotIntent().StateEvent(ctx, portal, event.StateUnstableImagePack, "", &existing); err == nil && existing.Images != nil {
-		content = &existing
+	s.lockImagePack()
+	defer s.packMu.Unlock()
+	s.addStickerToElementPortalLocked(ctx, account, portal, sticker)
+}
+
+func (s *Server) addStickerToElementPortalLocked(ctx context.Context, account remoteapi.UserID, portal id.RoomID, sticker wechatStickerImage) {
+	if account == "" || portal == "" {
+		return
 	}
-	if content.Images == nil {
-		content.Images = map[string]*event.ImagePackImage{}
+	shortcode, rawImage, err := stickerImageRaw(sticker)
+	if err != nil {
+		log.Printf("failed to encode sticker for Element portal account=%s portal=%s: %v", account, portal, err)
+		return
 	}
-	content.Metadata = buildWechatStickerPackContent(account, nil).Metadata
-	content.Images[sticker.Shortcode] = &event.ImagePackImage{URL: sticker.URL, Body: sticker.Body}
 	for _, target := range imagePackPortalMirrorTargets() {
-		if _, err := s.as.BotIntent().SendStateEvent(ctx, portal, target.EventType, target.StateKey, content); err != nil {
-			log.Printf("failed to add sticker to Element portal pack type=%s account=%s portal=%s state_key=%s: %v", target.EventType.Type, account, portal, target.StateKey, err)
+		merged, saveErr := s.savePackImageReplacementsLocked(ctx, account, portal, target, map[string]json.RawMessage{shortcode: rawImage})
+		if saveErr != nil {
+			log.Printf("failed to add sticker to Element portal pack type=%s account=%s portal=%s state_key=%s: %v", target.EventType.Type, account, portal, target.StateKey, saveErr)
 		} else {
-			log.Printf("added sticker to Element portal pack type=%s account=%s portal=%s state_key=%s count=%d shortcode=%s", target.EventType.Type, account, portal, target.StateKey, len(content.Images), sticker.Shortcode)
+			log.Printf("added sticker to Element portal pack type=%s account=%s portal=%s state_key=%s count=%d shortcode=%s", target.EventType.Type, account, portal, target.StateKey, len(parsePackImages(merged)), shortcode)
 		}
 	}
 }
 
 func (s *Server) removeStickerPackFromRoom(ctx context.Context, account remoteapi.UserID, room id.RoomID) {
-	if account == "" || room == "" || s == nil || s.as == nil || s.as.BotIntent() == nil {
+	if s == nil {
+		return
+	}
+	s.lockImagePack()
+	defer s.packMu.Unlock()
+	s.removeStickerPackFromRoomLocked(ctx, account, room)
+}
+
+func (s *Server) removeStickerPackFromRoomLocked(ctx context.Context, account remoteapi.UserID, room id.RoomID) {
+	if account == "" || room == "" {
 		return
 	}
 	stateKey := wechatStickerPackStateKey(account)
@@ -457,7 +651,7 @@ func (s *Server) removeStickerPackFromRoom(ctx context.Context, account remoteap
 			if target.EventType == event.StateUnstableImagePack && alias == "" {
 				continue
 			}
-			if _, err := s.as.BotIntent().SendStateEvent(ctx, room, target.EventType, alias, map[string]any{}); err != nil {
+			if err := s.packState().Save(ctx, room, target.EventType, alias, json.RawMessage(`{}`)); err != nil {
 				log.Printf("failed to remove sticker image pack type=%s account=%s room=%s state_key=%s: %v", target.EventType.Type, account, room, alias, err)
 			} else {
 				log.Printf("removed sticker image pack type=%s account=%s room=%s state_key=%s", target.EventType.Type, account, room, alias)
@@ -466,40 +660,65 @@ func (s *Server) removeStickerPackFromRoom(ctx context.Context, account remoteap
 	}
 }
 
-func (s *Server) writeStickerPackToRoom(ctx context.Context, account remoteapi.UserID, room id.RoomID, content *event.ImagePackEventContent) error {
+// patchStickerPackImagesToRoomLocked applies image-object patches to both
+// canonical pack state events, then clears non-canonical aliases. Callers must
+// hold packMu. Nil replacement values delete images; omitted images are kept.
+func (s *Server) patchStickerPackImagesToRoomLocked(ctx context.Context, account remoteapi.UserID, room id.RoomID, replacements map[string]json.RawMessage) (json.RawMessage, error) {
 	stateKey := wechatStickerPackStateKey(account)
-	for _, target := range imagePackStateEventTargets(stateKey) {
-		for _, alias := range target.Aliases {
-			if alias != target.StateKey {
-				_, _ = s.as.BotIntent().SendStateEvent(ctx, room, target.EventType, alias, map[string]any{})
-			}
+	targets := imagePackStateEventTargets(stateKey)
+	prepared := make([]json.RawMessage, len(targets))
+	for index, target := range targets {
+		raw, err := s.loadStickerPackOrBaseLocked(ctx, account, room, target.EventType, target.StateKey)
+		if err != nil {
+			return nil, fmt.Errorf("prepare canonical image pack target %d/%d (canonical targets committed: 0/%d; partial state: no): %w", index+1, len(targets), len(targets), err)
 		}
-		if _, err := s.as.BotIntent().SendStateEvent(ctx, room, target.EventType, target.StateKey, content); err != nil {
-			return err
+		prepared[index], err = mergePackImages(raw, replacements)
+		if err != nil {
+			return nil, fmt.Errorf("prepare canonical image pack target %d/%d (canonical targets committed: 0/%d; partial state: no): %w", index+1, len(targets), len(targets), err)
 		}
 	}
-	return nil
+	for index, target := range targets {
+		if err := s.packState().Save(ctx, room, target.EventType, target.StateKey, prepared[index]); err != nil {
+			partial := "no"
+			if index > 0 {
+				partial = "yes"
+			}
+			return nil, fmt.Errorf("save canonical image pack target %d/%d (canonical targets committed: %d/%d; partial state: %s): %w", index+1, len(targets), index, len(targets), partial, err)
+		}
+	}
+	for _, target := range targets {
+		for _, alias := range target.Aliases {
+			if alias == target.StateKey {
+				continue
+			}
+			if err := s.packState().Save(ctx, room, target.EventType, alias, json.RawMessage(`{}`)); err != nil {
+				return nil, fmt.Errorf("clear image pack alias type=%s state_key=%s (canonical writes committed: %d/%d; partial state: alias cleanup incomplete): %w", target.EventType.Type, alias, len(targets), len(targets), err)
+			}
+		}
+	}
+	return prepared[0], nil
 }
 
 func (s *Server) addStickerToAccountSpace(ctx context.Context, account remoteapi.UserID, space id.RoomID, sticker wechatStickerImage) (int, error) {
-	stateKey := wechatStickerPackStateKey(account)
-	content := buildWechatStickerPackContent(account, nil)
-	if s.as != nil && s.as.BotIntent() != nil {
-		var existing event.ImagePackEventContent
-		if err := s.as.BotIntent().StateEvent(ctx, space, event.StateImagePack, stateKey, &existing); err == nil && existing.Images != nil {
-			content = &existing
-		} else if err != nil {
-			log.Printf("creating new sticker image pack in space %s state_key=%s: %v", space, stateKey, err)
-		}
+	if s == nil {
+		return 0, fmt.Errorf("server unavailable")
 	}
-	if content.Images == nil {
-		content.Images = map[string]*event.ImagePackImage{}
+	s.lockImagePack()
+	defer s.packMu.Unlock()
+	return s.addStickerToAccountSpaceLocked(ctx, account, space, sticker)
+}
+
+func (s *Server) addStickerToAccountSpaceLocked(ctx context.Context, account remoteapi.UserID, space id.RoomID, sticker wechatStickerImage) (int, error) {
+	if account == "" || space == "" {
+		return 0, fmt.Errorf("account and room are required")
 	}
-	metadata := buildWechatStickerPackContent(account, nil).Metadata
-	content.Metadata = metadata
-	content.Images[sticker.Shortcode] = &event.ImagePackImage{URL: sticker.URL, Body: sticker.Body}
-	if err := s.writeStickerPackToRoom(ctx, account, space, content); err != nil {
+	shortcode, rawImage, err := stickerImageRaw(sticker)
+	if err != nil {
 		return 0, err
 	}
-	return len(content.Images), nil
+	merged, err := s.patchStickerPackImagesToRoomLocked(ctx, account, space, map[string]json.RawMessage{shortcode: rawImage})
+	if err != nil {
+		return 0, err
+	}
+	return len(parsePackImages(merged)), nil
 }

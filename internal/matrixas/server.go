@@ -43,14 +43,22 @@ type Server struct {
 
 	mu                  sync.Mutex
 	accountTransitionMu sync.Mutex
-	spaceMu             sync.Mutex
-	rooms               map[id.RoomID]bool
-	messageEvents       map[string]id.EventID
-	remoteRun           bool
-	remoteCtx           context.Context
-	remoteStop          context.CancelFunc
-	contactRefresh      map[string]bool
-	puppetJoins         map[string]bool
+	// Lock order: spaceMu -> packMu -> accountStore.mu / builtin store mutex.
+	// Code holding packMu must never acquire spaceMu. Future inline-resolver and
+	// reconciliation entry points must use lock-acquiring wrappers plus Locked
+	// helpers; those APIs do not exist yet and are intentionally not stubbed here.
+	spaceMu sync.Mutex
+	packMu  sync.Mutex
+	// beforePackLock is a test barrier invoked immediately before packMu.Lock.
+	beforePackLock    func()
+	rawImagePackState rawImagePackState
+	rooms             map[id.RoomID]bool
+	messageEvents     map[string]id.EventID
+	remoteRun         bool
+	remoteCtx         context.Context
+	remoteStop        context.CancelFunc
+	contactRefresh    map[string]bool
+	puppetJoins       map[string]bool
 }
 
 // New creates the appservice and remote connector from config + registration.
