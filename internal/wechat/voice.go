@@ -2,19 +2,28 @@ package wechat
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/youthlin/silk"
 )
 
 const (
-	voiceSampleRate     = 24000
-	maxSilkFramePayload = 1024
+	voiceSampleRate            = 24000
+	outboundVoiceSampleRate    = 16000
+	outboundVoiceBitRate       = 12000
+	outboundVoiceMaxInputBytes = 16 << 20
+	outboundVoiceMaxPCMBytes   = 16 << 20
+	outboundVoiceTimeout       = 2 * time.Minute
+	maxSilkFramePayload        = 1024
 )
 
 type silkFrameInspection struct {
@@ -160,22 +169,136 @@ func recoverTruncatedSilkToWAV(inputs ...[]byte) (wav []byte, sourceIndex, sourc
 	return nil, -1, 0, 0, errors.Join(decodeErrors...)
 }
 
-func audioToSilk(data []byte, mimeType string) ([]byte, int, error) {
+type audioPCMTranscoder interface {
+	TranscodeToPCM(context.Context, []byte, string) ([]byte, int, error)
+}
+
+type ffmpegAudioPCMTranscoder struct {
+	binary string
+}
+
+func ffmpegAudioArgs() []string {
+	return []string{
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-i", "pipe:0", "-map_metadata", "-1", "-vn", "-sn", "-dn",
+		"-ac", "1", "-ar", fmt.Sprint(outboundVoiceSampleRate),
+		"-acodec", "pcm_s16le", "-f", "s16le", "pipe:1",
+	}
+}
+
+type boundedCommandOutput struct {
+	buffer   bytes.Buffer
+	maxBytes int
+	overflow bool
+}
+
+func (output *boundedCommandOutput) Write(data []byte) (int, error) {
+	remaining := output.maxBytes - output.buffer.Len()
+	if remaining <= 0 {
+		output.overflow = true
+		return 0, fmt.Errorf("audio output exceeds %d bytes", output.maxBytes)
+	}
+	if len(data) > remaining {
+		_, _ = output.buffer.Write(data[:remaining])
+		output.overflow = true
+		return remaining, fmt.Errorf("audio output exceeds %d bytes", output.maxBytes)
+	}
+	return output.buffer.Write(data)
+}
+
+func (transcoder ffmpegAudioPCMTranscoder) TranscodeToPCM(ctx context.Context, data []byte, _ string) ([]byte, int, error) {
+	binary := strings.TrimSpace(transcoder.binary)
+	if binary == "" {
+		binary = "ffmpeg"
+	}
+	command := exec.CommandContext(ctx, binary, ffmpegAudioArgs()...)
+	command.Stdin = bytes.NewReader(data)
+	stdout := &boundedCommandOutput{maxBytes: outboundVoiceMaxPCMBytes}
+	stderr := &boundedCommandOutput{maxBytes: 4 << 10}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, 0, ctxErr
+		}
+		if stdout.overflow {
+			return nil, 0, fmt.Errorf("decoded audio is too large")
+		}
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			return nil, 0, fmt.Errorf("ffmpeg is not installed or not in PATH")
+		}
+		detail := boundedFFmpegErrorDetail(stderr.buffer.String())
+		if detail != "" {
+			return nil, 0, fmt.Errorf("ffmpeg audio conversion failed: %w (%s)", err, detail)
+		}
+		return nil, 0, fmt.Errorf("ffmpeg audio conversion failed: %w", err)
+	}
+	pcm := stdout.buffer.Bytes()
+	if stdout.overflow {
+		return nil, 0, fmt.Errorf("decoded audio is too large")
+	}
+	if len(pcm) == 0 {
+		return nil, 0, fmt.Errorf("ffmpeg produced empty PCM audio")
+	}
+	if len(pcm)%2 != 0 {
+		return nil, 0, fmt.Errorf("ffmpeg produced an incomplete PCM sample")
+	}
+	return append([]byte(nil), pcm...), outboundVoiceSampleRate, nil
+}
+
+func boundedFFmpegErrorDetail(raw string) string {
+	detail := strings.Join(strings.Fields(strings.ToValidUTF8(raw, "�")), " ")
+	const maxRunes = 512
+	if runes := []rune(detail); len(runes) > maxRunes {
+		detail = string(runes[:maxRunes])
+	}
+	return detail
+}
+
+func audioToSilk(ctx context.Context, data []byte, mimeType string, transcoder audioPCMTranscoder) ([]byte, int, error) {
 	if len(data) == 0 {
 		return nil, 0, fmt.Errorf("empty audio data")
 	}
-	if isSilkData(data) || strings.EqualFold(strings.Split(mimeType, ";")[0], "audio/silk") {
+	if len(data) > outboundVoiceMaxInputBytes {
+		return nil, 0, fmt.Errorf("audio input is too large: %d bytes exceeds %d", len(data), outboundVoiceMaxInputBytes)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	if isSilkData(data) {
 		return data, 0, nil
 	}
-	pcm, sampleRate, channels, bitsPerSample, err := wavToPCM(data)
-	if err != nil {
-		return nil, 0, fmt.Errorf("wechat voice sending currently supports SILK or PCM WAV audio only: %w", err)
+
+	pcm, sampleRate, channels, bitsPerSample, wavErr := wavToPCM(data)
+	if wavErr != nil || sampleRate != outboundVoiceSampleRate || channels != 1 || bitsPerSample != 16 {
+		if transcoder == nil {
+			transcoder = ffmpegAudioPCMTranscoder{}
+		}
+		transcodeCtx, cancel := context.WithTimeout(ctx, outboundVoiceTimeout)
+		defer cancel()
+		var err error
+		pcm, sampleRate, err = transcoder.TranscodeToPCM(transcodeCtx, data, mimeType)
+		if err != nil {
+			return nil, 0, fmt.Errorf("transcode Matrix audio to 16 kHz mono PCM: %w", err)
+		}
 	}
-	if channels != 1 || bitsPerSample != 16 {
-		return nil, 0, fmt.Errorf("wechat voice sending requires 16-bit mono WAV, got channels=%d bits=%d", channels, bitsPerSample)
+	if len(pcm) == 0 || len(pcm) > outboundVoiceMaxPCMBytes || sampleRate != outboundVoiceSampleRate || len(pcm)%2 != 0 {
+		return nil, 0, fmt.Errorf("invalid 16 kHz 16-bit mono PCM audio")
 	}
-	silkData, err := silk.Encode(bytes.NewReader(pcm), silk.SampleRate(sampleRate), silk.MaxInternal(sampleRate), silk.Stx(true))
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	silkData, err := silk.Encode(
+		bytes.NewReader(pcm),
+		silk.SampleRate(sampleRate),
+		silk.MaxInternal(outboundVoiceSampleRate),
+		silk.BitRate(outboundVoiceBitRate),
+		silk.Stx(true),
+	)
 	if err != nil {
+		return nil, 0, fmt.Errorf("encode WeChat SILK voice: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
 	voiceTime := int((int64(len(pcm)) / 2) * 1000 / int64(sampleRate))

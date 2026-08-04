@@ -13,6 +13,8 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -377,8 +379,8 @@ func assertNonEmptyWAVAudio(t *testing.T, ev remoteapi.Event) {
 }
 
 func TestSendMessageAudioWAVCallsSendVoiceAsSilk(t *testing.T) {
-	pcm := make([]byte, voiceSampleRate/5*2)
-	wav := pcmToWAV(pcm, voiceSampleRate, 1, 16)
+	pcm := make([]byte, outboundVoiceSampleRate/5*2)
+	wav := pcmToWAV(pcm, outboundVoiceSampleRate, 1, 16)
 	var sawSendVoice bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Msg/SendVoice" {
@@ -411,6 +413,220 @@ func TestSendMessageAudioWAVCallsSendVoiceAsSilk(t *testing.T) {
 	}
 	if msgID != "123" || !sawSendVoice {
 		t.Fatalf("unexpected send result id=%q saw=%v", msgID, sawSendVoice)
+	}
+}
+
+type testAudioPCMTranscoder struct {
+	pcm        []byte
+	sampleRate int
+	err        error
+	calls      int
+	data       []byte
+	mimeType   string
+}
+
+func (transcoder *testAudioPCMTranscoder) TranscodeToPCM(_ context.Context, data []byte, mimeType string) ([]byte, int, error) {
+	transcoder.calls++
+	transcoder.data = append([]byte(nil), data...)
+	transcoder.mimeType = mimeType
+	return append([]byte(nil), transcoder.pcm...), transcoder.sampleRate, transcoder.err
+}
+
+func TestSendMessageAudioOGGTranscodesToSilk(t *testing.T) {
+	ogg := []byte("OggS\x00\x02opus-audio")
+	pcm := make([]byte, outboundVoiceSampleRate/5*2)
+	transcoder := &testAudioPCMTranscoder{pcm: pcm, sampleRate: outboundVoiceSampleRate}
+	var request sendVoiceReq
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Msg/SendVoice" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode SendVoice request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"Code":0,"Success":true,"Data":{"NewMsgId":456}}`))
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", audioTranscoder: transcoder}
+	msgID, err := c.SendMessage(context.Background(), "wxid_friend", remoteapi.OutgoingMessage{
+		Type: remoteapi.MsgAudio,
+		Media: &remoteapi.Media{
+			Data:     ogg,
+			MimeType: "audio/ogg; codecs=opus",
+			FileName: "voice.ogg",
+			Size:     int64(len(ogg)),
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	if msgID != "456" {
+		t.Fatalf("message ID = %q, want 456", msgID)
+	}
+	if transcoder.calls != 1 || !bytes.Equal(transcoder.data, ogg) || transcoder.mimeType != "audio/ogg; codecs=opus" {
+		t.Fatalf("unexpected transcode call: %#v", transcoder)
+	}
+	if request.Type != 4 || request.VoiceTime != 200 {
+		t.Fatalf("unexpected SendVoice request: %#v", request)
+	}
+	silkBytes, decodeErr := base64.StdEncoding.DecodeString(request.Base64)
+	if decodeErr != nil || !isSilkData(silkBytes) {
+		t.Fatalf("expected transcoded SILK, len=%d err=%v", len(silkBytes), decodeErr)
+	}
+}
+
+func TestSendMessageAudioTranscodeFailureIsActionable(t *testing.T) {
+	transcoder := &testAudioPCMTranscoder{err: errors.New("decoder unavailable")}
+	c := &Client{wxid: "wxid_self", audioTranscoder: transcoder}
+	_, err := c.SendMessage(context.Background(), "wxid_friend", remoteapi.OutgoingMessage{
+		Type: remoteapi.MsgAudio,
+		Media: &remoteapi.Media{
+			Data:     []byte("OggS-invalid"),
+			MimeType: "audio/ogg",
+			FileName: "voice.ogg",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "transcode Matrix audio") || !strings.Contains(err.Error(), "decoder unavailable") {
+		t.Fatalf("transcode error = %v", err)
+	}
+}
+
+func TestSendMessageUnsupportedWAVProfilesUse16kHzTranscoder(t *testing.T) {
+	tests := []struct {
+		name       string
+		sampleRate int
+		channels   int
+	}{
+		{name: "stereo", sampleRate: outboundVoiceSampleRate, channels: 2},
+		{name: "24 kHz mono", sampleRate: 24000, channels: 1},
+		{name: "44.1 kHz mono", sampleRate: 44100, channels: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sourcePCM := make([]byte, test.sampleRate/10*test.channels*2)
+			wav := pcmToWAV(sourcePCM, test.sampleRate, test.channels, 16)
+			transcodedPCM := make([]byte, outboundVoiceSampleRate/10*2)
+			transcoder := &testAudioPCMTranscoder{pcm: transcodedPCM, sampleRate: outboundVoiceSampleRate}
+			var request sendVoiceReq
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatalf("decode SendVoice request: %v", err)
+				}
+				_, _ = w.Write([]byte(`{"Code":0,"Success":true,"Data":{"NewMsgId":788}}`))
+			}))
+			defer server.Close()
+			c := &Client{t: newTransport(server.URL), wxid: "wxid_self", audioTranscoder: transcoder}
+			if _, err := c.SendMessage(context.Background(), "wxid_friend", remoteapi.OutgoingMessage{
+				Type:  remoteapi.MsgAudio,
+				Media: &remoteapi.Media{Data: wav, MimeType: "audio/wav", FileName: "voice.wav"},
+			}); err != nil {
+				t.Fatalf("SendMessage returned error: %v", err)
+			}
+			if transcoder.calls != 1 || request.VoiceTime != 100 {
+				t.Fatalf("transcode calls=%d request=%#v", transcoder.calls, request)
+			}
+		})
+	}
+}
+
+func TestFFmpegAudioArgsUseLowBandwidthVoiceProfile(t *testing.T) {
+	args := strings.Join(ffmpegAudioArgs(), " ")
+	if !strings.Contains(args, "-ac 1") || !strings.Contains(args, "-ar 16000") || !strings.Contains(args, "-f s16le") {
+		t.Fatalf("unexpected FFmpeg audio args: %s", args)
+	}
+	if strings.Contains(args, "24000") {
+		t.Fatalf("FFmpeg audio args unexpectedly use 24kHz: %s", args)
+	}
+	if outboundVoiceBitRate != 12000 {
+		t.Fatalf("outbound SILK bitrate = %d, want 12000", outboundVoiceBitRate)
+	}
+}
+
+func TestAudioToSilkRejectsOversizedInputBeforeFastPaths(t *testing.T) {
+	for _, prefix := range [][]byte{[]byte("#!SILK_V3"), []byte("RIFF")} {
+		data := make([]byte, outboundVoiceMaxInputBytes+1)
+		copy(data, prefix)
+		transcoder := &testAudioPCMTranscoder{err: errors.New("must not be called")}
+		_, _, err := audioToSilk(context.Background(), data, "audio/silk", transcoder)
+		if err == nil || !strings.Contains(err.Error(), "too large") {
+			t.Fatalf("oversized %q error = %v", prefix, err)
+		}
+		if transcoder.calls != 0 {
+			t.Fatalf("oversized %q called transcoder %d times", prefix, transcoder.calls)
+		}
+	}
+}
+
+func TestAudioToSilkHonorsCanceledContextBeforeEncoding(t *testing.T) {
+	pcm := make([]byte, outboundVoiceSampleRate/10*2)
+	wav := pcmToWAV(pcm, outboundVoiceSampleRate, 1, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := audioToSilk(ctx, wav, "audio/wav", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled audioToSilk error = %v", err)
+	}
+}
+
+func TestFFmpegAudioTranscoderMissingExecutableIsActionable(t *testing.T) {
+	_, _, err := (ffmpegAudioPCMTranscoder{binary: filepath.Join(t.TempDir(), "missing-ffmpeg")}).TranscodeToPCM(
+		context.Background(), []byte("OggS"), "audio/ogg",
+	)
+	if err == nil || !strings.Contains(err.Error(), "ffmpeg is not installed") {
+		t.Fatalf("missing executable error = %v", err)
+	}
+}
+
+func TestBoundedCommandOutputRejectsOverflow(t *testing.T) {
+	output := &boundedCommandOutput{maxBytes: 4}
+	written, err := output.Write([]byte("12345"))
+	if err == nil || written != 4 || !output.overflow || output.buffer.String() != "1234" {
+		t.Fatalf("overflow write = (%d, %v), overflow=%t data=%q", written, err, output.overflow, output.buffer.String())
+	}
+}
+
+func TestFFmpegAudioTranscoderConvertsOGGTo16kHzMonoPCM(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is not installed")
+	}
+	generate := exec.Command(
+		ffmpeg,
+		"-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+		"-t", "0.1", "-c:a", "libopus", "-f", "ogg", "pipe:1",
+	)
+	ogg, err := generate.Output()
+	if err != nil {
+		t.Skipf("ffmpeg cannot generate Opus fixture: %v", err)
+	}
+	pcm, sampleRate, err := (ffmpegAudioPCMTranscoder{binary: ffmpeg}).TranscodeToPCM(context.Background(), ogg, "audio/ogg; codecs=opus")
+	if err != nil {
+		t.Fatalf("TranscodeToPCM returned error: %v", err)
+	}
+	if sampleRate != outboundVoiceSampleRate || len(pcm) < 2400 || len(pcm) > 4800 || len(pcm)%2 != 0 {
+		t.Fatalf("transcoded sampleRate=%d bytes=%d, want 16kHz mono 16-bit PCM near 0.1s", sampleRate, len(pcm))
+	}
+}
+
+func TestSendMessageAudioWAVFastPathSkipsTranscoder(t *testing.T) {
+	pcm := make([]byte, outboundVoiceSampleRate/10*2)
+	wav := pcmToWAV(pcm, outboundVoiceSampleRate, 1, 16)
+	transcoder := &testAudioPCMTranscoder{err: errors.New("must not be called")}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Code":0,"Success":true,"Data":{"NewMsgId":789}}`))
+	}))
+	defer server.Close()
+	c := &Client{t: newTransport(server.URL), wxid: "wxid_self", audioTranscoder: transcoder}
+	if _, err := c.SendMessage(context.Background(), "wxid_friend", remoteapi.OutgoingMessage{
+		Type:  remoteapi.MsgAudio,
+		Media: &remoteapi.Media{Data: wav, MimeType: "audio/wav", FileName: "voice.wav"},
+	}); err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	if transcoder.calls != 0 {
+		t.Fatalf("WAV fast path called transcoder %d times", transcoder.calls)
 	}
 }
 

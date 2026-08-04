@@ -45,6 +45,7 @@ Everything the bridge needs from a backend, in protocol-neutral terms:
 
 Optional capabilities are type-asserted, so backends only implement what they
 support:
+
 - `remoteapi.MediaUploader` — for CDN-upload-then-send backends (WeChat).
 - `remoteapi.Pinger` — health check (WeChat `HeartBeat`).
 
@@ -100,6 +101,12 @@ version may therefore expose stale login state from that legacy file. After
 login/activation, portal rooms are created for WeChat chats. Creation can be
 automatic or manually confirmed via bot commands (`!wx portal-mode manual`,
 `!wx pending`, `!wx create <chat>`), similar to mautrix-telegram.
+
+Sending Matrix voice messages to WeChat supports common client formats such as
+OGG/Opus, MP3, and M4A through FFmpeg. Outbound audio is converted to 16 kHz
+mono PCM and encoded as SILK at a 12 kbps target bitrate. Native SILK and exact
+16 kHz mono 16-bit PCM WAV use a direct path. Install `ffmpeg` when running the bridge
+outside Docker; the provided Docker image includes it.
 
 ## Importing WeChat built-in emoji
 

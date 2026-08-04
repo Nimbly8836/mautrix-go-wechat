@@ -123,6 +123,13 @@ not printed in Matrix.
 If commands don't respond, check whether the room is encrypted. This MVP does
 not decrypt Matrix E2EE rooms yet; use an unencrypted management/portal room.
 
+Matrix voice messages are converted from client formats such as OGG/Opus, MP3,
+or M4A to 16 kHz mono PCM, then encoded as SILK with a 12 kbps target bitrate.
+The provided image installs FFmpeg. Native deployments must install `ffmpeg`
+and make it available on `PATH`; otherwise voice messages that are neither
+native SILK nor exact 16 kHz mono 16-bit PCM WAV fail with an actionable
+transcoder error.
+
 ## Importing the fixed WeChat built-in emoji pack
 
 Configure the canonical global store and import authorization before running the

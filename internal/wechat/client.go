@@ -70,10 +70,11 @@ type Client struct {
 	wxid    string
 	syncKey string
 
-	receiveMode string
-	emojiDir    string
-	localCursor int64
-	localSeen   map[string]struct{}
+	receiveMode     string
+	emojiDir        string
+	audioTranscoder audioPCMTranscoder
+	localCursor     int64
+	localSeen       map[string]struct{}
 
 	done     chan struct{}
 	stopOnce sync.Once
@@ -602,7 +603,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if msg.Media == nil || len(msg.Media.Data) == 0 {
 			return "", fmt.Errorf("wechat: audio message without media")
 		}
-		silkData, voiceTime, err := audioToSilk(msg.Media.Data, msg.Media.MimeType)
+		silkData, voiceTime, err := audioToSilk(ctx, msg.Media.Data, msg.Media.MimeType, c.audioTranscoder)
 		if err != nil {
 			return "", err
 		}

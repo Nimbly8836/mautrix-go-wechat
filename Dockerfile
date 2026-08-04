@@ -3,6 +3,8 @@
 
 FROM golang:1.25-alpine AS builder
 
+# Package versions intentionally follow the pinned Alpine base repositories.
+# hadolint ignore=DL3018
 RUN apk add --no-cache git ca-certificates build-base
 
 WORKDIR /build
@@ -20,7 +22,9 @@ FROM alpine:3.20
 ENV UID=1337 \
     GID=1337
 
-RUN apk add --no-cache ca-certificates su-exec bash curl yq jq \
+# Package versions intentionally follow the pinned Alpine base repositories.
+# hadolint ignore=DL3018
+RUN apk add --no-cache ca-certificates su-exec bash curl yq jq ffmpeg \
     && mkdir -p /data \
     && addgroup -g $GID bridge \
     && adduser -D -u $UID -G bridge bridge
