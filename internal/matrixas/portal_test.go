@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/id"
@@ -167,6 +169,114 @@ func TestOnMessageBridgesFirstMessageWhenNewPortalSpacePersistenceFails(t *testi
 	}
 	if acc, _ := accounts.get("wxid_self"); acc.SpaceRoom != "" {
 		t.Fatalf("failed account Space was published: %#v", acc)
+	}
+}
+
+func TestConcurrentMessagesForNewChatUseSinglePortal(t *testing.T) {
+	accounts := newAccountStore(filepath.Join(t.TempDir(), "accounts.json"))
+	if err := accounts.put(savedAccount{ID: "wxid_self", Protocol: "wechat", Session: []byte("session")}); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	portalRoomsCreated := 0
+	spaceRoomsCreated := 0
+	var messagePaths []string
+	portalCreateEntered := make(chan struct{}, 2)
+	releasePortalCreates := make(chan struct{})
+	homeserver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/_matrix/client/v3/createRoom" {
+			var req struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode create room request: %v", err)
+			}
+			mu.Lock()
+			if req.Name == "Test group" {
+				portalRoomsCreated++
+				roomID := portalRoomsCreated
+				mu.Unlock()
+				portalCreateEntered <- struct{}{}
+				<-releasePortalCreates
+				_, _ = w.Write([]byte(`{"room_id":"!portal-` + string(rune('0'+roomID)) + `:example.com"}`))
+				return
+			}
+			spaceRoomsCreated++
+			roomID := spaceRoomsCreated
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"room_id":"!space-` + string(rune('0'+roomID)) + `:example.com"}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/send/m.room.message/") {
+			var content struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&content); err != nil {
+				t.Errorf("decode bridged message: %v", err)
+			}
+			if content.Body == "first message" || content.Body == "second message" {
+				mu.Lock()
+				messagePaths = append(messagePaths, r.URL.Path)
+				mu.Unlock()
+			}
+		}
+		_, _ = w.Write([]byte(`{"event_id":"$event"}`))
+	}))
+	t.Cleanup(homeserver.Close)
+
+	as := appservice.Create()
+	as.Registration = &appservice.Registration{SenderLocalpart: "wechatbot", AppToken: "test-token"}
+	as.HomeserverDomain = "example.com"
+	if err := as.SetHomeserverURL(homeserver.URL); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		cfg:           &config.Config{Homeserver: config.Homeserver{Domain: "example.com"}},
+		as:            as,
+		api:           portalCreationAPI{},
+		accounts:      accounts,
+		portals:       newPortalStore(filepath.Join(t.TempDir(), "portals.json")),
+		contacts:      newContactStore(filepath.Join(t.TempDir(), "contacts.json")),
+		rooms:         map[id.RoomID]bool{},
+		messageEvents: map[string]id.EventID{},
+	}
+
+	messages := []*remoteapi.InboundMessage{
+		{ID: "first-id", Chat: "group@chatroom", Sender: "wxid_self", Type: remoteapi.MsgText, Text: "first message"},
+		{ID: "second-id", Chat: "group@chatroom", Sender: "wxid_self", Type: remoteapi.MsgText, Text: "second message"},
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		s.OnMessage(context.Background(), messages[0])
+	}()
+	<-portalCreateEntered
+	go func() {
+		defer wg.Done()
+		s.OnMessage(context.Background(), messages[1])
+	}()
+	select {
+	case <-portalCreateEntered:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releasePortalCreates)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if portalRoomsCreated != 1 {
+		t.Fatalf("created %d portal rooms for one chat, want 1", portalRoomsCreated)
+	}
+	if len(messagePaths) != 2 {
+		t.Fatalf("bridged message paths = %#v, want two messages", messagePaths)
+	}
+	for _, path := range messagePaths {
+		if !strings.Contains(path, "/rooms/!portal-1:example.com/") {
+			t.Fatalf("concurrent message was bridged to the wrong room: %#v", messagePaths)
+		}
 	}
 }
 

@@ -391,6 +391,18 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 		return rec, nil
 	}
 
+	// Webhook messages for a new chat may arrive concurrently. Serialize the
+	// check-and-create sequence and check the store again after acquiring the
+	// lock so only one Matrix room is created for each remote chat.
+	s.portalCreateMu.Lock()
+	defer s.portalCreateMu.Unlock()
+	if rec, ok := s.portals.get(chatID); ok && rec.RoomID != "" {
+		if err := s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec); err != nil {
+			s.reportPortalSpaceAttachmentFailure(ctx, rec, err)
+		}
+		return rec, nil
+	}
+
 	chat, err := s.api.GetChat(ctx, chatID)
 	if err != nil {
 		// Some APIs don't expose metadata reliably; still create a room.

@@ -82,9 +82,10 @@ type Server struct {
 	// builtin store mutex. Code holding packMu must never acquire spaceMu.
 	// Account-data transactions use lock-acquiring wrappers plus non-recursive
 	// locked helpers so their read-modify-write sequences cannot interleave.
-	spaceMu       sync.Mutex
-	packMu        sync.Mutex
-	accountDataMu sync.Mutex
+	portalCreateMu sync.Mutex
+	spaceMu        sync.Mutex
+	packMu         sync.Mutex
+	accountDataMu  sync.Mutex
 	// Test barriers invoked after a portal snapshot and immediately before the
 	// corresponding image-pack lock.
 	afterPortalSnapshot        func([]portalRecord)
