@@ -47,14 +47,22 @@ func shouldDropLocal(m localMessage) bool {
 }
 
 func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Event, bool) {
-	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content, m.PushContent))
+	// QueryLocal can expose the rendered title in ContentText while keeping the
+	// attachment XML (aeskey/attachid) in Content. Keep the XML so media can be
+	// downloaded; applyMessageType will turn it into a human-readable body.
+	content := stripLastMessageOps(firstNonEmpty(m.Content, m.ContentText, m.PushContent))
 	if content == "" {
 		return remoteapi.Event{}, false
 	}
 	chat := m.Talker
+	// QueryLocal may report the local user's wxid as Talker/FromUserName for
+	// outgoing echoes. For a direct chat the recipient is the conversation.
+	if m.IsSendBySelf && !m.IsGroup && m.ToUserName != "" {
+		chat = m.ToUserName
+	}
 	if chat == "" {
 		if m.IsGroup {
-			chat = m.FromUserName
+			chat = firstNonEmpty(m.Talker, m.FromUserName)
 		} else if m.IsSendBySelf {
 			chat = m.ToUserName
 		} else {
@@ -126,6 +134,11 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	// FromUserName/ToUserName plus group sender prefixes in Content.
 	chat := firstNonEmpty(m.Talker, from)
 	sender := firstNonEmpty(m.SenderUserName, from)
+	if m.IsSendBySelf && !m.IsGroup && to != "" {
+		// Outgoing direct-chat echoes can carry the local user as Talker/From.
+		chat = to
+		sender = c.selfWxid()
+	}
 	if chat == "" {
 		if m.IsGroup {
 			chat = from
@@ -150,9 +163,12 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 			sender = content[:idx]
 			content = strings.TrimSpace(content[idx+1:])
 		}
-	} else if from != "" && from == c.selfWxid() && m.Talker == "" {
-		// Outgoing echo: the conversation is the recipient.
-		chat = to
+	} else if from != "" && from == c.selfWxid() {
+		// Outgoing echo: the conversation is the recipient, even when the
+		// callback includes Talker equal to the local user's wxid.
+		if !m.IsGroup && to != "" {
+			chat = to
+		}
 		sender = from
 	}
 
@@ -343,6 +359,12 @@ func (c *Client) attachFileMedia(ctx context.Context, base *remoteapi.InboundMes
 	if err != nil {
 		log.Printf("failed to download WeChat file %s title=%q app_id=%q attach_id_set=%t total_len=%d user=%q: %v", base.ID, payload.Title, payload.AppID, payload.AttachID != "", payload.TotalLen, payload.UserName, err)
 		return
+	}
+	// For messages sent by this account, WeChat often puts the sender (our
+	// own wxid) in <fromusername>. DownloadFile needs the conversation peer.
+	// Prefer Talker in that case, otherwise self-sent files fail to download.
+	if payload.UserName == c.selfWxid() && req.Talker != "" {
+		payload.UserName = req.Talker
 	}
 	fileName := payload.Title
 	if fileName == "" {
