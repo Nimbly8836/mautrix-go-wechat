@@ -155,11 +155,7 @@ func (l *qrLogin) Wait(ctx context.Context) (*remoteapi.LoginStep, error) {
 		}
 		log.Printf("wechat login: check qr uuid=%s status=%d wxid=%s nickname=%s", l.uuid, chk.Status, chk.Wxid, chk.NickName)
 
-		// The iPad login endpoint reports a confirmed login as status=0 in
-		// some backend versions (status=2 is used by older versions). A
-		// non-empty wxid is the reliable completion signal; status=0 without
-		// wxid is still the initial/未扫码 state.
-		if chk.Wxid != "" && (chk.Status == 0 || chk.Status >= 2) {
+		if chk.Status >= 2 && chk.Wxid != "" {
 			l.c.mu.Lock()
 			l.c.wxid = chk.Wxid
 			l.c.mu.Unlock()
