@@ -151,6 +151,41 @@ func TestQRLoginStopsAfterConsecutiveCheckFailures(t *testing.T) {
 	}
 }
 
+func TestQRLoginCompletesWhenBackendReturnsStatusZeroWithWxid(t *testing.T) {
+	defer withQRSettings(time.Millisecond, 3, time.Second)()
+	var hookCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Login/LoginGetQR":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Code": 0, "Success": true, "Data": map[string]any{"Uuid": "uuid-1", "QrBase64": "data:qr"}})
+		case "/Login/LoginCheckQR":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Code": 0, "Success": true, "Data": map[string]any{"Status": 0, "Wxid": "wxid_me"}})
+		case "/Login/LoginTwiceAutoAuth", "/Login/Newinit", "/Login/AutoHeartBeat":
+			atomic.AddInt32(&hookCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Code": 0, "Success": true, "Data": map[string]any{}})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{t: newTransport(server.URL)}
+	login := &qrLogin{c: c, flow: qrFlow{ID: "ipad", Name: "iPad QR", Endpoint: "/Login/LoginGetQR", LoginType: "ipad"}}
+	if _, err := login.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	step, err := login.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait failed: %v", err)
+	}
+	if step.Type != remoteapi.LoginComplete || step.Self != "wxid_me" {
+		t.Fatalf("expected status=0 login completion, got %#v", step)
+	}
+	if got := atomic.LoadInt32(&hookCalls); got != 3 {
+		t.Fatalf("expected post-login hooks, got %d calls", got)
+	}
+}
+
 func TestQRLoginStopsAfterQRCodeExpiry(t *testing.T) {
 	defer withQRSettings(10*time.Millisecond, 20, 5*time.Second)()
 	var checkCalls int32
