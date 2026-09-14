@@ -153,25 +153,31 @@ func (l *qrLogin) Wait(ctx context.Context) (*remoteapi.LoginStep, error) {
 			l.expiresAt = qrExpiryDeadline(int64(chk.ExpiredTime), time.Now())
 			resetTimer(deadline, time.Until(l.expiresAt))
 		}
-		log.Printf("wechat login: check qr uuid=%s status=%d wxid=%s nickname=%s", l.uuid, chk.Status, chk.Wxid, chk.NickName)
+		log.Printf("wechat login: check qr uuid=%s kind=%s status=%s wxid=%s nickname=%s", l.uuid, chk.responseKind(), chk.statusLabel(), chk.displayAccount(), chk.displayNickname())
 
-		if chk.Status >= 2 && chk.Wxid != "" {
+		// The current fk-zhang response is the successful result of
+		// CheckSecManualAuth: it has baseResponse/unifyAuthSectFlag/acctSectResp
+		// instead of the legacy flat Status/Wxid fields. accountName validates
+		// the response shape before accepting it, so a waiting response with a
+		// stray wxid cannot complete the login.
+		if wxid := chk.accountName(); wxid != "" {
 			l.c.mu.Lock()
-			l.c.wxid = chk.Wxid
+			l.c.wxid = wxid
 			l.c.mu.Unlock()
 
-			if err := l.c.enablePostLoginHooks(ctx, chk.Wxid); err != nil {
-				log.Printf("wechat login: post-login hooks failed wxid=%s err=%v", chk.Wxid, err)
+			if err := l.c.enablePostLoginHooks(ctx, wxid); err != nil {
+				log.Printf("wechat login: post-login hooks failed wxid=%s err=%v", wxid, err)
 			}
 
 			return &remoteapi.LoginStep{
 				Type:         remoteapi.LoginComplete,
 				StepID:       "wechat.complete",
 				Instructions: "Successfully logged in.",
-				Self:         remoteapi.UserID(chk.Wxid),
+				Self:         remoteapi.UserID(wxid),
 			}, nil
 		}
-		// chk.Status == 1 means "scanned, awaiting confirm"; keep waiting.
+		// QR status 0/1 (and any malformed or incomplete auth response) is not
+		// a completed login; keep waiting for a validated success response.
 	}
 }
 

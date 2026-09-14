@@ -47,13 +47,89 @@ func (n *flexibleInt64) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// checkQRResp is the Data of /Login/LoginCheckQR.
+// checkQRResp accepts both the legacy flat response and fk-zhang's current
+// response. The latter returns the result of CheckSecManualAuth directly
+// after status=2, so its account is nested in acctSectResp and there is no
+// top-level QR status.
 type checkQRResp struct {
-	Status      int           `json:"Status"` // 0=waiting, 1=scanned, 2=confirmed/success
-	Wxid        string        `json:"Wxid"`
-	NickName    string        `json:"NickName"`
-	HeadImgUrl  string        `json:"HeadImgUrl"`
-	ExpiredTime flexibleInt64 `json:"ExpiredTime"`
+	Status          *int             `json:"Status"`
+	Wxid            string           `json:"Wxid"`
+	UserName        string           `json:"UserName"`
+	NickName        string           `json:"NickName"`
+	HeadImgUrl      string           `json:"HeadImgUrl"`
+	ExpiredTime     flexibleInt64    `json:"ExpiredTime"`
+	AlreadyLoggedIn bool             `json:"AlreadyLoggedIn"`
+	BaseResponse    *checkQRBaseResp `json:"BaseResponse"`
+	AuthFlag        uint32           `json:"UnifyAuthSectFlag"`
+	Account         *checkQRAccount  `json:"AcctSectResp"`
+}
+
+type checkQRBaseResp struct {
+	Ret *int `json:"Ret"`
+}
+
+type checkQRAccount struct {
+	UserName string `json:"UserName"`
+	NickName string `json:"NickName"`
+}
+
+func (r checkQRResp) accountName() string {
+	if r.BaseResponse != nil || r.AuthFlag != 0 || r.Account != nil {
+		if r.BaseResponse == nil || r.BaseResponse.Ret == nil || *r.BaseResponse.Ret != 0 || r.AuthFlag == 0 || r.Account == nil {
+			return ""
+		}
+		return firstNonEmpty(r.Account.UserName, r.Wxid, r.UserName)
+	}
+	if r.Status != nil {
+		if *r.Status != 2 {
+			return ""
+		}
+		return firstNonEmpty(r.Wxid, r.UserName)
+	}
+	if r.AlreadyLoggedIn {
+		return firstNonEmpty(r.Wxid, r.UserName)
+	}
+	return ""
+}
+
+func (r checkQRResp) displayAccount() string {
+	if account := r.accountName(); account != "" {
+		return account
+	}
+	if r.Account != nil {
+		return firstNonEmpty(r.Account.UserName, r.Wxid, r.UserName)
+	}
+	return firstNonEmpty(r.Wxid, r.UserName)
+}
+
+func (r checkQRResp) displayNickname() string {
+	if r.NickName != "" {
+		return r.NickName
+	}
+	if r.Account != nil {
+		return r.Account.NickName
+	}
+	return ""
+}
+
+func (r checkQRResp) statusLabel() string {
+	if r.Status == nil {
+		return "absent"
+	}
+	return strconv.Itoa(*r.Status)
+}
+
+func (r checkQRResp) responseKind() string {
+	if r.BaseResponse != nil || r.AuthFlag != 0 || r.Account != nil {
+		return "manual_auth"
+	}
+	if r.AlreadyLoggedIn {
+		return "cached_auth"
+	}
+	if r.Status != nil {
+		return "qr_status"
+	}
+	return "unknown"
 }
 
 // --- Messaging ---
