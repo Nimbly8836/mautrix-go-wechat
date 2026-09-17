@@ -93,6 +93,9 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		},
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	if m.MsgType == wxApp {
+		c.attachSolitaireSource(&base, firstNonEmpty(m.Content, m.ContentText), m.MsgID, m.NewMsgID)
+	}
 	if m.MsgType == wxImage {
 		c.attachImageMedia(ctx, &base)
 	}
@@ -205,6 +208,9 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		}, true
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	if m.MsgType == wxApp {
+		c.attachSolitaireSource(&base, firstNonEmpty(m.Content.Str, m.ContentText), rawID, messageID)
+	}
 	if m.MsgType == wxImage {
 		c.attachImageMedia(ctx, &base)
 	}

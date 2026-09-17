@@ -572,6 +572,9 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		}
 		return msgID(r), nil
 
+	case remoteapi.MsgApp:
+		return c.sendAppXML(ctx, wxid, to, msg.Text)
+
 	case remoteapi.MsgImage:
 		if msg.Media == nil {
 			return "", fmt.Errorf("wechat: image message without media")

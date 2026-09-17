@@ -108,6 +108,100 @@ mono PCM and encoded as SILK at a 12 kbps target bitrate. Native SILK and exact
 16 kHz mono 16-bit PCM WAV use a direct path. Install `ffmpeg` when running the bridge
 outside Docker; the provided Docker image includes it.
 
+## Participating in a WeChat solitaire by reply
+
+Requires a protocol-service version that provides `POST /api/Msg/SendSolitaire`
+and has local message storage (`savelocalmessage`) enabled. The bridge uses
+`/Msg/SendSolitaire` relative to `network.base_url`, which normally ends in
+`/api`. Updating only the bridge does not install the new upstream endpoint.
+
+In the target portal room, **reply to the specific solitaire message** and send:
+
+```text
+!wx 接龙 张三，1份
+```
+
+`!wx solitaire ...` is an alias; a custom `bridge.command_prefix` applies too.
+The entry may span multiple lines and is not passed through emoji substitution.
+An ordinary reply without the command remains ordinary text. This command only
+**participates in an existing version**; it does not initiate a new chain or
+select the latest message automatically.
+
+Newly bridged appmsg type 53 messages show their title/entries and an instruction
+to reply. They carry an opaque source reference in the Matrix event, preserving
+both WeChat IDs without float/int64 precision loss. Reply resolution works after
+a bridge restart, fetches the original event in the current room, and verifies
+its bridge sender, account and chat before calling the protocol API. Old Matrix
+messages without this metadata, plain copied chain text, recalled messages,
+edits and implicit thread fallback replies cannot be used as targets.
+
+The protocol service resolves the exact saved message. A callback may arrive
+before local persistence finishes; a not-found response is an error, not a reason
+to guess a different version or send client-supplied XML. Using an older source
+may create a divergent version: the bridge does not merge concurrent entries.
+
+The bridge checks both `Success` and `Code`, plus the nested send result. It does
+not automatically retry this action or follow HTTP redirects. Only the protocol
+service handles its documented, explicit `-13` authentication recovery. If the
+result is unknown, inspect WeChat before sending a new command.
+
+Before any send, the bridge persists a per-command claim in
+`<bridge.portal_file>.solitaire-claims/` (normally next to the portal JSON file).
+These small files contain the Matrix room/event IDs, not the entry text, and
+prevent duplicate command delivery from sending again, including after restart.
+Keep and back up this directory with bridge data; do not delete it casually.
+A storage failure prevents sending. A crash after the claim but before the HTTP
+call can leave an unsent command claimed: this is deliberately at-most-once,
+not guaranteed delivery, and requires checking WeChat before a new command.
+
+Tests use simulated HTTP services; real phone rendering and subsequent solitaire
+interactions still require validation after the new upstream version is deployed.
+
+## Sending custom WeChat XML
+
+In a WeChat portal room, send a **single, standalone** fenced code block with
+language `wx_xml` (not `xml`). For example, paste this entire message:
+
+````text
+```wx_xml
+<msg>
+  <appmsg appid="" sdkver="0">
+    <title>Example link</title>
+    <des>A user-constructed link card</des>
+    <type>5</type>
+    <url>https://example.com/</url>
+  </appmsg>
+</msg>
+```
+````
+
+The bridge sends the XML through `/Msg/SendApp`, using the current account and
+this portal's recipient. It reads the API `Type` from the direct `appmsg/type`
+element; this is the app **subtype** (e.g. `5` for a link), not the outer WeChat
+message type `49`. Both `<msg><appmsg>...</appmsg></msg>` and a bare
+`<appmsg>...</appmsg>` are accepted. The payload is not reserialized or subjected
+to emoji substitution. Matrix clients that render the fence as HTML
+`<pre><code class="language-wx_xml">` are supported too.
+
+- Existing `bridge.permissions` apply; this is not a management-room command.
+- Use one code block with no surrounding prose, other blocks, or reply quotes.
+  Backtick or tilde fences of at least three characters are accepted, with an
+  optional space before `wx_xml`. The closing fence must use the same character
+  and be at least as long as the opening fence. Markers inside another code
+  block are examples and remain text.
+- XML must be well-formed, at most 1 MiB, with exactly one top-level appmsg
+  (optionally wrapped in msg) and one direct positive 32-bit integer type.
+  DTDs/external entities are not supported.
+- Raw XML without the `wx_xml` marker, and ordinary `xml` code blocks, remain
+  text. Recognized but invalid `wx_xml` blocks produce an error notice instead
+  of falling back to text.
+- This sends **App XML**, not arbitrary image/voice/location protocol XML. File
+  IDs, CDN keys, signatures, thumbnails and other subtype-specific fields must
+  be supplied correctly by the user; the bridge does not upload or generate
+  them. Acceptance and rendering depend on the WeChat server and clients.
+- XML is submitted from your logged-in account. Only send payloads you trust;
+  local validation checks syntax, not whether a card's contents are trustworthy.
+
 ## Importing WeChat built-in emoji
 
 An authorized operator can import the fixed set of 109 WebP built-in emoji with

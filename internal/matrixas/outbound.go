@@ -137,7 +137,8 @@ func isGIFMedia(data []byte, mimeType, fileName string) bool {
 	return strings.EqualFold(strings.Split(mimeType, ";")[0], "image/gif") || strings.HasSuffix(strings.ToLower(fileName), ".gif")
 }
 
-func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, sender id.UserID, body string) {
+func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, sender id.UserID, msg *event.MessageEventContent) {
+	body := msg.Body
 	if strings.TrimSpace(body) == "" {
 		return
 	}
@@ -148,8 +149,18 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 	// Allow prefixed local portal commands without leaking them to WeChat.
 	cmd, _, ok := parsePortalCommand(body, s.commandPrefix())
 	if !ok {
-		wechatText := textemoji.ToChineseTokens(body)
-		msgID, err := s.api.SendMessage(ctx, rec.ChatID, remoteapi.OutgoingMessage{Type: remoteapi.MsgText, Text: wechatText})
+		payload, isXML, err := portalXML(msg)
+		if err != nil {
+			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
+			return
+		}
+		var outgoing remoteapi.OutgoingMessage
+		if isXML {
+			outgoing = remoteapi.OutgoingMessage{Type: remoteapi.MsgApp, Text: payload}
+		} else {
+			outgoing = remoteapi.OutgoingMessage{Type: remoteapi.MsgText, Text: textemoji.ToChineseTokens(body)}
+		}
+		msgID, err := s.api.SendMessage(ctx, rec.ChatID, outgoing)
 		if err != nil {
 			log.Printf("failed to send Matrix msg to WeChat chat=%s sender=%s: %v", rec.ChatID, sender, err)
 			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
@@ -160,7 +171,7 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 	}
 	switch cmd {
 	case "help":
-		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("这是 WeChat portal room。在这里发送文本会转发到 WeChat。命令: %s info, %s sync/%s refresh（仅刷新当前房间）", s.commandPrefix(), s.commandPrefix(), s.commandPrefix()))
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("这是 WeChat portal room。在这里发送文本会转发到 WeChat；独立的 wx_xml 代码块会作为自定义 App XML 发送，Type 从 appmsg/type 自动读取。回复带提示的接龙消息并发送「%s 接龙 你的记录」可参与。命令: %s info, %s sync/%s refresh（仅刷新当前房间）", s.commandPrefix(), s.commandPrefix(), s.commandPrefix(), s.commandPrefix()))
 		return
 	case "info":
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("WeChat chat: %s\nMatrix room: %s", rec.ChatID, rec.RoomID))

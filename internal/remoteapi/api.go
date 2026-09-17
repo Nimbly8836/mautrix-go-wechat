@@ -255,7 +255,7 @@ const (
 // OutgoingMessage is a message the bridge wants to send.
 type OutgoingMessage struct {
 	Type     MessageType
-	Text     string   // body for text / caption
+	Text     string   // body for text / caption; raw appmsg XML for outbound MsgApp
 	Mentions []UserID // @-mentions
 	Media    *Media   // for image/video/audio/file
 	Extra    map[string]any
@@ -271,6 +271,7 @@ type InboundMessage struct {
 	Media     *Media
 	Timestamp time.Time
 	Extra     map[string]any
+	Solitaire *SolitaireSource // Exact source version for opt-in reply participation.
 }
 
 // Media is a binary attachment. Backends fill either Data (already fetched) or

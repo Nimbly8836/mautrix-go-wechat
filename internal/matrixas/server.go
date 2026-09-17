@@ -482,7 +482,11 @@ func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 		if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
 			return
 		}
-		s.handlePortalMessage(ctx, rec, evt.Sender, msg.Body)
+		if entry, ok := parseSolitaireCommand(msg, s.commandPrefix()); ok {
+			s.handleSolitaireReply(ctx, rec, evt, entry)
+			return
+		}
+		s.handlePortalMessage(ctx, rec, evt.Sender, msg)
 		return
 	}
 	if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
@@ -637,7 +641,11 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 			}
 		}
 	}
-	resp, err := client.SendMessageEvent(ctx, rec.RoomID, eventType, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
+	var outboundContent any = content
+	if m.Solitaire != nil && m.Solitaire.Chat == rec.ChatID {
+		outboundContent = solitaireMatrixContent(content, m.Solitaire, s.commandPrefix())
+	}
+	resp, err := client.SendMessageEvent(ctx, rec.RoomID, eventType, outboundContent, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
 	if err != nil {
 		log.Printf("failed to bridge remote msg %s to %s: %v", m.ID, rec.RoomID, err)
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("桥接消息失败: %v", err))
