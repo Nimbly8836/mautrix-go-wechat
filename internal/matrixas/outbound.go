@@ -137,6 +137,21 @@ func isGIFMedia(data []byte, mimeType, fileName string) bool {
 	return strings.EqualFold(strings.Split(mimeType, ";")[0], "image/gif") || strings.HasSuffix(strings.ToLower(fileName), ".gif")
 }
 
+func (s *Server) shouldIgnorePortalCommand(msg *event.MessageEventContent) bool {
+	body := msg.Body
+	if msg.RelatesTo.GetReplyTo() != "" {
+		body = event.TrimReplyFallbackText(body)
+	}
+	body = strings.TrimSpace(body)
+	for _, prefix := range s.cfg.Bridge.IgnoredCommandPrefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix != "" && strings.HasPrefix(body, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, sender id.UserID, msg *event.MessageEventContent) {
 	body := msg.Body
 	if strings.TrimSpace(body) == "" {
@@ -149,6 +164,9 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 	// Allow prefixed local portal commands without leaking them to WeChat.
 	cmd, _, ok := parsePortalCommand(body, s.commandPrefix())
 	if !ok {
+		if s.shouldIgnorePortalCommand(msg) {
+			return
+		}
 		payload, isXML, err := portalXML(msg)
 		if err != nil {
 			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))

@@ -2,8 +2,11 @@ package matrixas
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"maunium.net/go/mautrix/appservice"
@@ -17,6 +20,10 @@ import (
 type portalMessageAPI struct {
 	remoteapi.PuppetAPI
 	sent []remoteapi.OutgoingMessage
+}
+
+func (a *portalMessageAPI) Self(context.Context) (remoteapi.UserID, error) {
+	return "wxid_self", nil
 }
 
 func (a *portalMessageAPI) SendMessage(_ context.Context, _ remoteapi.ChatID, msg remoteapi.OutgoingMessage) (remoteapi.MessageID, error) {
@@ -95,6 +102,159 @@ func TestPortalMessageWhitespaceOnlyDoesNotSend(t *testing.T) {
 	if len(api.sent) != 0 {
 		t.Fatalf("whitespace-only portal message was sent: %#v", api.sent)
 	}
+}
+
+func TestPortalMessageIgnoredCommandPrefixes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		prefixes []string
+		msgType  event.MessageType
+		reply    bool
+		blocked  bool
+	}{
+		{name: "default forwards commands", body: "!da_bot action send-jielong-test"},
+		{name: "configured command", body: "!da_bot action send-jielong-test", prefixes: []string{"!da_bot"}, blocked: true},
+		{name: "prefix alone", body: "!da_bot", prefixes: []string{"!da_bot"}, blocked: true},
+		{name: "literal prefix not whole word", body: "!da_bot_extra run", prefixes: []string{"!da_bot"}, blocked: true},
+		{name: "leading whitespace", body: " \t\n!da_bot run", prefixes: []string{"!da_bot"}, blocked: true},
+		{name: "prefix whitespace", body: "!da_bot run", prefixes: []string{"  !da_bot  "}, blocked: true},
+		{name: "multiple prefixes", body: "/tool run", prefixes: []string{"!da_bot", "/tool"}, blocked: true},
+		{name: "all bang commands", body: "!another run", prefixes: []string{"!"}, blocked: true},
+		{name: "notice", body: "!da_bot run", prefixes: []string{"!da_bot"}, msgType: event.MsgNotice, blocked: true},
+		{name: "case sensitive", body: "!DA_BOT run", prefixes: []string{"!da_bot"}},
+		{name: "not a regex", body: "!da_bot run", prefixes: []string{"!.*"}},
+		{name: "other command", body: "!another run", prefixes: []string{"!da_bot"}},
+		{name: "ordinary text unchanged", body: "  ordinary text  ", prefixes: []string{"!da_bot"}},
+		{name: "mention in text", body: "收到消息：!da_bot run", prefixes: []string{"!da_bot"}},
+		{name: "empty prefixes ignored", body: "ordinary text", prefixes: []string{"", " \t\n"}},
+		{name: "reply command", body: "> <@friend:example.com> original\n\n!da_bot run", prefixes: []string{"!da_bot"}, reply: true, blocked: true},
+		{name: "quoted command is not the reply", body: "> <@friend:example.com> !da_bot run\n\nordinary reply", prefixes: []string{"!da_bot"}, reply: true},
+		{name: "quote without reply relation", body: "> quoted example\n\n!da_bot run", prefixes: []string{"!da_bot"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &portalMessageAPI{}
+			s, rec := newPortalMessageTestServer(t, api)
+			s.cfg.Bridge.IgnoredCommandPrefixes = tc.prefixes
+			// Ignoring commands must be silent: no notices or extra Matrix calls.
+			var requests atomic.Int64
+			homeserver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"event_id":"$notice"}`))
+			}))
+			t.Cleanup(homeserver.Close)
+			if err := s.as.SetHomeserverURL(homeserver.URL); err != nil {
+				t.Fatal(err)
+			}
+			evt := portalTextEvent(rec, tc.body)
+			msg := evt.Content.AsMessage()
+			if tc.msgType != "" {
+				msg.MsgType = tc.msgType
+			}
+			if tc.reply {
+				msg.RelatesTo = &event.RelatesTo{InReplyTo: &event.InReplyTo{EventID: "$original"}}
+			}
+			s.handleMatrixEvent(context.Background(), evt)
+			if tc.blocked {
+				if len(api.sent) != 0 {
+					t.Fatalf("ignored command leaked to WeChat: %#v", api.sent)
+				}
+			} else if len(api.sent) != 1 || api.sent[0].Type != remoteapi.MsgText || api.sent[0].Text != tc.body {
+				t.Fatalf("ordinary forwarding changed: %#v", api.sent)
+			}
+			if requests.Load() != 0 {
+				t.Fatalf("unexpected Matrix requests: %d", requests.Load())
+			}
+			if msg.Body != tc.body {
+				t.Fatalf("filter mutated original body: %q", msg.Body)
+			}
+		})
+	}
+}
+
+func TestPortalMessageIgnoreFilterPreservesLocalCommandsAndPermissions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		body   string
+		deny   bool
+		want   string
+	}{
+		{name: "bridge command", body: "!wx info", want: "WeChat chat:"},
+		{name: "custom bridge prefix", prefix: "!custom", body: "!custom info", want: "WeChat chat:"},
+		{name: "permission gate", body: "!da_bot run", deny: true, want: "你没有使用此 bridge 的权限"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &portalMessageAPI{}
+			s, rec := newPortalMessageTestServer(t, api)
+			s.cfg.Bridge.CommandPrefix = tc.prefix
+			s.cfg.Bridge.IgnoredCommandPrefixes = []string{"!"}
+			if tc.deny {
+				s.cfg.Bridge.Permissions = map[string]string{"@alice:example.com": "relay"}
+			}
+			messages := capturePortalMatrixMessages(t, s)
+			s.handleMatrixEvent(context.Background(), portalTextEvent(rec, tc.body))
+			if len(api.sent) != 0 {
+				t.Fatalf("command leaked to WeChat: %#v", api.sent)
+			}
+			select {
+			case msg := <-messages:
+				if msg.MsgType != event.MsgNotice || !strings.Contains(msg.Body, tc.want) {
+					t.Fatalf("unexpected notice: %#v", msg)
+				}
+			default:
+				t.Fatal("filter swallowed a bridge command or permission notice")
+			}
+		})
+	}
+}
+
+func TestPortalMessageIgnoreFilterDoesNotAffectSelfSentInbound(t *testing.T) {
+	api := &portalMessageAPI{}
+	s, rec := newPortalMessageTestServer(t, api)
+	s.cfg.Bridge.IgnoredCommandPrefixes = []string{"!da_bot"}
+	messages := capturePortalMatrixMessages(t, s)
+	s.OnMessage(context.Background(), &remoteapi.InboundMessage{
+		ID: "inbound-1", Chat: rec.ChatID, Sender: "wxid_self",
+		Type: remoteapi.MsgText, Text: "!da_bot from WeChat",
+	})
+	select {
+	case msg := <-messages:
+		if msg.MsgType != event.MsgText || msg.Body != "!da_bot from WeChat" {
+			t.Fatalf("inbound message changed: %#v", msg)
+		}
+	default:
+		t.Fatal("self-sent inbound message was filtered")
+	}
+	if len(api.sent) != 0 {
+		t.Fatalf("inbound message echoed back to WeChat: %#v", api.sent)
+	}
+}
+
+func capturePortalMatrixMessages(t *testing.T, s *Server) <-chan event.MessageEventContent {
+	t.Helper()
+	messages := make(chan event.MessageEventContent, 8)
+	homeserver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/send/m.room.message/") {
+			var msg event.MessageEventContent
+			if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+				t.Error(err)
+			}
+			select {
+			case messages <- msg:
+			default:
+				t.Error("unexpected extra Matrix messages")
+			}
+		}
+		_, _ = w.Write([]byte(`{"event_id":"$captured"}`))
+	}))
+	t.Cleanup(homeserver.Close)
+	if err := s.as.SetHomeserverURL(homeserver.URL); err != nil {
+		t.Fatal(err)
+	}
+	return messages
 }
 
 func TestPortalMediaToRemoteMessageDoesNotMapWechatEmojiInCaptions(t *testing.T) {

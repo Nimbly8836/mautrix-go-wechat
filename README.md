@@ -108,6 +108,41 @@ mono PCM and encoded as SILK at a 12 kbps target bitrate. Native SILK and exact
 16 kHz mono 16-bit PCM WAV use a direct path. Install `ffmpeg` when running the bridge
 outside Docker; the provided Docker image includes it.
 
+## Keeping other bots' commands in Matrix
+
+Configure command prefixes that should **not** be forwarded from Matrix portal
+rooms to WeChat (or another configured backend):
+
+```yaml
+bridge:
+    command_prefix: "!wx"
+    ignored_command_prefixes:
+        - "!da_bot"
+        - "/tool"
+```
+
+With this example, `!da_bot action send-jielong-test` stays in Matrix for the
+other bot to handle. The bridge silently skips forwarding it; it does not delete
+the Matrix message or post a notice.
+
+- The default is `[]`, preserving existing forwarding. Update the bridge binary
+  or image and restart it with the changed config; there is no hot reload.
+- Matching uses literal, **case-sensitive prefixes**, not regular expressions
+  or whole command names: `!da_bot_extra` also matches `!da_bot`. Surrounding
+  whitespace in configured prefixes and leading message whitespace are ignored;
+  empty/whitespace-only entries are ignored, not treated as a match-all rule.
+- For replies, only the new text is checked, excluding the Matrix reply fallback
+  quote. Non-matching messages are forwarded unchanged by this filter.
+- Use `["!"]` to skip all other `!` commands. The bridge's own commands, including
+  `!wx info` and reply-based `!wx 接龙`, still run normally, as does a custom
+  `bridge.command_prefix`. Existing permissions still apply.
+- This only filters portal `m.text`/`m.notice` messages **from Matrix to the
+  backend**. It does not filter WeChat-to-Matrix messages, including your own
+  phone-sent messages, or media/file captions.
+- This is not a bot-sender blocklist. Ordinary bot replies such as
+  `收到消息：!da_bot ...` or `Action send-jielong-test executed.` still forward
+  unless their own leading text matches a configured prefix.
+
 ## Participating in a WeChat solitaire by reply
 
 Requires a protocol-service version that provides `POST /api/Msg/SendSolitaire`

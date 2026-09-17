@@ -115,6 +115,7 @@ func TestPortalXMLThroughWechatHTTP(t *testing.T) {
 		{name: "SpacedLanguage", body: "```` wx_xml\n" + portalXMLFixture + "\n````", wantPath: "/Msg/SendApp"},
 		{name: "RenderedHTML", body: portalXMLFixture, html: true, wantPath: "/Msg/SendApp"},
 		{name: "OrdinaryText", body: "hello :wechat_smile:", wantPath: "/Msg/SendTxt", wantText: "hello [微笑]"},
+		{name: "OtherBotCommand", body: "!da_bot action send-jielong-test"},
 		{name: "OtherCodeBlock", body: "```xml\n<msg/>\n```", wantPath: "/Msg/SendTxt", wantText: "```xml\n<msg/>\n```"},
 		{name: "InvalidXML", body: "```wx_xml\n<appmsg><type>5</type>\n```", wantErr: true},
 		{name: "InvalidFence", body: "```wx_xml\n<appmsg/>", wantErr: true},
@@ -157,6 +158,7 @@ func TestPortalXMLThroughWechatHTTP(t *testing.T) {
 			}
 			s, rec := newPortalMessageTestServer(t, &portalMessageAPI{})
 			s.api = api
+			s.cfg.Bridge.IgnoredCommandPrefixes = []string{"!"}
 			notices := 0
 			homeserver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(r.URL.Path, "/send/m.room.message/") {

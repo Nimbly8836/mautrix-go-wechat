@@ -6,7 +6,8 @@ homeserver:
     # The address that the bridge can use to connect to the homeserver.
     # For the bundled docker-compose this is the synapse service name.
     address: http://synapse:8008
-    # The domain part of your Matrix IDs (e.g. @user:example.com -> example.com).
+    # The domain part of your Matrix IDs
+    # (e.g. @user:example.com -> example.com).
     domain: example.com
 
 appservice:
@@ -38,7 +39,8 @@ network:
     #   push - WeChat API posts new messages to webhook_path
     receive:
         mode: poll
-        # Required when mode is push. This is mounted on the appservice HTTP server.
+        # Required when mode is push. This is mounted on the appservice
+        # HTTP server.
         webhook_path: /wechat/callback
     # Backend-specific extra options, passed through to the implementation.
     extra: {}
@@ -55,14 +57,26 @@ bridge:
     # Saved login sessions for multiple WeChat accounts.
     account_file: /data/accounts.json
     # Sole canonical global shortcode-to-MXC manifest for the fixed 109-file
-    # WeChat built-in emoji import. It is persisted atomically; Matrix room state
-    # is only a replica. Keep this path on durable storage. Retry with the exact
-    # `!wx stickers import wechat --ack-no-license` command after partial failure.
+    # WeChat built-in emoji import. It is persisted atomically; Matrix room
+    # state is only a replica. Keep this path on durable storage. Retry with
+    # the exact `!wx stickers import wechat --ack-no-license` command after
+    # partial failure.
     wechat_builtin_emoji_file: /data/wechat-builtin-emoji-pack.json
-    # Shared WeChat emoji/sticker cache directory. All accounts reuse files here.
+    # Shared WeChat emoji/sticker cache directory.
+    # All accounts reuse files here.
     emoji_dir: /data/emojis
     # Bridge command prefix for management and portal-local commands.
     command_prefix: "!wx"
+    # Keep other bots' commands in Matrix instead of forwarding them to WeChat.
+    # Literal, case-sensitive prefixes for portal text/notice messages only.
+    # Surrounding prefix whitespace and leading message whitespace are ignored;
+    # replies match their new text, not the quoted fallback.
+    # Blank entries do nothing.
+    # Bridge commands still run first. Inbound messages/media are not filtered.
+    # Example: ["!da_bot", "/tool"], or ["!"] for all non-bridge bang commands.
+    # Empty (default) preserves existing forwarding.
+    # Restart after changing config.
+    ignored_command_prefixes: []
     # New chat portal creation mode:
     #   auto   - create rooms immediately and notify management rooms
     #   manual - notify first; create only after `!wx create <chat>` in bot room
@@ -72,15 +86,16 @@ bridge:
     #   mute   - create portal and attach to Space, but don't invite the owner
     #   reject - don't create official-account portals automatically
     official_account_mode: invite
-    # Optional: allow automatic registration of bridged WeChat stickers in a real
-    # Matrix user's personal sticker picker (`m.image_pack.rooms`). Appservices
-    # cannot write account_data for normal users without that user's access token.
-    # Both values must identify the same user, and that user must already be joined
-    # to a room containing the stable pack; invites are not sufficient. Keep the
-    # token secret. Missing/failed account data does not roll back room pack state.
-    # This exact user may run the built-in import only after also passing the
-    # general permissions gate. Otherwise an exact user/domain `admin` match is
-    # required. A `relay` denial still wins; portal ownership grants no authority.
+    # Optional: allow automatic registration of bridged WeChat stickers in a
+    # real Matrix user's personal sticker picker (`m.image_pack.rooms`).
+    # Appservices cannot write account_data for normal users without that
+    # user's access token. Both values must identify the same user, and that
+    # user must already be joined to a room containing the stable pack;
+    # invites are not sufficient. Keep the token secret. Missing/failed
+    # account data does not roll back room pack state. This exact user may
+    # run the built-in import only after also passing the general permissions
+    # gate. Otherwise an exact user/domain `admin` match is required. A `relay`
+    # denial still wins; portal ownership grants no authority.
     personal_sticker_user_id: ""
     personal_sticker_access_token: ""
     # Who may use the bridge. Levels: relay < user < admin.

@@ -65,6 +65,40 @@ func TestBridgeCommandPrefixDefaultsToWx(t *testing.T) {
 	}
 }
 
+func TestBridgeIgnoredCommandPrefixes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{name: "legacy config"},
+		{name: "empty list", yaml: "  ignored_command_prefixes: []\n", want: []string{}},
+		{name: "bot commands", yaml: "  ignored_command_prefixes: [\"!da_bot\", \"/tool\", \"!\"]\n", want: []string{"!da_bot", "/tool", "!"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(fmt.Sprintf(baseConfigYAML, ""), "bridge:\n", "bridge:\n"+tc.yaml, 1)
+			cfg, err := Load(writeConfig(t, body))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if !reflect.DeepEqual(cfg.Bridge.IgnoredCommandPrefixes, tc.want) {
+				t.Fatalf("prefixes = %#v, want %#v", cfg.Bridge.IgnoredCommandPrefixes, tc.want)
+			}
+			path := filepath.Join(t.TempDir(), "saved.yaml")
+			if err = cfg.Save(path); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			reloaded, err := Load(path)
+			if err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			if strings.Join(reloaded.Bridge.IgnoredCommandPrefixes, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Fatalf("prefixes changed after Save/Load: %#v", reloaded.Bridge.IgnoredCommandPrefixes)
+			}
+		})
+	}
+}
+
 func TestBridgeWechatBuiltinEmojiFileDefaultsForLegacyConfig(t *testing.T) {
 	cfg, err := Load(writeConfig(t, fmt.Sprintf(baseConfigYAML, "")))
 	if err != nil {

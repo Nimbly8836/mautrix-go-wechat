@@ -38,6 +38,8 @@ func TestSolitaireCallbackToMatrixReplyToHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, rec := newPortalMessageTestServer(t, &portalMessageAPI{})
+	// Bridge commands must win even when all other bang commands are filtered.
+	s.cfg.Bridge.IgnoredCommandPrefixes = []string{"!"}
 	rec.ChatID, rec.IsGroup = "group@chatroom", true
 	s.portals.data.Portals = map[string]portalRecord{string(rec.ChatID): rec}
 	s.portals.path = filepath.Join(t.TempDir(), "portals.json")

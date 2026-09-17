@@ -92,6 +92,10 @@ type Bridge struct {
 	PersonalStickerAccessToken string `yaml:"personal_sticker_access_token"`
 	// CommandPrefix is used for management and portal-local commands.
 	CommandPrefix string `yaml:"command_prefix"`
+	// IgnoredCommandPrefixes keeps matching Matrix portal text/notice messages
+	// out of the remote chat. Bridge commands take precedence. Matching is
+	// literal and case-sensitive; whitespace-only prefixes are ignored.
+	IgnoredCommandPrefixes []string `yaml:"ignored_command_prefixes"`
 }
 
 // Database connection settings.
