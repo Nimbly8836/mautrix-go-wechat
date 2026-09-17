@@ -18,7 +18,7 @@ func solitaireMatrixContent(content *event.MessageEventContent, source *remoteap
 	if source == nil {
 		return content
 	}
-	content.Body += fmt.Sprintf("\n\n回复本条消息并发送「%s 接龙 你的记录」可参与这个版本。", prefix)
+	content.Body += fmt.Sprintf("\n\nReply: %s jl <text>", prefix)
 	return &event.Content{Parsed: content, Raw: map[string]any{solitaireSourceKey: source}}
 }
 
@@ -41,7 +41,7 @@ func parseSolitaireCommand(msg *event.MessageEventContent, prefix string) (strin
 		return "", false
 	}
 	command, content := nextWord(rest)
-	return content, command == "接龙" || strings.EqualFold(command, "solitaire")
+	return content, strings.EqualFold(command, "jl") || command == "接龙" || strings.EqualFold(command, "solitaire")
 }
 
 func (s *Server) handleSolitaireReply(ctx context.Context, rec portalRecord, evt *event.Event, content string) {
@@ -52,7 +52,7 @@ func (s *Server) handleSolitaireReply(ctx context.Context, rec portalRecord, evt
 	msg := evt.Content.AsMessage()
 	target := msg.RelatesTo.GetNonFallbackReplyTo()
 	if msg.MsgType != event.MsgText || evt.StateKey != nil || msg.RelatesTo.GetReplaceID() != "" || target == "" || content == "" || evt.ID == "" {
-		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("请回复一条带参与提示的接龙消息，发送「%s 接龙 你的记录」。不要通过编辑消息或线程默认回复参与。", s.commandPrefix()))
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("请直接回复接龙消息：%s jl 内容（不支持编辑或线程默认回复）。", s.commandPrefix()))
 		return
 	}
 
@@ -103,10 +103,19 @@ func (s *Server) handleSolitaireReply(ctx context.Context, rec portalRecord, evt
 		s.sendPortalNotice(ctx, rec.RoomID, "这条接龙命令已尝试处理，不会重复发送。请先查看微信确认结果；已尝试不代表一定发送成功。")
 		return
 	}
-	messageID, err := api.JoinSolitaire(ctx, source, content)
+	result, err := api.JoinSolitaire(ctx, source, content)
+	if err == nil && (result.ID == "" || result.ID == "0") {
+		err = fmt.Errorf("协议服务未返回消息 ID")
+	}
 	if err != nil {
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("接龙未确认成功: %v\n没有自动重发。若结果未知，请先查看微信，不要直接重试。", err))
 		return
 	}
-	s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("协议服务确认已发送接龙记录（消息 ID: %s）。本次基于你回复的版本追加。", messageID))
+	if result.Message == nil || result.Message.ID != result.ID {
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("JL 已发送（ID: %s），但未取得完整接龙；请查看微信，勿重发。", result.ID))
+		return
+	}
+	if err := s.deliverSolitaireToPortal(ctx, rec, result.Message); err != nil {
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("JL 已发送，但 Matrix 展示未确认；请查看微信，勿重发。详情: %v", err))
+	}
 }

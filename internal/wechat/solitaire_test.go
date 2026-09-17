@@ -62,8 +62,11 @@ func TestJoinSolitaireExactSourceAndResults(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, err := client.JoinSolitaire(context.Background(), *source, "张三，1份\n不加糖 :wechat_smile:")
-			if got != tt.wantID || (err != nil) != (tt.wantID == "") || calls != 1 {
-				t.Fatalf("id=%q err=%v calls=%d; want id=%q calls=1", got, err, calls, tt.wantID)
+			if got.Message != nil {
+				t.Fatalf("invalid/missing XML fabricated a chain: %#v", got.Message)
+			}
+			if got.ID != tt.wantID || (err != nil) != (tt.wantID == "") || calls != 1 {
+				t.Fatalf("id=%q err=%v calls=%d; want id=%q calls=1", got.ID, err, calls, tt.wantID)
 			}
 		})
 	}

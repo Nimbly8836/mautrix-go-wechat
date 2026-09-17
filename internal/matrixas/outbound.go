@@ -189,7 +189,7 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 	}
 	switch cmd {
 	case "help":
-		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("这是 WeChat portal room。在这里发送文本会转发到 WeChat；独立的 wx_xml 代码块会作为自定义 App XML 发送，Type 从 appmsg/type 自动读取。回复带提示的接龙消息并发送「%s 接龙 你的记录」可参与。命令: %s info, %s sync/%s refresh（仅刷新当前房间）", s.commandPrefix(), s.commandPrefix(), s.commandPrefix(), s.commandPrefix()))
+		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("这是 WeChat portal room。在这里发送文本会转发到 WeChat；独立的 wx_xml 代码块会作为自定义 App XML 发送，Type 从 appmsg/type 自动读取。回复接龙：%s jl 内容。命令: %s info, %s sync/%s refresh（仅刷新当前房间）", s.commandPrefix(), s.commandPrefix(), s.commandPrefix(), s.commandPrefix()))
 		return
 	case "info":
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("WeChat chat: %s\nMatrix room: %s", rec.ChatID, rec.RoomID))

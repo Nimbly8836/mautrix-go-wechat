@@ -11,8 +11,18 @@ type SolitaireSource struct {
 	Reference string `json:"reference"`
 }
 
+// SolitaireResult confirms one sent version. Message is the complete chain
+// returned by the backend, with a fresh source reference, when available. A nil
+// Message means the send was confirmed but its content could not be recovered;
+// callers must not manufacture a chain or retry the send to retrieve it.
+type SolitaireResult struct {
+	ID      MessageID
+	Message *InboundMessage
+}
+
 // SolitaireAPI is an optional capability for appending one entry to a selected
 // chain. It must not guess a newer version or retry an uncertain send result.
+// The result and normal inbound events may describe the same sent message.
 type SolitaireAPI interface {
-	JoinSolitaire(ctx context.Context, source SolitaireSource, content string) (MessageID, error)
+	JoinSolitaire(ctx context.Context, source SolitaireSource, content string) (SolitaireResult, error)
 }

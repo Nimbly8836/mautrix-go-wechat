@@ -17,21 +17,25 @@ import (
 
 type solitaireTestAPI struct {
 	remoteapi.PuppetAPI
-	account   remoteapi.UserID
-	joined    []remoteapi.SolitaireSource
-	entries   []string
-	texts     []remoteapi.OutgoingMessage
-	joinError error
+	account    remoteapi.UserID
+	joined     []remoteapi.SolitaireSource
+	entries    []string
+	texts      []remoteapi.OutgoingMessage
+	joinError  error
+	joinResult *remoteapi.SolitaireResult
 }
 
 func (a *solitaireTestAPI) Self(context.Context) (remoteapi.UserID, error) {
 	return a.account, nil
 }
 
-func (a *solitaireTestAPI) JoinSolitaire(_ context.Context, source remoteapi.SolitaireSource, content string) (remoteapi.MessageID, error) {
+func (a *solitaireTestAPI) JoinSolitaire(_ context.Context, source remoteapi.SolitaireSource, content string) (remoteapi.SolitaireResult, error) {
 	a.joined = append(a.joined, source)
 	a.entries = append(a.entries, content)
-	return "456", a.joinError
+	if a.joinResult != nil {
+		return *a.joinResult, a.joinError
+	}
+	return remoteapi.SolitaireResult{ID: "456"}, a.joinError
 }
 
 func (a *solitaireTestAPI) SendMessage(_ context.Context, _ remoteapi.ChatID, msg remoteapi.OutgoingMessage) (remoteapi.MessageID, error) {
@@ -47,7 +51,7 @@ func solitaireReplyEvent(rec portalRecord, body string) *event.Event {
 }
 
 func TestSolitaireReplyGuardsAndDurableDedup(t *testing.T) {
-	for _, name := range []string{"Success", "LegacyReplyFallback", "Multiline", "CustomPrefix", "OrdinaryReply", "PermissionDenied", "MissingReply", "ThreadFallback", "Edit", "Notice", "NoCommandID", "WrongRoom", "OmittedRoomID", "WrongEventID", "WrongSender", "WrongAccount", "WrongChat", "NoMetadata", "Redacted", "Unreadable", "PersistenceFailure", "UncertainResult"} {
+	for _, name := range []string{"Success", "UppercaseJL", "LegacyChineseAlias", "SolitaireAlias", "OtherBot", "LegacyReplyFallback", "Multiline", "CustomPrefix", "OrdinaryReply", "PermissionDenied", "MissingReply", "ThreadFallback", "Edit", "Notice", "NoCommandID", "WrongRoom", "OmittedRoomID", "WrongEventID", "WrongSender", "WrongAccount", "WrongChat", "NoMetadata", "Redacted", "Unreadable", "PersistenceFailure", "UncertainResult"} {
 		t.Run(name, func(t *testing.T) {
 			api := &solitaireTestAPI{account: "wxid_self"}
 			s, rec := newPortalMessageTestServer(t, &portalMessageAPI{})
@@ -55,23 +59,36 @@ func TestSolitaireReplyGuardsAndDurableDedup(t *testing.T) {
 			s.portals.path = filepath.Join(t.TempDir(), "portals.json")
 			source := remoteapi.SolitaireSource{Account: "wxid_self", Chat: rec.ChatID, Reference: `{"MsgID":123,"NewMsgID":9007199254740993}`}
 			original := &event.Event{ID: "$source", RoomID: rec.RoomID, Sender: s.as.BotMXID(), Type: event.EventMessage}
-			evt := solitaireReplyEvent(rec, "!wx 接龙 张三，1份 :wechat_smile:")
+			evt := solitaireReplyEvent(rec, "!wx jl 张三，1份 :wechat_smile:")
 			wantJoin, wantText := 0, 0
 			wantEntry := "张三，1份 :wechat_smile:"
 			switch name {
 			case "Success":
 				wantJoin = 1
+			case "UppercaseJL":
+				wantJoin = 1
+				evt.Content.AsMessage().Body = "!wx JL " + wantEntry
+			case "LegacyChineseAlias":
+				wantJoin = 1
+				evt.Content.AsMessage().Body = "!wx 接龙 " + wantEntry
+			case "SolitaireAlias":
+				wantJoin = 1
+				evt.Content.AsMessage().Body = "!wx solitaire " + wantEntry
+			case "OtherBot":
+				wantJoin = 1
+				evt.Sender = "@daily_bot:example.com"
+				s.cfg.Bridge.Permissions = map[string]string{evt.Sender.String(): "user"}
 			case "LegacyReplyFallback":
 				wantJoin = 1
-				evt.Content.AsMessage().Body = "> <@wechatbot:example.com> #接龙\n> 1. 小明\n\n!wx 接龙 " + wantEntry
+				evt.Content.AsMessage().Body = "> <@wechatbot:example.com> #接龙\n> 1. 小明\n\n!wx jl " + wantEntry
 			case "Multiline":
 				wantJoin = 1
 				wantEntry += "\n不加糖"
-				evt.Content.AsMessage().Body = "!wx 接龙\n" + wantEntry
+				evt.Content.AsMessage().Body = "!wx jl\n" + wantEntry
 			case "CustomPrefix":
 				wantJoin = 1
 				s.cfg.Bridge.CommandPrefix = "!custom"
-				evt.Content.AsMessage().Body = "!custom 接龙 " + wantEntry
+				evt.Content.AsMessage().Body = "!custom jl " + wantEntry
 			case "OrdinaryReply":
 				wantText = 1
 				evt.Content.AsMessage().Body = "张三，1份"
@@ -193,8 +210,33 @@ func TestSolitaireMetadataSurvivesMatrixJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Source != *source || !strings.Contains(got.Body, "!custom 接龙 你的记录") || !strings.HasPrefix(got.Body, "#接龙\n1. 小明") {
+	if got.Source != *source || got.Body != "#接龙\n1. 小明\n\nReply: !custom jl <text>" {
 		t.Fatalf("metadata/title/hint lost: %#v", got)
+	}
+}
+
+func TestSolitaireCommandHintsUseJL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "portal help", body: "!custom help"},
+		{name: "missing reply", body: "!custom jl 张三，1份"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, rec := newPortalMessageTestServer(t, &portalMessageAPI{})
+			s.cfg.Bridge.CommandPrefix = "!custom"
+			messages := capturePortalMatrixMessages(t, s)
+			s.handleMatrixEvent(context.Background(), portalTextEvent(rec, tc.body))
+			select {
+			case msg := <-messages:
+				if !strings.Contains(msg.Body, "!custom jl ") || strings.Contains(msg.Body, "!custom 接龙") {
+					t.Fatalf("hint does not use the short command: %q", msg.Body)
+				}
+			default:
+				t.Fatal("missing command hint")
+			}
+		})
 	}
 }
 

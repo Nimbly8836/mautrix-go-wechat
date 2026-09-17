@@ -134,7 +134,7 @@ the Matrix message or post a notice.
 - For replies, only the new text is checked, excluding the Matrix reply fallback
   quote. Non-matching messages are forwarded unchanged by this filter.
 - Use `["!"]` to skip all other `!` commands. The bridge's own commands, including
-  `!wx info` and reply-based `!wx 接龙`, still run normally, as does a custom
+  `!wx info` and reply-based `!wx jl`, still run normally, as does a custom
   `bridge.command_prefix`. Existing permissions still apply.
 - This only filters portal `m.text`/`m.notice` messages **from Matrix to the
   backend**. It does not filter WeChat-to-Matrix messages, including your own
@@ -153,25 +153,50 @@ and has local message storage (`savelocalmessage`) enabled. The bridge uses
 In the target portal room, **reply to the specific solitaire message** and send:
 
 ```text
-!wx 接龙 张三，1份
+!wx jl 张三，1份
 ```
 
-`!wx solitaire ...` is an alias; a custom `bridge.command_prefix` applies too.
+`jl` is case-insensitive. `!wx 接龙 ...` and `!wx solitaire ...` remain compatible
+aliases; a custom `bridge.command_prefix` applies too.
 The entry may span multiple lines and is not passed through emoji substitution.
 An ordinary reply without the command remains ordinary text. This command only
 **participates in an existing version**; it does not initiate a new chain or
 select the latest message automatically.
 
-Newly bridged appmsg type 53 messages show their title/entries and an instruction
-to reply. They carry an opaque source reference in the Matrix event, preserving
-both WeChat IDs without float/int64 precision loss. Reply resolution works after
+Newly bridged appmsg type 53 messages keep their original title/entries and add
+just one hint: `Reply: !wx jl <text>` (using the configured prefix). They carry
+an opaque source reference in the Matrix event, preserving both WeChat IDs
+without float/int64 precision loss. Reply resolution works after
 a bridge restart, fetches the original event in the current room, and verifies
 its bridge sender, account and chat before calling the protocol API. Old Matrix
 messages without this metadata, plain copied chain text, recalled messages,
 edits and implicit thread fallback replies cannot be used as targets.
 
-The protocol service resolves the exact saved message. A callback may arrive
-before local persistence finishes; a not-found response is an error, not a reason
+After a confirmed send, the bridge displays the **complete updated chain from
+the upstream response's `Data.Xml`**, followed by the same short reply hint,
+instead of a separate success/message-ID notice. It uses the newly returned
+message IDs, so you can reply to this new event for the next entry. The bridge
+does not reconstruct the chain or numbering from the old message. If the send
+is confirmed but the response lacks valid chain XML, it shows a short warning
+to check WeChat instead; missing content is not a reason to send again.
+
+Send responses and callbacks/history with overlapping, typed message-ID aliases
+share one Matrix display, scoped to account, chat and room. This is a bounded
+in-memory cache of 1,024 versions, not permanent history deduplication. A failed
+or unacknowledged Matrix display is not marked complete; a later delivery reuses
+the same Matrix transaction ID. That does **not** resend the WeChat action.
+Different versions are never merged by comparing their text.
+
+Other Matrix bots can use the same command if their sender IDs are allowed by
+`bridge.permissions`. They must send `m.text` with a real
+`m.relates_to.m.in_reply_to.event_id` pointing to the bridged chain in the same
+room. A quoted body alone, `m.notice`, or the other bot's own command prefix does
+not invoke this action.
+
+The protocol service resolves the exact saved message. This also applies when
+replying to a newly displayed send result: its message must first be saved by
+the protocol service. A response or callback may arrive before that persistence
+finishes; a not-found response is an error, not a reason
 to guess a different version or send client-supplied XML. Using an older source
 may create a divergent version: the bridge does not merge concurrent entries.
 

@@ -272,6 +272,10 @@ type InboundMessage struct {
 	Timestamp time.Time
 	Extra     map[string]any
 	Solitaire *SolitaireSource // Exact source version for opt-in reply participation.
+	// DeduplicationKeys are backend-defined, type-qualified ID aliases, stable
+	// across send responses and inbound delivery, scoped to an account/chat.
+	// They are internal delivery hints, not client-supplied source metadata.
+	DeduplicationKeys []string
 }
 
 // Media is a binary attachment. Backends fill either Data (already fetched) or

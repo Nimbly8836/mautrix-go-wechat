@@ -78,6 +78,11 @@ type Server struct {
 	importMu              sync.Mutex
 	importRunning         bool
 	importRuntime         *builtinEmojiRuntime
+	// Only solitaire display uses this lock/cache; ordinary inbound delivery
+	// and the backend's event queue are unchanged.
+	solitaireDeliveryMu    sync.Mutex
+	solitaireDeliveries    map[solitaireDeliveryKey]*solitaireDelivery
+	solitaireDeliveryOrder []*solitaireDelivery
 	// Lock order: spaceMu -> packMu -> accountDataMu -> accountStore.mu /
 	// builtin store mutex. Code holding packMu must never acquire spaceMu.
 	// Account-data transactions use lock-acquiring wrappers plus non-recursive
@@ -601,6 +606,13 @@ func hasKnownWechatEmojiShortcode(body string) bool {
 }
 
 func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *remoteapi.InboundMessage) {
+	if m.Solitaire != nil {
+		if err := s.deliverSolitaireToPortal(ctx, rec, m); err != nil {
+			log.Printf("failed to bridge solitaire %s to %s: %v", m.ID, rec.RoomID, err)
+			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("桥接接龙失败: %v", err))
+		}
+		return
+	}
 	sender := m.Sender
 	if sender == "" {
 		sender = remoteapi.UserID(m.Chat)
@@ -641,11 +653,7 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 			}
 		}
 	}
-	var outboundContent any = content
-	if m.Solitaire != nil && m.Solitaire.Chat == rec.ChatID {
-		outboundContent = solitaireMatrixContent(content, m.Solitaire, s.commandPrefix())
-	}
-	resp, err := client.SendMessageEvent(ctx, rec.RoomID, eventType, outboundContent, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
+	resp, err := client.SendMessageEvent(ctx, rec.RoomID, eventType, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
 	if err != nil {
 		log.Printf("failed to bridge remote msg %s to %s: %v", m.ID, rec.RoomID, err)
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("桥接消息失败: %v", err))
