@@ -77,13 +77,7 @@ func TestLocationLocalHistoryToMatrix(t *testing.T) {
 				t.Fatalf("wrong history conversation/sender: %s / %s", message.Chat, message.Sender)
 			}
 			content := bridgeLocationMessageToMatrix(t, api, message)
-			wantType := event.MsgLocation
-			if tc.geo == "" {
-				wantType = event.MsgText
-			}
-			if content.MsgType != wantType || content.GeoURI != tc.geo || content.Body != tc.body {
-				t.Fatalf("wrong history content: type=%s geo=%q body=%q", content.MsgType, content.GeoURI, content.Body)
-			}
+			assertLocationText(t, content, tc.body, tc.geo)
 		})
 	}
 }
@@ -129,9 +123,7 @@ func checkLocationGroupCallback(t *testing.T, sender, prefix string, wantLocatio
 			}
 			return
 		}
-		if content.MsgType != event.MsgLocation || content.GeoURI != "geo:31.234567,121.456789" || content.Body != "示例餐饮店\n示例省示例市示例区示例大道166号示例培训大楼第一层104-02室" {
-			t.Fatalf("group location lost its full content: %+v", content)
-		}
+		assertLocationText(t, content, "示例餐饮店\n示例省示例市示例区示例大道166号示例培训大楼第一层104-02室", "geo:31.234567,121.456789")
 	default:
 		t.Fatal("group callback emitted no event")
 	}

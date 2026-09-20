@@ -47,8 +47,13 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 		}
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgLocation:
+		// Use ordinary text: location-card support varies between Matrix clients.
+		// Preserve the complete description even when coordinates are unavailable.
 		if geoURI := m.Location.GeoURI(); geoURI != "" {
-			return &event.MessageEventContent{MsgType: event.MsgLocation, Body: body, GeoURI: geoURI}
+			coordinates := strings.TrimPrefix(geoURI, "geo:")
+			if latitude, longitude, ok := strings.Cut(coordinates, ","); ok {
+				body += fmt.Sprintf("\n坐标：%s\n地图：https://www.openstreetmap.org/?mlat=%s&mlon=%s#map=16/%s/%s", coordinates, latitude, longitude, latitude, longitude)
+			}
 		}
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgLink, remoteapi.MsgApp, remoteapi.MsgContactCard:

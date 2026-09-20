@@ -111,24 +111,28 @@ outside Docker; the provided Docker image includes it.
 ## Receiving WeChat locations
 
 WeChat location messages (type 48), from callbacks or local-message polling, are
-converted to standard Matrix `m.location` events. The bridge reads the original
-location XML rather than a rendered `[位置]` summary:
+displayed as ordinary Matrix `m.text` messages, so clients do not need location-card
+support. The bridge reads the original location XML rather than a rendered `[位置]`
+summary:
 
 - `body` contains the place name (`poiname`) and complete address (`label`), on
   separate lines when both are present and different. XML entities are decoded
   once; the XML itself is not used as the location description.
-- `geo_uri` contains `geo:<latitude>,<longitude>` from WeChat's `x` and `y`.
-  Both coordinates must be present, finite, and in range. Explicit zero values
-  are valid; missing values are not treated as `(0, 0)`.
-- Missing/invalid coordinates produce readable `m.text`, retaining any parsed
-  name/address. If XML supplies no readable description, a readable `ContentText`
-  is retained before a generic push summary. Invalid or ambiguous XML does not
-  create an incomplete map event.
+- When WeChat's `x` (latitude) and `y` (longitude) are present, finite, and in range,
+  the text also includes a `坐标：<latitude>,<longitude>` line and an HTTPS
+  OpenStreetMap link. Explicit zero values are valid; missing values are not
+  treated as `(0, 0)`. Creating the link makes no map-service request.
+- Missing/invalid coordinates retain the readable name/address without inventing
+  coordinates or a map link. If XML supplies no readable description, a readable
+  `ContentText` is retained before a generic push summary. Invalid or ambiguous XML
+  is not exposed as the description.
 - A matching group sender prefix is removed before XML parsing, even when sender
   metadata is already present. This does not replace the supplied sender identity.
 
 The bridge does not shorten the address or convert coordinate reference systems.
-The Matrix client controls the map/card layout and may still collapse long text.
+The event does not use `m.location` or require a `geo_uri` field. The complete
+location is readable as text even if the client cannot display maps; the map link
+uses the source coordinates without assuming or converting their reference system.
 This applies to newly bridged messages; existing malformed events are not edited
 or resent. Matrix-to-WeChat location sending is unchanged.
 

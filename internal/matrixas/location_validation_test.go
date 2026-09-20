@@ -32,20 +32,12 @@ func TestLocationMessagesKeepReadableTextAndValidCoordinates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			content := bridgeLocationCallback(t, tc.xml, "[位置]", "位置暂不可用")
-			wantType := event.MsgLocation
-			if tc.geo == "" {
-				wantType = event.MsgText
-			}
-			if content.MsgType != wantType || content.GeoURI != tc.geo || content.Body != tc.body || content.FormattedBody != "" {
-				t.Fatalf("unexpected location content: type=%s geo=%q body=%q html=%q", content.MsgType, content.GeoURI, content.Body, content.FormattedBody)
-			}
+			assertLocationText(t, content, tc.body, tc.geo)
 		})
 	}
 	longAddress := strings.Repeat("详细地址段落📍", 150) + "第一层104-02室"
 	content := bridgeLocationCallback(t, `<msg><location x="1" y="2" poiname="长地址地点" label="`+longAddress+`" /></msg>`, "[位置]", "[位置]")
-	if content.Body != "长地址地点\n"+longAddress || content.GeoURI != "geo:1,2" {
-		t.Fatal("long address was truncated or lost")
-	}
+	assertLocationText(t, content, "长地址地点\n"+longAddress, "geo:1,2")
 }
 
 func TestInvalidLocationXMLDoesNotCreateMisleadingMap(t *testing.T) {

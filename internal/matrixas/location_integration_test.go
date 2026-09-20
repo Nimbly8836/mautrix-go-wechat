@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -19,19 +20,58 @@ const locationXMLFixture = `<msg>
 
 func TestLocationCallbackToMatrixPreservesFullAddress(t *testing.T) {
 	content := bridgeLocationCallback(t, locationXMLFixture, locationXMLFixture, "[位置]")
-	if content.MsgType != event.MsgLocation || content.GeoURI != "geo:31.234567,121.456789" {
-		t.Fatalf("incomplete Matrix location: msgtype=%s geo_uri=%q body=%q", content.MsgType, content.GeoURI, content.Body)
-	}
 	const wantBody = "示例餐饮店\n示例省示例市示例区示例大道166号示例培训大楼第一层104-02室"
-	if content.Body != wantBody {
-		t.Fatalf("location name/address changed or truncated: got %q want %q", content.Body, wantBody)
-	}
+	assertLocationText(t, content, wantBody, "geo:31.234567,121.456789")
 }
 
 func TestLocationCallbackUsesOriginalXMLNotRenderedSummary(t *testing.T) {
 	content := bridgeLocationCallback(t, locationXMLFixture, "[位置]", "发送者 : [位置]")
-	if content.MsgType != event.MsgLocation || content.GeoURI != "geo:31.234567,121.456789" || content.Body != "示例餐饮店\n示例省示例市示例区示例大道166号示例培训大楼第一层104-02室" {
-		t.Fatalf("rendered summary replaced the original location: %+v", content)
+	assertLocationText(t, content, "示例餐饮店\n示例省示例市示例区示例大道166号示例培训大楼第一层104-02室", "geo:31.234567,121.456789")
+}
+
+func TestLocationCallbackUsesPlainTextForClientCompatibility(t *testing.T) {
+	const raw = `<msg><location x="31.234567" y="121.456789" scale="15" label="示例省示例市示例区示例大道166号示例大楼1号楼607-608" maptype="0" poiname="示例事务所" poiid="synthetic-poi" buildingId="" floorName="" poiCategoryTips="生活服务:事务所" poiBusinessHour="周一至周五 09:00-18:00 " poiPhone="00000000000" poiPriceTips="0.0" isFromPoiList="true" adcode="" cityname="" fromusername="wxid_self" /></msg>`
+	content := bridgeLocationCallback(t, raw, "[位置]", "发送者 : [位置]")
+	const wantBody = "示例事务所\n示例省示例市示例区示例大道166号示例大楼1号楼607-608\n坐标：31.234567,121.456789\n地图：https://www.openstreetmap.org/?mlat=31.234567&mlon=121.456789#map=16/31.234567/121.456789"
+	if content.MsgType != event.MsgText || content.Body != wantBody || content.GeoURI != "" || content.FormattedBody != "" {
+		t.Fatalf("location must be readable without location-card support: type=%s body=%q geo_uri=%q formatted_body=%q", content.MsgType, content.Body, content.GeoURI, content.FormattedBody)
+	}
+}
+
+func assertLocationText(t *testing.T, content event.MessageEventContent, description, geoURI string) {
+	t.Helper()
+	if content.MsgType != event.MsgText || content.GeoURI != "" || content.FormattedBody != "" {
+		t.Fatalf("location must use ordinary text: %+v", content)
+	}
+	if geoURI == "" {
+		if content.Body != description {
+			t.Fatalf("location without coordinates changed its readable description: got %q want %q", content.Body, description)
+		}
+		return
+	}
+	lines := strings.Split(content.Body, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("location is missing its description, coordinates or map link: %q", content.Body)
+	}
+	if got := strings.Join(lines[:len(lines)-2], "\n"); got != description {
+		t.Fatalf("location description changed or was truncated: got %q want %q", got, description)
+	}
+	coordinates, ok := strings.CutPrefix(lines[len(lines)-2], "坐标：")
+	if !ok || "geo:"+coordinates != geoURI {
+		t.Fatalf("displayed coordinates do not match source: %q want %q", coordinates, geoURI)
+	}
+	link, ok := strings.CutPrefix(lines[len(lines)-1], "地图：")
+	parsed, err := url.Parse(link)
+	if !ok || err != nil || parsed.Scheme != "https" || parsed.Host != "www.openstreetmap.org" || parsed.Path != "/" {
+		t.Fatalf("invalid map link: %q", link)
+	}
+	query := parsed.Query()
+	if len(query) != 2 || "geo:"+query.Get("mlat")+","+query.Get("mlon") != geoURI {
+		t.Fatalf("map marker coordinates do not match source: %q want %q", link, geoURI)
+	}
+	viewport := strings.Split(parsed.Fragment, "/")
+	if len(viewport) != 3 || viewport[0] != "map=16" || "geo:"+viewport[1]+","+viewport[2] != geoURI {
+		t.Fatalf("map viewport coordinates do not match source: %q want %q", link, geoURI)
 	}
 }
 

@@ -1,10 +1,6 @@
 package matrixas
 
-import (
-	"testing"
-
-	"maunium.net/go/mautrix/event"
-)
+import "testing"
 
 func TestLocationUsesReadableRenderedFallback(t *testing.T) {
 	for _, tc := range []struct{ name, xml, geo string }{
@@ -15,13 +11,7 @@ func TestLocationUsesReadableRenderedFallback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			const description = "地点\n完整街道地址"
 			content := bridgeLocationCallback(t, tc.xml, description, "[位置]")
-			wantType := event.MsgText
-			if tc.geo != "" {
-				wantType = event.MsgLocation
-			}
-			if content.MsgType != wantType || content.GeoURI != tc.geo || content.Body != description {
-				t.Fatalf("readable fallback lost: type=%s geo=%q body=%q", content.MsgType, content.GeoURI, content.Body)
-			}
+			assertLocationText(t, content, description, tc.geo)
 		})
 	}
 }
