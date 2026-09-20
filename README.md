@@ -108,6 +108,30 @@ mono PCM and encoded as SILK at a 12 kbps target bitrate. Native SILK and exact
 16 kHz mono 16-bit PCM WAV use a direct path. Install `ffmpeg` when running the bridge
 outside Docker; the provided Docker image includes it.
 
+## Receiving WeChat locations
+
+WeChat location messages (type 48), from callbacks or local-message polling, are
+converted to standard Matrix `m.location` events. The bridge reads the original
+location XML rather than a rendered `[位置]` summary:
+
+- `body` contains the place name (`poiname`) and complete address (`label`), on
+  separate lines when both are present and different. XML entities are decoded
+  once; the XML itself is not used as the location description.
+- `geo_uri` contains `geo:<latitude>,<longitude>` from WeChat's `x` and `y`.
+  Both coordinates must be present, finite, and in range. Explicit zero values
+  are valid; missing values are not treated as `(0, 0)`.
+- Missing/invalid coordinates produce readable `m.text`, retaining any parsed
+  name/address. If XML supplies no readable description, a readable `ContentText`
+  is retained before a generic push summary. Invalid or ambiguous XML does not
+  create an incomplete map event.
+- A matching group sender prefix is removed before XML parsing, even when sender
+  metadata is already present. This does not replace the supplied sender identity.
+
+The bridge does not shorten the address or convert coordinate reference systems.
+The Matrix client controls the map/card layout and may still collapse long text.
+This applies to newly bridged messages; existing malformed events are not edited
+or resent. Matrix-to-WeChat location sending is unchanged.
+
 ## Keeping other bots' commands in Matrix
 
 Configure command prefixes that should **not** be forwarded from Matrix portal

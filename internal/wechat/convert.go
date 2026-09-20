@@ -93,6 +93,9 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		},
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	if m.MsgType == wxLocation {
+		attachLocation(&base, content, m.ContentText, m.PushContent)
+	}
 	if m.MsgType == wxApp {
 		c.attachSolitaireSource(&base, firstNonEmpty(m.Content, m.ContentText), m.MsgID, m.NewMsgID)
 	}
@@ -120,6 +123,10 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
 	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent))
+	if m.MsgType == wxLocation {
+		// Rendered summaries such as [位置] do not carry coordinates or an address.
+		content = stripLastMessageOps(firstNonEmpty(m.Content.Str, m.ContentText, m.PushContent))
+	}
 	if shouldDropWebhookNoise(m, content) {
 		return remoteapi.Event{}, false
 	}
@@ -208,6 +215,9 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		}, true
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	if m.MsgType == wxLocation {
+		attachLocation(&base, content, m.ContentText, m.PushContent)
+	}
 	if m.MsgType == wxApp {
 		c.attachSolitaireSource(&base, firstNonEmpty(m.Content.Str, m.ContentText), rawID, messageID)
 	}

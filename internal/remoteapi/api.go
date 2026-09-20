@@ -269,6 +269,7 @@ type InboundMessage struct {
 	Type      MessageType
 	Text      string
 	Media     *Media
+	Location  *Location // Optional coordinates: nil is distinct from a valid (0, 0).
 	Timestamp time.Time
 	Extra     map[string]any
 	Solitaire *SolitaireSource // Exact source version for opt-in reply participation.

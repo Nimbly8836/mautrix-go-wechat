@@ -47,7 +47,10 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 		}
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgLocation:
-		return &event.MessageEventContent{MsgType: event.MsgLocation, Body: body}
+		if geoURI := m.Location.GeoURI(); geoURI != "" {
+			return &event.MessageEventContent{MsgType: event.MsgLocation, Body: body, GeoURI: geoURI}
+		}
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgLink, remoteapi.MsgApp, remoteapi.MsgContactCard:
 		return &event.MessageEventContent{MsgType: event.MsgText, Body: body}
 	case remoteapi.MsgEmoji:
