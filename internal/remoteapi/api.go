@@ -263,6 +263,7 @@ type OutgoingMessage struct {
 
 // InboundMessage is a message received from the backend.
 type InboundMessage struct {
+	Account   UserID // Optional backend account provenance, not the message sender.
 	ID        MessageID
 	Chat      ChatID
 	Sender    UserID
@@ -273,6 +274,7 @@ type InboundMessage struct {
 	Timestamp time.Time
 	Extra     map[string]any
 	Solitaire *SolitaireSource // Exact source version for opt-in reply participation.
+	Reply     *Reply           // Optional original message and readable quote.
 	// DeduplicationKeys are backend-defined, type-qualified ID aliases, stable
 	// across send responses and inbound delivery, scoped to an account/chat.
 	// They are internal delivery hints, not client-supplied source metadata.
@@ -289,8 +291,20 @@ type Media struct {
 	Size     int64
 }
 
+// Reply describes an incoming quoted message. Target may be unavailable while
+// the original sender and text remain useful for a readable fallback.
+type Reply struct {
+	TargetKey  string // Backend-qualified ID, e.g. new:123; never an untyped fallback.
+	Target     MessageID
+	Sender     UserID
+	SenderName string
+	Text       string
+}
+
 // Redaction reports a recalled message.
 type Redaction struct {
+	Account   UserID
+	TargetKey string // Optional backend-qualified ID namespace.
 	Chat      ChatID
 	Target    MessageID
 	By        UserID

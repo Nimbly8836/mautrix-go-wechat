@@ -71,6 +71,7 @@ func (s *Server) deliverSolitaireToPortal(ctx context.Context, rec portalRecord,
 		}
 		delivery.eventID = resp.EventID
 	}
+	s.rememberMessageReference(m.Solitaire.Account, rec, m, delivery.eventID, delivery.client)
 	// Also learn aliases discovered by a later callback after the response.
 	for _, msgID := range messageIDAliases(m) {
 		if msgID != "" && msgID != "0" {

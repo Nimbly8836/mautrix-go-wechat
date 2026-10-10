@@ -103,6 +103,7 @@ type Server struct {
 	rawImagePackState          rawImagePackState
 	rooms                      map[id.RoomID]bool
 	messageEvents              map[string]id.EventID
+	messageReferences          map[messageReferenceKey]messageReference
 	remoteRun                  bool
 	remoteCtx                  context.Context
 	remoteStop                 context.CancelFunc
@@ -567,6 +568,9 @@ func (s *Server) image(ctx context.Context, room id.RoomID, data []byte, body st
 
 // EventSink implementation: remote -> Matrix portal rooms.
 func (s *Server) OnMessage(ctx context.Context, m *remoteapi.InboundMessage) {
+	if m == nil || (m.Account != "" && m.Account != s.currentAccountID(ctx)) {
+		return
+	}
 	log.Printf("remote message: chat=%s sender=%s type=%d text=%q", m.Chat, m.Sender, m.Type, m.Text)
 	if m.Chat == "" {
 		log.Printf("dropping remote message with empty chat: sender=%s type=%d text=%q", m.Sender, m.Type, m.Text)
@@ -606,6 +610,10 @@ func hasKnownWechatEmojiShortcode(body string) bool {
 }
 
 func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *remoteapi.InboundMessage) {
+	account := s.currentAccountID(ctx)
+	if m.Account != "" && m.Account != account {
+		return
+	}
 	if m.Solitaire != nil {
 		if err := s.deliverSolitaireToPortal(ctx, rec, m); err != nil {
 			log.Printf("failed to bridge solitaire %s to %s: %v", m.ID, rec.RoomID, err)
@@ -618,7 +626,7 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 		sender = remoteapi.UserID(m.Chat)
 	}
 	client := s.as.BotIntent().Client
-	if shouldJoinPuppet(s.currentAccountID(ctx), sender) {
+	if shouldJoinPuppet(account, sender) {
 		client = s.ensurePuppetJoined(ctx, sender, rec.RoomID)
 	}
 	content := matrixContentFromRemote(m)
@@ -653,6 +661,7 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 			}
 		}
 	}
+	s.attachInboundReply(account, rec, m, content)
 	resp, err := client.SendMessageEvent(ctx, rec.RoomID, eventType, content, mautrix.ReqSendEvent{Timestamp: m.Timestamp.UnixMilli()})
 	if err != nil {
 		log.Printf("failed to bridge remote msg %s to %s: %v", m.ID, rec.RoomID, err)
@@ -660,6 +669,7 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 		return
 	}
 	if resp != nil && resp.EventID != "" {
+		s.rememberMessageReference(account, rec, m, resp.EventID, client)
 		for _, msgID := range messageIDAliases(m) {
 			s.rememberMessageEvent(m.Chat, msgID, resp.EventID)
 		}
@@ -763,33 +773,7 @@ func (s *Server) addPendingPortal(ctx context.Context, m *remoteapi.InboundMessa
 		s.notifyManagement(ctx, fmt.Sprintf("WeChat 会话 %s 仍在等待创建 portal，累计 %d 条消息。发送 `create %s` 创建。", m.Chat, count, m.Chat))
 	}
 }
-func (s *Server) OnRedaction(ctx context.Context, r *remoteapi.Redaction) {
-	if rec, ok := s.portals.get(r.Chat); ok {
-		body := strings.TrimSpace(r.Text)
-		if body == "" {
-			who := string(r.By)
-			if display := s.contactDisplayName(ctx, r.By); display != "" {
-				who = display
-			}
-			if who == "" {
-				who = "有人"
-			}
-			body = fmt.Sprintf("%s 撤回了一条消息", who)
-		}
-		if r.Target != "" {
-			if target := s.getMessageEvent(r.Chat, r.Target); target != "" {
-				content := &event.MessageEventContent{MsgType: event.MsgNotice, Body: body}
-				content.RelatesTo = (&event.RelatesTo{}).SetReplyTo(target)
-				if _, err := s.as.BotIntent().SendMessageEvent(ctx, rec.RoomID, event.EventMessage, content); err != nil {
-					log.Printf("failed to send revoke reply to %s: %v", rec.RoomID, err)
-				}
-				return
-			}
-			body = fmt.Sprintf("%s（消息ID: %s）", body, r.Target)
-		}
-		s.sendPortalNotice(ctx, rec.RoomID, body)
-	}
-}
+
 func (s *Server) OnReceipt(context.Context, *remoteapi.Receipt)       {}
 func (s *Server) OnContactUpdate(context.Context, *remoteapi.Contact) {}
 func (s *Server) OnConnected(ctx context.Context) {

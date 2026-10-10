@@ -136,6 +136,35 @@ uses the source coordinates without assuming or converting their reference syste
 This applies to newly bridged messages; existing malformed events are not edited
 or resent. Matrix-to-WeChat location sending is unchanged.
 
+## Receiving WeChat recalls and quoted replies
+
+Group recalls and quoted replies are handled for both callbacks and local-message
+polling. The original XML is used instead of a rendered `[引用消息]`/system summary.
+
+- Quoted replies (`appmsg` type 57) use a native Matrix reply when the original
+  message has a known Matrix event. Otherwise, ordinary text shows the quoted
+  sender, quoted text and new reply. Quoted media uses readable labels such as
+  `[图片]` or `[语音]`, not attachment XML, CDN credentials or download URLs.
+- WeChat recall notifications (`sysmsg` type `revokemsg`) redact the known Matrix
+  original and send a readable notice. The redaction uses the original bridge
+  sender, including a bot fallback, rather than a user named inside the XML.
+  Unknown targets only produce a notice. A forbidden, timed-out or unacknowledged
+  Matrix redaction is explicitly reported as unconfirmed.
+- References are scoped to the backend account, WeChat chat and Matrix room.
+  Short `MsgID` values and long `NewMsgID`/`svrid` values have separate namespaces;
+  IDs are not passed through floating point. Ambiguous/malformed recall XML or a
+  conflicting session cannot select a deletion target.
+- Related events wait for earlier deliveries in the same chat to complete, so an
+  in-flight original can be acknowledged before a reply/recall looks it up.
+  Ordinary messages remain concurrent; other chats and cancellation are not
+  blocked by this wait.
+
+The reference cache is in memory and bounded to 5,000 alias entries. Messages
+from before a restart, evicted entries, or originals never bridged by this
+process may therefore use the readable fallback. The bridge does not guess a
+replacement target, search other rooms, bulk-rewrite history, or resend to
+WeChat. Matrix-to-WeChat handling is unchanged.
+
 ## Keeping other bots' commands in Matrix
 
 Configure command prefixes that should **not** be forwarded from Matrix portal

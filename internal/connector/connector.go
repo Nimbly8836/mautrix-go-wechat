@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
@@ -20,9 +21,11 @@ import (
 // Connector owns one logged-in backend client and translates between the
 // neutral event stream and whatever Matrix-facing sink you plug in.
 type Connector struct {
-	protocol string
-	api      remoteapi.PuppetAPI
-	sink     EventSink
+	protocol  string
+	api       remoteapi.PuppetAPI
+	sink      EventSink
+	pendingMu sync.Mutex
+	pending   map[remoteapi.ChatID]map[chan struct{}]struct{}
 }
 
 // EventSink receives neutral events translated from the backend. In a real
@@ -86,11 +89,12 @@ func (c *Connector) dispatch(ctx context.Context, ev remoteapi.Event) {
 	case remoteapi.EventMessage:
 		if ev.Message != nil {
 			msg := ev.Message
-			go c.dispatchMessage(ctx, msg)
+			c.dispatchAsync(ctx, msg.Chat, msg.Reply != nil, func() { c.dispatchMessage(ctx, msg) })
 		}
 	case remoteapi.EventRedaction:
 		if ev.Redaction != nil {
-			c.sink.OnRedaction(ctx, ev.Redaction)
+			recall := ev.Redaction
+			c.dispatchAsync(ctx, recall.Chat, true, func() { c.sink.OnRedaction(ctx, recall) })
 		}
 	case remoteapi.EventReceipt:
 		if ev.Receipt != nil {
@@ -105,6 +109,55 @@ func (c *Connector) dispatch(ctx context.Context, ev remoteapi.Event) {
 	case remoteapi.EventDisconnected:
 		c.sink.OnDisconnected(ctx, ev.Error)
 	}
+}
+
+// Ordinary messages remain concurrent. Related events wait for earlier
+// deliveries in their chat, so a slow Matrix acknowledgement cannot make a
+// valid reply/recall look like an unknown target. Waiting never blocks the pump
+// or another chat, and cancellation never waits for a stuck sink.
+func (c *Connector) dispatchAsync(ctx context.Context, chat remoteapi.ChatID, related bool, handle func()) {
+	c.pendingMu.Lock()
+	if c.pending == nil {
+		c.pending = make(map[remoteapi.ChatID]map[chan struct{}]struct{})
+	}
+	active := c.pending[chat]
+	if active == nil {
+		active = make(map[chan struct{}]struct{})
+		c.pending[chat] = active
+	}
+	var before []chan struct{}
+	if related {
+		for pending := range active {
+			before = append(before, pending)
+		}
+	}
+	done := make(chan struct{})
+	active[done] = struct{}{}
+	c.pendingMu.Unlock()
+	go func() {
+		defer func() {
+			c.pendingMu.Lock()
+			delete(active, done)
+			if len(active) == 0 {
+				delete(c.pending, chat)
+			}
+			close(done)
+			c.pendingMu.Unlock()
+			if recovered := recover(); recovered != nil {
+				log.Printf("connector: recovered panic dispatching related event chat=%s: %v", chat, recovered)
+			}
+		}()
+		for _, pending := range before {
+			select {
+			case <-pending:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if ctx.Err() == nil {
+			handle()
+		}
+	}()
 }
 
 func (c *Connector) dispatchMessage(ctx context.Context, msg *remoteapi.InboundMessage) {

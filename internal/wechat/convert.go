@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"html"
@@ -78,11 +77,13 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		}
 	}
 	base := remoteapi.InboundMessage{
-		ID:        remoteapi.MessageID(itoa(m.NewMsgID)),
-		Chat:      remoteapi.ChatID(chat),
-		Sender:    remoteapi.UserID(sender),
-		Text:      content,
-		Timestamp: time.Unix(m.CreateTime, 0),
+		Account:           remoteapi.UserID(c.selfWxid()),
+		DeduplicationKeys: messageIDKeys(m.MsgID, m.NewMsgID),
+		ID:                remoteapi.MessageID(itoa(m.NewMsgID)),
+		Chat:              remoteapi.ChatID(chat),
+		Sender:            remoteapi.UserID(sender),
+		Text:              content,
+		Timestamp:         time.Unix(m.CreateTime, 0),
 		Extra: map[string]any{
 			"msg_type":      m.MsgType,
 			"msg_type_name": m.MsgTypeName,
@@ -92,12 +93,16 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 			"is_local":      true,
 		},
 	}
+	if m.MsgType == wxRevoke {
+		return c.convertRevoke(base, content, m.ContentText, m.PushContent)
+	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
 	if m.MsgType == wxLocation {
 		attachLocation(&base, content, m.ContentText, m.PushContent)
 	}
 	if m.MsgType == wxApp {
 		c.attachSolitaireSource(&base, firstNonEmpty(m.Content, m.ContentText), m.MsgID, m.NewMsgID)
+		attachQuotedReply(&base, firstNonEmpty(m.Content, m.ContentText))
 	}
 	if m.MsgType == wxImage {
 		c.attachImageMedia(ctx, &base)
@@ -123,8 +128,8 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
 	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent))
-	if m.MsgType == wxLocation {
-		// Rendered summaries such as [位置] do not carry coordinates or an address.
+	if m.MsgType == wxLocation || m.MsgType == wxRevoke || (m.MsgType == wxApp && isQuotedReplyXML(firstNonEmpty(m.Content.Str, m.ContentText))) {
+		// Rendered summaries omit location details and quoted-message metadata.
 		content = stripLastMessageOps(firstNonEmpty(m.Content.Str, m.ContentText, m.PushContent))
 	}
 	if shouldDropWebhookNoise(m, content) {
@@ -165,7 +170,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 			sender = chat
 		}
 	}
-	if strings.HasSuffix(chat, "@chatroom") && m.SenderUserName == "" {
+	if strings.HasSuffix(chat, "@chatroom") && m.SenderUserName == "" && !strings.HasPrefix(strings.TrimSpace(content), "<") {
 		if idx := strings.Index(content, ":\n"); idx > 0 {
 			sender = content[:idx]
 			content = content[idx+2:]
@@ -183,11 +188,13 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	}
 
 	base := remoteapi.InboundMessage{
-		ID:        remoteapi.MessageID(itoa(messageID)),
-		Chat:      remoteapi.ChatID(chat),
-		Sender:    remoteapi.UserID(sender),
-		Text:      content,
-		Timestamp: time.Unix(m.CreateTime, 0),
+		Account:           remoteapi.UserID(c.selfWxid()),
+		DeduplicationKeys: messageIDKeys(rawID, messageID),
+		ID:                remoteapi.MessageID(itoa(messageID)),
+		Chat:              remoteapi.ChatID(chat),
+		Sender:            remoteapi.UserID(sender),
+		Text:              content,
+		Timestamp:         time.Unix(m.CreateTime, 0),
 		Extra: map[string]any{
 			"msg_type":   m.MsgType,
 			"msg_source": m.MsgSource,
@@ -196,23 +203,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	}
 
 	if m.MsgType == wxRevoke {
-		rev := parseRevokeMessage(content)
-		if rev.Chat != "" {
-			chat = rev.Chat
-		}
-		if rev.By != "" {
-			sender = rev.By
-		}
-		return remoteapi.Event{
-			Kind: remoteapi.EventRedaction,
-			Redaction: &remoteapi.Redaction{
-				Chat:      remoteapi.ChatID(chat),
-				By:        remoteapi.UserID(sender),
-				Target:    remoteapi.MessageID(firstNonEmpty(rev.OldMsgID, rev.MsgID)),
-				Text:      rev.Text,
-				Timestamp: time.Unix(m.CreateTime, 0),
-			},
-		}, true
+		return c.convertRevoke(base, content, m.ContentText, m.PushContent)
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
 	if m.MsgType == wxLocation {
@@ -220,6 +211,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	}
 	if m.MsgType == wxApp {
 		c.attachSolitaireSource(&base, firstNonEmpty(m.Content.Str, m.ContentText), rawID, messageID)
+		attachQuotedReply(&base, firstNonEmpty(m.Content.Str, m.ContentText))
 	}
 	if m.MsgType == wxImage {
 		c.attachImageMedia(ctx, &base)
@@ -953,11 +945,17 @@ func parseAppMessage(content, push string) (remoteapi.MessageType, string) {
 	if !strings.Contains(content, "<appmsg") && !strings.Contains(content, "<msg") {
 		return remoteapi.MsgApp, strings.TrimSpace(firstNonEmpty(content, push))
 	}
+	appType := xmlTag(content, "type")
+	if appType == "57" {
+		// Only attachQuotedReply may expose type-57 fields after structural
+		// validation. A generic tag search can find attachment URLs or titles
+		// inside quoted CDATA when the outer title is absent or ambiguous.
+		return remoteapi.MsgApp, "[引用消息]"
+	}
 	title := xmlTag(content, "title")
 	des := xmlTag(content, "des")
 	url := xmlTag(content, "url")
 	fileExt := xmlTag(content, "fileext")
-	appType := xmlTag(content, "type")
 
 	var typ remoteapi.MessageType
 	switch appType {
@@ -1021,50 +1019,6 @@ func xmlAttr(raw, attr string) string {
 		}
 	}
 	return ""
-}
-
-type revokeInfo struct {
-	Chat     string
-	By       string
-	MsgID    string
-	OldMsgID string
-	Text     string
-}
-
-func parseRevokeMessage(raw string) revokeInfo {
-	dec := xml.NewDecoder(strings.NewReader(raw))
-	var info revokeInfo
-	var current string
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			break
-		}
-		switch t := tok.(type) {
-		case xml.StartElement:
-			current = strings.ToLower(t.Name.Local)
-		case xml.CharData:
-			value := strings.TrimSpace(html.UnescapeString(string(t)))
-			if value == "" {
-				continue
-			}
-			switch current {
-			case "session":
-				info.Chat = value
-			case "fromusername":
-				info.By = value
-			case "msgid":
-				info.MsgID = value
-			case "oldmsgid":
-				info.OldMsgID = value
-			case "replacemsg":
-				info.Text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "<![CDATA["), "]]>"))
-			}
-		case xml.EndElement:
-			current = ""
-		}
-	}
-	return info
 }
 
 func xmlTag(raw, tag string) string {

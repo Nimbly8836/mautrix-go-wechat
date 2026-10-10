@@ -53,7 +53,7 @@ func (c *Client) attachSolitaireSource(base *remoteapi.InboundMessage, payload s
 	}
 	base.Solitaire = newSolitaireSource(c.selfWxid(), base.Chat, msgID, newMsgID)
 	if base.Solitaire != nil {
-		base.DeduplicationKeys = solitaireMessageKeys(msgID, newMsgID)
+		base.DeduplicationKeys = messageIDKeys(msgID, newMsgID)
 	}
 	// Push, local history and the send response must preserve the same title,
 	// including literal entity text inside CDATA. Decode XML exactly once.
@@ -62,7 +62,7 @@ func (c *Client) attachSolitaireSource(base *remoteapi.InboundMessage, payload s
 
 // Keep namespaces distinct: a legacy ID may numerically equal another
 // message's new ID. Never use floating point when forming identity keys.
-func solitaireMessageKeys(msgID, newMsgID int64) []string {
+func messageIDKeys(msgID, newMsgID int64) []string {
 	keys := make([]string, 0, 2)
 	if newMsgID != 0 {
 		keys = append(keys, fmt.Sprintf("new:%d", newMsgID))
@@ -208,6 +208,6 @@ func sentSolitaireMessage(account string, chat remoteapi.ChatID, payload string,
 		ID: msgID(sent), Chat: chat, Sender: remoteapi.UserID(account),
 		Type: remoteapi.MsgApp, Text: title, Timestamp: timestamp,
 		Extra:     map[string]any{"raw_msg_id": sent.MsgId, "msg_type": wxApp},
-		Solitaire: source, DeduplicationKeys: solitaireMessageKeys(sent.MsgId, sent.NewMsgId),
+		Solitaire: source, DeduplicationKeys: messageIDKeys(sent.MsgId, sent.NewMsgId),
 	}
 }
