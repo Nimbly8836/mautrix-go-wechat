@@ -14,28 +14,28 @@ import (
 const maxAppXMLBytes = 1 << 20
 
 func (c *Client) sendAppXML(ctx context.Context, wxid, to, payload string) (remoteapi.MessageID, error) {
+	return c.sendAppXMLWithWireType(ctx, wxid, to, payload, 0)
+}
+
+// Native quotes use outer wire Type 49 with inner XML subtype 57. Raw wx_xml
+// keeps its existing subtype-derived behavior unless the native quote path
+// supplies an explicit wire type.
+func (c *Client) sendAppXMLWithWireType(ctx context.Context, wxid, to, payload string, wireType int) (remoteapi.MessageID, error) {
 	appType, err := appMessageTypeFromXML(payload)
 	if err != nil {
 		return "", err
 	}
-	req := sendAppReq{Wxid: wxid, ToWxid: to, Type: appType, Xml: payload}
-	var response struct {
-		sendResp
-		BaseResponse *struct {
-			Ret int `json:"ret"`
-		} `json:"BaseResponse"`
+	if wireType == 0 {
+		wireType = appType
 	}
+	req := sendAppReq{Wxid: wxid, ToWxid: to, Type: wireType, Xml: payload}
+	// sendResp validates BaseResponse and exact returned IDs itself. Do not
+	// embed it beside sibling fields: UnmarshalJSON promotion swallows them.
+	var response sendResp
 	if err := c.t.post(ctx, "/Msg/SendApp", req, nil, &response); err != nil {
 		return "", err
 	}
-	// fk-zhang may return Success=true even when WeChat rejected the payload.
-	if response.BaseResponse != nil && response.BaseResponse.Ret != 0 {
-		return "", &APIError{Code: response.BaseResponse.Ret, Path: "/Msg/SendApp", Message: "微信拒绝了 XML 消息"}
-	}
-	if response.NewMsgId <= 0 && response.MsgId <= 0 {
-		return "", fmt.Errorf("wx_xml 发送响应缺少消息 ID，无法确认发送成功")
-	}
-	return qualifiedSendID(ctx, response.sendResp), nil
+	return qualifiedSendID(ctx, response), nil
 }
 
 // appMessageTypeFromXML validates the document and reads only the direct

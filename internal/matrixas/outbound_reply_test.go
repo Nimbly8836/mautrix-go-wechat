@@ -53,11 +53,24 @@ func newNativeReplyHarness(t *testing.T) *nativeReplyHarness {
 			_, _ = w.Write([]byte(`{"Code":-13,"Success":false,"Message":"用户可能退出"}`))
 			return
 		}
+		// Verified fk-zhang sendappmsg contract: outer wire Type=49, XML
+		// subtype=57 in a bare appmsg. The old permissive fake missed ret=-2.
+		if request.Path == "/Msg/SendApp" && strings.Contains(request.Xml, "<type>57</type>") {
+			var root struct{ XMLName xml.Name }
+			if xml.Unmarshal([]byte(request.Xml), &root) != nil || root.XMLName.Local != "appmsg" || request.Type != 49 {
+				_, _ = w.Write([]byte(`{"Code":0,"Success":true,"Data":{"BaseResponse":{"ret":-2}}}`))
+				return
+			}
+		}
 		newID := int64(9007199254741993) + int64(len(h.requests)-1)
 		if h.short {
 			newID = 0
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"Code": 0, "Success": true, "Data": map[string]any{"NewMsgId": newID, "MsgId": 321}})
+		var data any = map[string]any{"BaseResponse": map[string]int{"ret": 0}, "NewMsgId": newID, "MsgId": 321}
+		if request.Path == "/Msg/SendTxt" {
+			data = map[string]any{"BaseResponse": map[string]int{"ret": 0}, "Count": 1, "List": []any{map[string]any{"Ret": 0, "NewMsgId": newID, "MsgId": 321, "ClientMsgid": 1791884300000}}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"Code": 0, "Success": true, "Data": data})
 	}))
 	t.Cleanup(upstream.Close)
 	api, err := (wechat.Factory{}).New(remoteapi.Config{BaseURL: upstream.URL, ReceiveMode: "push", Session: []byte(`{"wxid":"wxid_self"}`)})
@@ -141,7 +154,7 @@ func TestMatrixReplySendsNativeWechatQuoteAfterRestart(t *testing.T) {
 	h.s.references = nil
 	evt := h.reply("reply <x> & ]]> :wechat_smile:")
 	h.s.handleMatrixEvent(context.Background(), evt)
-	if len(h.requests) != 1 || h.requests[0].Path != "/Msg/SendApp" || h.requests[0].Type != 57 {
+	if len(h.requests) != 1 || h.requests[0].Path != "/Msg/SendApp" || h.requests[0].Type != 49 {
 		t.Fatalf("requests=%+v notices=%v", h.requests, h.notices)
 	}
 	request := h.requests[0]
@@ -149,7 +162,7 @@ func TestMatrixReplySendsNativeWechatQuoteAfterRestart(t *testing.T) {
 		t.Fatalf("wrong scoped request: %+v", request)
 	}
 	var parsed parsedNativeQuote
-	if err := xml.Unmarshal([]byte(request.Xml), &parsed); err != nil {
+	if err := xml.Unmarshal([]byte("<msg>"+request.Xml+"</msg>"), &parsed); err != nil {
 		t.Fatal(err)
 	}
 	if parsed.Type != 57 || parsed.Title != "reply <x> & ]]> [微笑]" || parsed.Ref.Type != 1 || parsed.Ref.ID != "9007199254740993" || parsed.Ref.From != string(h.rec.ChatID) || parsed.Ref.Member != "wxid_author" || parsed.Ref.Name != "Alice & <friend>" || parsed.Ref.Content != "original <title> & ]]> 文本" {
@@ -190,17 +203,14 @@ func TestMatrixReplyScopeAndMissingMappingsNeverInventNativeID(t *testing.T) {
 				h.seed(t, account, rec, keys...)
 			}
 			h.s.handleMatrixEvent(context.Background(), h.reply("new reply"))
-			if len(h.requests) != 1 || h.requests[0].Path != "/Msg/SendTxt" || strings.Contains(h.requests[0].Content, "FALLBACK") || !strings.Contains(h.requests[0].Content, "不可用") {
-				t.Fatalf("invented quote: %+v", h.requests)
-			}
-			if scope != "short" && strings.Contains(h.requests[0].Content, "original <title>") {
-				t.Fatal("cross-scope snapshot leaked")
+			if len(h.requests) != 0 || len(h.notices) != 1 || !strings.Contains(h.notices[0], "未发送") {
+				t.Fatalf("missing mapping sent a fake quote: requests=%+v notices=%v", h.requests, h.notices)
 			}
 		})
 	}
 }
 
-func TestMatrixReplyReadableFetchValidatesRoomAndEvent(t *testing.T) {
+func TestMatrixReplyUnmappedEventDoesNotAuthorizeFakeQuote(t *testing.T) {
 	for _, scope := range []string{"valid", "room", "event"} {
 		t.Run(scope, func(t *testing.T) {
 			h := newNativeReplyHarness(t)
@@ -217,11 +227,8 @@ func TestMatrixReplyReadableFetchValidatesRoomAndEvent(t *testing.T) {
 			}
 			h.fetched = target
 			h.s.handleMatrixEvent(context.Background(), h.reply("new reply"))
-			if len(h.requests) != 1 || h.requests[0].Path != "/Msg/SendTxt" {
-				t.Fatalf("requests=%+v", h.requests)
-			}
-			if strings.Contains(h.requests[0].Content, "real original body") != (scope == "valid") {
-				t.Fatalf("unverified fallback=%s", h.requests[0].Content)
+			if len(h.requests) != 0 || h.fetches != 0 || len(h.notices) != 1 || !strings.Contains(h.notices[0], "未发送") {
+				t.Fatalf("unmapped event silently degraded: requests=%+v fetches=%d notices=%v", h.requests, h.fetches, h.notices)
 			}
 		})
 	}

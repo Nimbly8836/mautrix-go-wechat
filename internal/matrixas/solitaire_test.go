@@ -90,7 +90,8 @@ func TestSolitaireReplyGuardsAndDurableDedup(t *testing.T) {
 				s.cfg.Bridge.CommandPrefix = "!custom"
 				evt.Content.AsMessage().Body = "!custom jl " + wantEntry
 			case "OrdinaryReply":
-				wantText = 1
+				// Not a join command. Without a general message-ID mapping,
+				// reject rather than sending a plain-text imitation of a reply.
 				evt.Content.AsMessage().Body = "张三，1份"
 			case "PermissionDenied":
 				s.cfg.Bridge.Permissions = map[string]string{evt.Sender.String(): "relay"}

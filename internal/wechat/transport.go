@@ -66,6 +66,9 @@ func (t *transport) post(ctx context.Context, path string, body any, query url.V
 			return fmt.Errorf("decode data %s: %w", path, err)
 		}
 	}
+	if ack, ok := out.(interface{ validateSendResponse() error }); ok {
+		return ack.validateSendResponse()
+	}
 	return nil
 }
 
@@ -201,6 +204,9 @@ func (t *transport) postMultipartFile(ctx context.Context, path, fieldName, file
 		if err := json.Unmarshal(env.Data, out); err != nil {
 			return fmt.Errorf("decode data %s: %w", path, err)
 		}
+	}
+	if ack, ok := out.(interface{ validateSendResponse() error }); ok {
+		return ack.validateSendResponse()
 	}
 	return nil
 }

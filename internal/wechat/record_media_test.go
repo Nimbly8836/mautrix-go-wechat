@@ -3,6 +3,7 @@ package wechat
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,7 +15,8 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
 
-var recordVideoBytes = []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}
+//go:embed testdata/record-video.mp4
+var recordVideoBytes []byte
 
 func TestMergedRecordDownloadsVideoWithoutForwarding(t *testing.T) {
 	for _, envelope := range []bool{false, true} {
@@ -31,7 +33,7 @@ func TestMergedRecordDownloadsVideoWithoutForwarding(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 					t.Error(err)
 				}
-				if req.Wxid != "wxid_self" || req.DataId != "video-id" || req.CdnDataKey != "video-key" || req.CdnDataUrl != "video-cdn" || req.DataSize != 12 || req.IsThumb != 0 {
+				if req.Wxid != "wxid_self" || req.DataId != "video-id" || req.CdnDataKey != "video-key" || req.CdnDataUrl != "video-cdn" || req.DataSize != 12 || req.IsThumb != 0 || req.DataType != 4 {
 					t.Errorf("wrong download request: %#v", req)
 				}
 				if envelope {

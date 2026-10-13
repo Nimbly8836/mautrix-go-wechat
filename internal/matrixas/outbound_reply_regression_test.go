@@ -58,7 +58,7 @@ func TestReplyToNativeReplyUsesActualAppKindAndSafePreview(t *testing.T) {
 		t.Fatalf("requests=%+v notices=%v", h.requests, h.notices)
 	}
 	var quote parsedNativeQuote
-	if err := xml.Unmarshal([]byte(h.requests[1].Xml), &quote); err != nil {
+	if err := xml.Unmarshal([]byte("<msg>"+h.requests[1].Xml+"</msg>"), &quote); err != nil {
 		t.Fatal(err)
 	}
 	var nested parsedNativeQuote
@@ -82,7 +82,7 @@ func TestReplyToExplicitXMLUsesAppPreviewNotMarkdownFence(t *testing.T) {
 		t.Fatalf("requests=%+v notices=%v", h.requests, h.notices)
 	}
 	var quote, preview parsedNativeQuote
-	if err := xml.Unmarshal([]byte(h.requests[1].Xml), &quote); err != nil {
+	if err := xml.Unmarshal([]byte("<msg>"+h.requests[1].Xml+"</msg>"), &quote); err != nil {
 		t.Fatal(err)
 	}
 	if err := xml.Unmarshal([]byte(quote.Ref.Content), &preview); err != nil {

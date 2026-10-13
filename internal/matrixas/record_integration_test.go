@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -16,7 +17,10 @@ import (
 // Replays the user's two-item shape through the real backend, event model,
 // Matrix renderer and SDK. Only the CDN API and homeserver are substituted.
 func TestMergedRecordWebhookToNativeMatrixVideo(t *testing.T) {
-	video := []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}
+	video, err := os.ReadFile("../wechat/testdata/record-video.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/Tools/CdnDownloadRecordItem" {
 			t.Errorf("unexpected request: %s", r.URL.Path)
@@ -25,16 +29,16 @@ func TestMergedRecordWebhookToNativeMatrixVideo(t *testing.T) {
 		}
 		var request struct {
 			Wxid, CdnDataUrl, CdnDataKey, DataId string
-			DataSize, IsThumb                    int64
+			DataSize, IsThumb, DataType          int64
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Error(err)
 		}
-		if request.Wxid != "wxid_self" || request.CdnDataUrl != "synthetic-cdn" || request.CdnDataKey != "synthetic-key" || request.DataId != "video-id" || request.DataSize != 12 || request.IsThumb != 0 {
+		if request.Wxid != "wxid_self" || request.CdnDataUrl != "synthetic-cdn" || request.CdnDataKey != "synthetic-key" || request.DataId != "video-id" || request.DataSize != 12 || request.IsThumb != 0 || request.DataType != 4 {
 			t.Errorf("request=%+v", request)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"Success": true, "Data": map[string]string{"Base64": base64.StdEncoding.EncodeToString(video)}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"Success": true, "Data": map[string]string{"Image": base64.StdEncoding.EncodeToString(video)}})
 	}))
 	defer upstream.Close()
 	api, err := (wechat.Factory{}).New(remoteapi.Config{BaseURL: upstream.URL, ReceiveMode: "push", Session: []byte(`{"wxid":"wxid_self"}`)})

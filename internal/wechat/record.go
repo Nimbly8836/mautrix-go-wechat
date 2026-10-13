@@ -234,6 +234,7 @@ type cdnDownloadRecordReq struct {
 	CdnDataUrl string
 	DataId     string
 	DataSize   int64
+	DataType   int // recorditem datatype; 4 selects video in fk-zhang v6.0.6+.
 	FullMd5    string
 	IsThumb    int64
 }
@@ -259,26 +260,49 @@ func (c *Client) downloadRecordMedia(ctx context.Context, source recordXMLItem, 
 	if ctx.Err() != nil {
 		return nil, "附件下载超时或已取消"
 	}
+	kind, _ := strconv.Atoi(strings.TrimSpace(source.Type))
+	available := min(maxRecordMediaBytes, maxRecordTotalBytes-budget.bytes)
+	responseLimit := size
+	if kind == 4 {
+		// CDN video renditions need not match the source record's original size.
+		responseLimit = available
+	}
 	budget.downloads++
 	budget.bytes += size // Failed attempts also consume the bundle's budget.
-	req := cdnDownloadRecordReq{Wxid: c.selfWxid(), CdnDataKey: key, CdnDataUrl: url, DataId: source.ID, DataSize: size, FullMd5: source.MD5}
+	req := cdnDownloadRecordReq{Wxid: c.selfWxid(), CdnDataKey: key, CdnDataUrl: url, DataId: source.ID, DataSize: size, DataType: kind, FullMd5: source.MD5}
 	const endpoint = "/Tools/CdnDownloadRecordItem"
 	// Allow base64 expansion plus a bounded JSON envelope, never an unbounded response.
-	raw, contentType, err := c.t.postRawLimited(ctx, endpoint, req, nil, (size+2)/3*4+(1<<20))
+	raw, contentType, err := c.t.postRawLimited(ctx, endpoint, req, nil, (responseLimit+2)/3*4+(1<<20))
 	if err != nil {
 		return nil, "附件下载失败或已过期"
 	}
 	data, err := recordMediaBytes(raw, contentType)
-	if err != nil || int64(len(data)) != size {
-		return nil, "附件下载失败或内容不完整"
+	if err != nil || len(data) == 0 {
+		return nil, "上游附件下载失败或返回格式不支持"
 	}
-	if source.MD5 != "" {
+	actualSize := int64(len(data))
+	if actualSize > available {
+		return nil, "附件超过下载大小限制"
+	}
+	if kind == 4 {
+		if !completeRecordMP4(data) {
+			return nil, "视频内容不完整或不是有效 MP4"
+		}
+	} else if actualSize != size {
+		return nil, "附件大小校验失败"
+	}
+	rendition := kind == 4 && actualSize != size
+	// FullMd5 refers to the original, not a differently sized CDN rendition.
+	if source.MD5 != "" && !rendition {
 		expected, err := hex.DecodeString(source.MD5)
 		// Protocol checksum only, not a security hash or authentication primitive.
 		actual := md5.Sum(data)
 		if err != nil || len(expected) != len(actual) || !strings.EqualFold(source.MD5, hex.EncodeToString(actual[:])) {
 			return nil, "附件完整性校验失败"
 		}
+	}
+	if actualSize > size {
+		budget.bytes += actualSize - size
 	}
 	name := strings.TrimSpace(path.Base(strings.ReplaceAll(source.Title, "\\", "/")))
 	if name == "" || name == "." || name == "/" {
@@ -294,7 +318,7 @@ func (c *Client) downloadRecordMedia(ctx context.Context, source recordXMLItem, 
 	if ext != "" && !strings.HasSuffix(strings.ToLower(name), "."+ext) {
 		name += "." + ext
 	}
-	return &remoteapi.Media{Data: data, Size: size, FileName: name, MimeType: mimeTypeForFile(name, data)}, ""
+	return &remoteapi.Media{Data: data, Size: actualSize, FileName: name, MimeType: mimeTypeForFile(name, data)}, ""
 }
 
 // Unlike the older generic decoder, do not guess that arbitrary metadata
@@ -351,7 +375,7 @@ func recordMediaValue(value any, depth int) ([]byte, error) {
 			return data, nil
 		}
 	case map[string]any:
-		for _, key := range []string{"Base64", "base64", "Data", "data", "Data62", "data62", "FileData", "fileData", "Buffer", "buffer", "Bytes", "bytes"} {
+		for _, key := range []string{"Image", "image", "Base64", "base64", "Data", "data", "Data62", "data62", "FileData", "fileData", "Buffer", "buffer", "Bytes", "bytes"} {
 			if child, ok := v[key]; ok {
 				if data, err := recordMediaValue(child, depth+1); err == nil && len(data) > 0 {
 					return data, nil

@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -130,24 +131,19 @@ func (c *Client) JoinSolitaire(ctx context.Context, source remoteapi.SolitaireSo
 	}
 	var data struct {
 		XML        json.RawMessage `json:"Xml"`
-		SendResult struct {
-			sendResp
-			BaseResponse *struct {
-				Ret *int `json:"ret"`
-			} `json:"BaseResponse"`
-		} `json:"SendResult"`
+		SendResult sendResp        `json:"SendResult"`
 	}
 	if err := json.Unmarshal(response.Data, &data); err != nil {
 		return remoteapi.SolitaireResult{}, fmt.Errorf("接龙发送响应无效，结果未知，请勿直接重试: %w", err)
 	}
 	result := data.SendResult
-	if result.BaseResponse == nil || result.BaseResponse.Ret == nil || *result.BaseResponse.Ret != 0 || (result.MsgId == 0 && result.NewMsgId == 0) {
+	if !result.baseResponseValidated || (result.MsgId == 0 && result.NewMsgId == 0) {
 		return remoteapi.SolitaireResult{}, fmt.Errorf("接龙响应不能确认发送成功，请先检查微信，不要直接重试")
 	}
-	confirmed := remoteapi.SolitaireResult{ID: msgID(result.sendResp)}
+	confirmed := remoteapi.SolitaireResult{ID: msgID(result)}
 	var payload string
 	if json.Unmarshal(data.XML, &payload) == nil {
-		confirmed.Message = sentSolitaireMessage(account, source.Chat, payload, result.sendResp)
+		confirmed.Message = sentSolitaireMessage(account, source.Chat, payload, result)
 	}
 	return confirmed, nil
 }
@@ -195,8 +191,13 @@ func solitaireTitleFromXML(payload string) (string, bool) {
 // append the entry to the old title locally: numbering and layout belong to
 // the protocol service. Invalid/missing XML does not undo a confirmed send.
 func sentSolitaireMessage(account string, chat remoteapi.ChatID, payload string, sent sendResp) *remoteapi.InboundMessage {
+	// The app/solitaire backend accepts signed IDs. Preserve the confirmed
+	// send ID, but never wrap an unsigned ack into a different signed reference.
+	if sent.MsgId > math.MaxInt64 || sent.NewMsgId > math.MaxInt64 {
+		return nil
+	}
 	title, ok := solitaireTitleFromXML(payload)
-	source := newSolitaireSource(account, chat, sent.MsgId, sent.NewMsgId)
+	source := newSolitaireSource(account, chat, int64(sent.MsgId), int64(sent.NewMsgId))
 	if !ok || source == nil {
 		return nil
 	}
@@ -208,6 +209,6 @@ func sentSolitaireMessage(account string, chat remoteapi.ChatID, payload string,
 		ID: msgID(sent), Chat: chat, Sender: remoteapi.UserID(account),
 		Type: remoteapi.MsgApp, Text: title, Timestamp: timestamp,
 		Extra:     map[string]any{"raw_msg_id": sent.MsgId, "msg_type": wxApp},
-		Solitaire: source, DeduplicationKeys: messageIDKeys(sent.MsgId, sent.NewMsgId),
+		Solitaire: source, DeduplicationKeys: messageIDKeys(int64(sent.MsgId), int64(sent.NewMsgId)),
 	}
 }

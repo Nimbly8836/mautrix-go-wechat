@@ -154,13 +154,18 @@ func TestPortalMessageIgnoredCommandPrefixes(t *testing.T) {
 			}
 			if tc.reply {
 				msg.RelatesTo = &event.RelatesTo{InReplyTo: &event.InReplyTo{EventID: "$original"}}
+				if err := s.saveMessageReference("wxid_self", rec, []string{"new:123"}, messageReference{EventID: "$original", MatrixSender: s.as.BotMXID(), BridgeSender: true, Sender: "wxid_friend", Text: "!da_bot run"}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			s.handleMatrixEvent(context.Background(), evt)
 			wantBody := tc.body
 			wantRequests := int64(0)
 			if tc.reply && !tc.blocked {
-				wantBody = "[引用原消息不可用，以下为新回复]\n" + event.TrimReplyFallbackText(tc.body)
-				wantRequests = 1 // Same-room fallback lookup, never a native ID source.
+				wantBody = event.TrimReplyFallbackText(tc.body)
+				if len(api.sent) != 1 || api.sent[0].Reply == nil || api.sent[0].Reply.Target != "123" {
+					t.Fatalf("lost native reply: %+v", api.sent)
+				}
 			}
 			if tc.blocked {
 				if len(api.sent) != 0 {

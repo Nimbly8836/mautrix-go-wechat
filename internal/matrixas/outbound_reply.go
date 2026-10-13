@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 	"maunium.net/go/mautrix/event"
@@ -52,7 +51,7 @@ func (s *Server) sendPortalOutgoing(ctx context.Context, rec portalRecord, sende
 				}
 				outgoing.Reply = &remoteapi.Reply{Type: ref.Type, Target: ref.NewID, TargetKey: "new:" + string(ref.NewID), Sender: ref.Sender, SenderName: name, Text: quoteText}
 			} else {
-				outgoing.Text = s.readableOutgoingReply(ctx, rec, target, ref, outgoing.Text)
+				return "", fmt.Errorf("未找到原消息对应的微信消息 ID，本次引用未发送；请引用成功桥接后的消息，或取消引用后重新发送")
 			}
 		}
 	}
@@ -84,34 +83,4 @@ func (s *Server) sendPortalOutgoing(ctx context.Context, rec portalRecord, sende
 		}
 	}
 	return result.ID, nil
-}
-
-func (s *Server) readableOutgoingReply(ctx context.Context, rec portalRecord, target id.EventID, ref messageReference, body string) string {
-	quote, name := ref.Text, ref.SenderName
-	if name == "" {
-		name = string(ref.Sender)
-	}
-	if ref.EventID == "" && s.as != nil {
-		fetchCtx, cancel := s.matrixOperationContext(ctx)
-		original, err := s.as.BotIntent().Client.GetEvent(fetchCtx, rec.RoomID, target)
-		cancel()
-		if err == nil && original != nil && original.ID == target && original.RoomID == rec.RoomID && original.Type == event.EventMessage {
-			// Only text for a readable fallback. No remote IDs, namespaced extension
-			// fields, or body matching can upgrade a fetched event to a native quote.
-			_ = original.Content.ParseRaw(original.Type)
-			content := original.Content.AsMessage()
-			if content != nil {
-				normalized := normalizePortalReply(content)
-				quote = referenceSnapshot(normalized.Body)
-				name = string(original.Sender)
-			}
-		}
-	}
-	if quote == "" {
-		return "[引用原消息不可用，以下为新回复]\n" + body
-	}
-	if name == "" {
-		name = "原消息"
-	}
-	return fmt.Sprintf("引用 %s（原生引用不可用）：\n> %s\n\n%s", name, strings.ReplaceAll(quote, "\n", "\n> "), body)
 }

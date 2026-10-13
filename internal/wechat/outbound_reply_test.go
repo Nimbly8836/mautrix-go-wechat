@@ -28,13 +28,13 @@ func TestNativeReplyXMLMapsNeutralTypesExplicitly(t *testing.T) {
 					Name   string `xml:"displayname"`
 				} `xml:"appmsg>refermsg"`
 			}
-			if err = xml.Unmarshal([]byte(payload), &parsed); err != nil {
+			if err = xml.Unmarshal([]byte("<msg>"+payload+"</msg>"), &parsed); err != nil {
 				t.Fatal(err)
 			}
-			if parsed.Kind != 57 || parsed.Ref.Kind != want || parsed.Ref.From != "wxid_author" || parsed.Ref.Member != "" || parsed.Ref.Text != reply.Text || parsed.Ref.Name != reply.SenderName || parsed.Title != "reply & <tag>" {
+			if parsed.Kind != 57 || parsed.Ref.Kind != want || parsed.Ref.From != "wxid_friend" || parsed.Ref.Member != "wxid_author" || parsed.Ref.Text != reply.Text || parsed.Ref.Name != reply.SenderName || parsed.Title != "reply & <tag>" {
 				t.Fatalf("payload=%s parsed=%+v", payload, parsed)
 			}
-			if strings.Count(payload, "<appmsg>") != 1 {
+			if strings.Count(payload, "<appmsg") != 1 {
 				t.Fatal("quoted XML escaped its text node")
 			}
 		})

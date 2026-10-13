@@ -143,12 +143,14 @@ type sendTxtReq struct {
 	At      string `json:"At,omitempty"`
 }
 
-// sendResp is the typical Data of a send call: contains the new message id.
+// sendResp contains exact IDs from a validated flat or single-item send ack.
+// Its decoder also validates BaseResponse when embedded in another struct.
 type sendResp struct {
-	NewMsgId    int64  `json:"NewMsgId"`
-	MsgId       int64  `json:"MsgId"`
-	ClientMsgId string `json:"ClientMsgId"`
-	CreateTime  int64  `json:"CreateTime"`
+	NewMsgId              uint64 `json:"NewMsgId"`
+	MsgId                 uint64 `json:"MsgId"`
+	ClientMsgId           string `json:"ClientMsgId"`
+	CreateTime            int64  `json:"CreateTime"`
+	baseResponseValidated bool
 }
 
 // uploadImgReq -> /Msg/UploadImg

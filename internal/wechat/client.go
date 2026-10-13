@@ -570,7 +570,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if err != nil {
 			return "", err
 		}
-		return c.sendAppXML(ctx, wxid, to, payload)
+		return c.sendAppXMLWithWireType(ctx, wxid, to, payload, wxApp)
 	}
 
 	switch msg.Type {

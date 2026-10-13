@@ -28,6 +28,12 @@ The WeChat record parser/downloader applies these per-bundle bounds:
 
 WeChat record data types **2 (image), 4 (video), and 8 (file)** support downloads. Text and unsupported item descriptions are retained; unavailable, unsupported, or over-budget attachments remain explicitly described rather than silently disappearing. These backend limits are distinct from Matrix's serialized-event size budget.
 
+## Video protocol requirement
+
+Forwarded-video downloads require **fk-zhang v6.0.6 or later**. The bridge sends `DataType: 4` so the API selects CDN video filetype 4 (rather than the image strategies used by v6.0.5). Successful downloads use the actual `Data.Image` Base64 field, even for a video; this field name does not mean the payload is an image. No forwarding to filehelper is used.
+
+The record XML `datasize` and checksum can describe the original, whereas the CDN returns a different rendition. Video is not rejected solely for a size mismatch. Instead the bridge validates MP4 box boundaries and movie/video-track/media-data presence, applies byte budgets to the actual bytes, and reports the actual attachment size. An original checksum is not compared with a differently sized rendition. This is structural validation, not full codec decoding; image/file size and checksum validation is unchanged. The regression fixture is a synthetic playable MP4, not a short byte prefix pretending to be a video.
+
 ## References, retries and recall
 
 The outer WeChat message maps to the **summary root plus confirmed related event IDs**. The root reference is saved immediately after root confirmation; after **each** confirmed native attachment or delivery-failure notice, the accumulated related IDs are persisted again. The transcript file is related in the same way. A restart can therefore recover the confirmed prefix for reply resolution and cascade recall. Recall redacts root and related events using the original bridge sender. A child is not indexed as a new independent WeChat message or assigned an invented quote target; inner `fromnewmsgid` values never authorize live references.

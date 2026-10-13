@@ -118,10 +118,9 @@ func buildNativeReplyXML(chat remoteapi.ChatID, text string, reply *remoteapi.Re
 		_ = xml.EscapeText(&out, []byte(value))
 		return out.String()
 	}
-	from, member := string(reply.Sender), ""
-	if strings.HasSuffix(string(chat), "@chatroom") {
-		from, member = string(chat), string(reply.Sender)
-	}
+	// Match the protocol service's quote caller: bare appmsg, conversation in
+	// fromusr and original author in chatusr for both direct chats and groups.
+	// The outer HTTP Type is 49, independently of the subtype below.
 	// Never interpolate raw XML, CDATA, attributes, or Matrix extension fields.
-	return fmt.Sprintf("<msg><appmsg><title>%s</title><type>57</type><refermsg><type>%d</type><svrid>%s</svrid><fromusr>%s</fromusr><chatusr>%s</chatusr><displayname>%s</displayname><content>%s</content></refermsg></appmsg></msg>", escape(text), kind, escape(string(reply.Target)), escape(from), escape(member), escape(reply.SenderName), escape(reply.Text)), nil
+	return fmt.Sprintf(`<appmsg appid="" sdkver="0"><title>%s</title><des/><action/><type>57</type><showtype>0</showtype><soundtype>0</soundtype><mediatagname/><messageext/><messageaction/><content/><contentattr>0</contentattr><url/><lowurl/><dataurl/><lowdataurl/><songalbumurl/><songlyric/><appattach><totallen>0</totallen><attachid/><emoticonmd5/><fileext/><aeskey/></appattach><extinfo/><sourceusername/><sourcedisplayname/><thumburl/><md5/><statextstr/><refermsg><type>%d</type><svrid>%s</svrid><fromusr>%s</fromusr><chatusr>%s</chatusr><displayname>%s</displayname><content>%s</content></refermsg></appmsg>`, escape(text), kind, escape(string(reply.Target)), escape(string(chat)), escape(string(reply.Sender)), escape(reply.SenderName), escape(reply.Text)), nil
 }

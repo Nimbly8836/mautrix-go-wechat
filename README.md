@@ -168,8 +168,8 @@ message bodies or bulk-rewrites existing events.
 
 Matrix **text replies** to mapped messages are sent as native WeChat type-57
 quotes, using the verified original server ID and sender. Reply fallback markup
-is removed before sending; missing mappings retain a readable fallback instead
-of inventing an ID. See [native replies and storage](docs/NATIVE_REPLIES.md) for
+is removed before sending. A missing mapping is reported in Matrix without
+sending a plain-text imitation of the quote to WeChat. See [native replies and storage](docs/NATIVE_REPLIES.md) for
 scope checks, failure behavior and limitations.
 
 ## Receiving merged chat records
