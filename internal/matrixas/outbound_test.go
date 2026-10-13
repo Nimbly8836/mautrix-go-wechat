@@ -156,14 +156,20 @@ func TestPortalMessageIgnoredCommandPrefixes(t *testing.T) {
 				msg.RelatesTo = &event.RelatesTo{InReplyTo: &event.InReplyTo{EventID: "$original"}}
 			}
 			s.handleMatrixEvent(context.Background(), evt)
+			wantBody := tc.body
+			wantRequests := int64(0)
+			if tc.reply && !tc.blocked {
+				wantBody = "[引用原消息不可用，以下为新回复]\n" + event.TrimReplyFallbackText(tc.body)
+				wantRequests = 1 // Same-room fallback lookup, never a native ID source.
+			}
 			if tc.blocked {
 				if len(api.sent) != 0 {
 					t.Fatalf("ignored command leaked to WeChat: %#v", api.sent)
 				}
-			} else if len(api.sent) != 1 || api.sent[0].Type != remoteapi.MsgText || api.sent[0].Text != tc.body {
+			} else if len(api.sent) != 1 || api.sent[0].Type != remoteapi.MsgText || api.sent[0].Text != wantBody {
 				t.Fatalf("ordinary forwarding changed: %#v", api.sent)
 			}
-			if requests.Load() != 0 {
+			if requests.Load() != wantRequests {
 				t.Fatalf("unexpected Matrix requests: %d", requests.Load())
 			}
 			if msg.Body != tc.body {

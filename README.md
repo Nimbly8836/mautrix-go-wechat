@@ -159,11 +159,31 @@ polling. The original XML is used instead of a rendered `[引用消息]`/system 
   Ordinary messages remain concurrent; other chats and cancellation are not
   blocked by this wait.
 
-The reference cache is in memory and bounded to 5,000 alias entries. Messages
-from before a restart, evicted entries, or originals never bridged by this
-process may therefore use the readable fallback. The bridge does not guess a
-replacement target, search other rooms, bulk-rewrite history, or resend to
-WeChat. Matrix-to-WeChat handling is unchanged.
+References are now persisted in `<bridge.portal_file>.messages.jsonl`, including
+successful Matrix-to-WeChat sends. They survive restarts and are not wiped at
+5,000 entries. Keep the private journal on persistent storage and in backups.
+Already-lost mappings from older versions cannot be reconstructed merely because
+the original is still visible in a client; the bridge never guesses by matching
+message bodies or bulk-rewrites existing events.
+
+Matrix **text replies** to mapped messages are sent as native WeChat type-57
+quotes, using the verified original server ID and sender. Reply fallback markup
+is removed before sending; missing mappings retain a readable fallback instead
+of inventing an ID. See [native replies and storage](docs/NATIVE_REPLIES.md) for
+scope checks, failure behavior and limitations.
+
+## Receiving merged chat records
+
+WeChat type-19 merged forwards are expanded from their inner `recorditem`, not
+just the outer title/summary or WeChat's unsupported-browser URL. A readable
+transcript retains the item order, original display names and times. Downloaded
+images, videos and files follow as native Matrix media linked to the summary,
+not raw CDN or MXC links. Historical authors remain quoted labels, not newly
+impersonated senders. Recalls also cover confirmed attachment events.
+
+Oversized, expired or unavailable attachments have visible fallback labels;
+long transcripts use a bounded preview plus a native text-file attachment.
+See [merged-record behavior and limits](docs/MERGED_RECORDS.md).
 
 ## Keeping other bots' commands in Matrix
 

@@ -103,7 +103,8 @@ type Server struct {
 	rawImagePackState          rawImagePackState
 	rooms                      map[id.RoomID]bool
 	messageEvents              map[string]id.EventID
-	messageReferences          map[messageReferenceKey]messageReference
+	references                 *messageReferenceStore
+	referenceStoreErr          error
 	remoteRun                  bool
 	remoteCtx                  context.Context
 	remoteStop                 context.CancelFunc
@@ -482,7 +483,7 @@ func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 	log.Printf("matrix message: room=%s sender=%s eventtype=%s msgtype=%s body=%q", evt.RoomID, evt.Sender, evt.Type.String(), msg.MsgType, msg.Body)
 	if rec, ok := s.portals.byRoom(evt.RoomID); ok {
 		if evt.Type == event.EventSticker || msg.MsgType.IsMedia() {
-			go s.handlePortalMediaMessage(context.WithoutCancel(ctx), rec, evt.Sender, msg, evt.Type)
+			go s.handlePortalMediaMessage(context.WithoutCancel(ctx), rec, evt.Sender, msg, evt.Type, evt.ID)
 			return
 		}
 		if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
@@ -492,7 +493,7 @@ func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 			s.handleSolitaireReply(ctx, rec, evt, entry)
 			return
 		}
-		s.handlePortalMessage(ctx, rec, evt.Sender, msg)
+		s.handlePortalMessage(ctx, rec, evt.Sender, msg, evt.ID)
 		return
 	}
 	if msg.MsgType != event.MsgText && msg.MsgType != event.MsgNotice {
@@ -621,6 +622,9 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 		}
 		return
 	}
+	if s.isConfirmedOutboundEcho(account, rec, m) {
+		return
+	}
 	sender := m.Sender
 	if sender == "" {
 		sender = remoteapi.UserID(m.Chat)
@@ -628,6 +632,10 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	client := s.as.BotIntent().Client
 	if shouldJoinPuppet(account, sender) {
 		client = s.ensurePuppetJoined(ctx, sender, rec.RoomID)
+	}
+	if m.Record != nil {
+		s.bridgeRecordToPortal(ctx, account, rec, m, client)
+		return
 	}
 	content := matrixContentFromRemote(m)
 	eventType := matrixEventTypeFromRemote(m)

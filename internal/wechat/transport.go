@@ -115,6 +115,10 @@ func (t *transport) postEnvelope(ctx context.Context, path string, body any, que
 }
 
 func (t *transport) postRaw(ctx context.Context, path string, body any, query url.Values) ([]byte, string, error) {
+	return t.postRawLimited(ctx, path, body, query, 64<<20)
+}
+
+func (t *transport) postRawLimited(ctx context.Context, path string, body any, query url.Values, limit int64) ([]byte, string, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -137,9 +141,12 @@ func (t *transport) postRaw(ctx context.Context, path string, body any, query ur
 		return nil, "", fmt.Errorf("http %s: %w", path, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, "", err
+	}
+	if int64(len(raw)) > limit {
+		return nil, "", fmt.Errorf("http %s: response exceeds size limit", path)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("http %s: status %d: %s", path, resp.StatusCode, snippet(raw))

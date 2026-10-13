@@ -35,7 +35,7 @@ func (c *Client) sendAppXML(ctx context.Context, wxid, to, payload string) (remo
 	if response.NewMsgId <= 0 && response.MsgId <= 0 {
 		return "", fmt.Errorf("wx_xml 发送响应缺少消息 ID，无法确认发送成功")
 	}
-	return msgID(response.sendResp), nil
+	return qualifiedSendID(ctx, response.sendResp), nil
 }
 
 // appMessageTypeFromXML validates the document and reads only the direct

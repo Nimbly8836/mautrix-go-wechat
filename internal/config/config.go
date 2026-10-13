@@ -155,8 +155,8 @@ func (c *Config) resolveBridgePathDefaults() {
 	}
 }
 
-// ValidateBridgePathCollisions rejects a built-in emoji manifest path that
-// aliases bridge state, the bridge config, or the appservice registration file.
+// ValidateBridgePathCollisions protects the emoji manifest and derived message
+// reference journal from aliasing bridge state, config, or registration files.
 func (c *Config) ValidateBridgePathCollisions(configPath, registrationPath string) error {
 	c.resolveBridgePathDefaults()
 	builtinPath, err := resolveComparablePath(c.Bridge.WechatBuiltinEmojiFile)
@@ -184,10 +184,20 @@ func (c *Config) ValidateBridgePathCollisions(configPath, registrationPath strin
 			statePaths = append(statePaths, runtimePath)
 		}
 	}
+	journalPath, err := resolveComparablePath(c.Bridge.PortalFile + ".messages.jsonl")
+	if err != nil {
+		return fmt.Errorf("resolve message reference journal: %w", err)
+	}
+	if journalPath == builtinPath {
+		return fmt.Errorf("message reference journal collides with bridge.wechat_builtin_emoji_file")
+	}
 	for _, statePath := range statePaths {
 		resolved, resolveErr := resolveComparablePath(statePath.path)
 		if resolveErr != nil {
 			return fmt.Errorf("resolve %s %q: %w", statePath.name, statePath.path, resolveErr)
+		}
+		if journalPath == resolved {
+			return fmt.Errorf("message reference journal collides with %s at %q", statePath.name, journalPath)
 		}
 		if builtinPath == resolved {
 			return fmt.Errorf("bridge.wechat_builtin_emoji_file collides with %s at %q", statePath.name, builtinPath)

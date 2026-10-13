@@ -103,6 +103,8 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 	if m.MsgType == wxApp {
 		c.attachSolitaireSource(&base, firstNonEmpty(m.Content, m.ContentText), m.MsgID, m.NewMsgID)
 		attachQuotedReply(&base, firstNonEmpty(m.Content, m.ContentText))
+		c.attachMergedRecord(ctx, &base, firstNonEmpty(m.Content, m.ContentText))
+		attachAppQuotePreview(&base, firstNonEmpty(m.Content, m.ContentText))
 	}
 	if m.MsgType == wxImage {
 		c.attachImageMedia(ctx, &base)
@@ -128,7 +130,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
 	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent))
-	if m.MsgType == wxLocation || m.MsgType == wxRevoke || (m.MsgType == wxApp && isQuotedReplyXML(firstNonEmpty(m.Content.Str, m.ContentText))) {
+	if m.MsgType == wxLocation || m.MsgType == wxRevoke || (m.MsgType == wxApp && (isQuotedReplyXML(firstNonEmpty(m.Content.Str, m.ContentText)) || isMergedRecordXML(firstNonEmpty(m.Content.Str, m.ContentText)))) {
 		// Rendered summaries omit location details and quoted-message metadata.
 		content = stripLastMessageOps(firstNonEmpty(m.Content.Str, m.ContentText, m.PushContent))
 	}
@@ -212,6 +214,8 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	if m.MsgType == wxApp {
 		c.attachSolitaireSource(&base, firstNonEmpty(m.Content.Str, m.ContentText), rawID, messageID)
 		attachQuotedReply(&base, firstNonEmpty(m.Content.Str, m.ContentText))
+		c.attachMergedRecord(ctx, &base, firstNonEmpty(m.Content.Str, m.ContentText))
+		attachAppQuotePreview(&base, firstNonEmpty(m.Content.Str, m.ContentText))
 	}
 	if m.MsgType == wxImage {
 		c.attachImageMedia(ctx, &base)
@@ -946,6 +950,10 @@ func parseAppMessage(content, push string) (remoteapi.MessageType, string) {
 		return remoteapi.MsgApp, strings.TrimSpace(firstNonEmpty(content, push))
 	}
 	appType := xmlTag(content, "type")
+	if appType == "19" {
+		// Only structural record parsing may expose the inner document.
+		return remoteapi.MsgApp, "[合并聊天记录]"
+	}
 	if appType == "57" {
 		// Only attachQuotedReply may expose type-57 fields after structural
 		// validation. A generic tag search can find attachment URLs or titles
@@ -963,8 +971,6 @@ func parseAppMessage(content, push string) (remoteapi.MessageType, string) {
 		typ = remoteapi.MsgLink
 	case "6":
 		typ = remoteapi.MsgFile
-	case "19":
-		typ = remoteapi.MsgApp // merged forward / chat history
 	default:
 		typ = remoteapi.MsgApp
 	}

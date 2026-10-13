@@ -521,6 +521,9 @@ func normalizeInfoFields(raw any) map[string]any {
 var transientSendRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 60 * time.Second}
 
 func (c *Client) SendMessage(ctx context.Context, chat remoteapi.ChatID, msg remoteapi.OutgoingMessage) (remoteapi.MessageID, error) {
+	if msg.Reply != nil {
+		return c.sendMessageOnce(ctx, chat, msg)
+	}
 	msgID, err := c.sendMessageOnce(ctx, chat, msg)
 	if !isTransientLoggedOutError(err) {
 		return msgID, err
@@ -559,6 +562,16 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 	wxid := c.wxid
 	c.mu.RUnlock()
 	to := string(chat)
+	if msg.Reply != nil {
+		if msg.Type != remoteapi.MsgText {
+			return "", fmt.Errorf("wechat: native replies require text")
+		}
+		payload, err := buildNativeReplyXML(chat, msg.Text, msg.Reply)
+		if err != nil {
+			return "", err
+		}
+		return c.sendAppXML(ctx, wxid, to, payload)
+	}
 
 	switch msg.Type {
 	case remoteapi.MsgText:
@@ -570,7 +583,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if err := c.t.post(ctx, "/Msg/SendTxt", req, nil, &r); err != nil {
 			return "", err
 		}
-		return msgID(r), nil
+		return qualifiedSendID(ctx, r), nil
 
 	case remoteapi.MsgApp:
 		return c.sendAppXML(ctx, wxid, to, msg.Text)
@@ -584,7 +597,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if err := c.t.post(ctx, "/Msg/UploadImg", req, nil, &r); err != nil {
 			return "", err
 		}
-		return msgID(r), nil
+		return qualifiedSendID(ctx, r), nil
 
 	case remoteapi.MsgVideo:
 		if msg.Media == nil || len(msg.Media.Data) == 0 {
@@ -600,7 +613,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if err := c.t.post(ctx, "/Msg/SendVideo", req, nil, &r); err != nil {
 			return "", err
 		}
-		return msgID(r), nil
+		return qualifiedSendID(ctx, r), nil
 
 	case remoteapi.MsgAudio:
 		if msg.Media == nil || len(msg.Media.Data) == 0 {
@@ -618,7 +631,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if err := c.t.post(ctx, "/Msg/SendVoice", req, nil, &r); err != nil {
 			return "", err
 		}
-		return msgID(r), nil
+		return qualifiedSendID(ctx, r), nil
 
 	case remoteapi.MsgFile:
 		if msg.Media == nil || len(msg.Media.Data) == 0 {
@@ -647,7 +660,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if err := c.t.post(ctx, "/Msg/SendApp", req, nil, &r); err != nil {
 			return "", err
 		}
-		return msgID(r), nil
+		return qualifiedSendID(ctx, r), nil
 
 	case remoteapi.MsgEmoji:
 		if msg.Media == nil || len(msg.Media.Data) == 0 {
@@ -671,7 +684,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if err := c.t.post(ctx, "/Msg/SendEmoji", req, nil, &r); err != nil {
 			return "", err
 		}
-		return msgID(r), nil
+		return qualifiedSendID(ctx, r), nil
 
 	default:
 		// Fallback: send a textual placeholder for unhandled rich types so the
@@ -681,7 +694,7 @@ func (c *Client) sendMessageOnce(ctx context.Context, chat remoteapi.ChatID, msg
 		if err := c.t.post(ctx, "/Msg/SendTxt", req, nil, &r); err != nil {
 			return "", err
 		}
-		return msgID(r), nil
+		return qualifiedSendID(ctx, r), nil
 	}
 }
 

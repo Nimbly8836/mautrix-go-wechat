@@ -12,6 +12,9 @@ import (
 )
 
 func matrixEventTypeFromRemote(m *remoteapi.InboundMessage) event.Type {
+	if m.Record != nil {
+		return event.EventMessage
+	}
 	if m.Type == remoteapi.MsgEmoji && m.Media != nil && len(m.Media.Data) > 0 {
 		return event.EventSticker
 	}
@@ -19,6 +22,13 @@ func matrixEventTypeFromRemote(m *remoteapi.InboundMessage) event.Type {
 }
 
 func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventContent {
+	if m.Record != nil {
+		content := renderRecord(m.Record, nil)
+		if recordContentTooLarge(content) {
+			previewRecordContent(content, "完整记录将在桥接时作为原生文本附件提供。")
+		}
+		return content
+	}
 	body := m.Text
 	if body == "" {
 		body = fmt.Sprintf("[%s]", remoteTypeName(m.Type))

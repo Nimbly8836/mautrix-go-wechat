@@ -135,6 +135,29 @@ type WebhookReceiver interface {
 // MessageID is the backend-native id of a delivered message.
 type MessageID string
 
+// MessageSendResult retains backend-qualified aliases from the actual send
+// response. An unqualified ID alone does not authorize a native quote.
+type MessageSendResult struct {
+	ID    MessageID
+	Keys  []string
+	Quote *SentMessageQuote // Backend-normalized preview of what was actually sent.
+}
+
+// SentMessageQuote can differ from the user's input (e.g. a text reply is sent
+// as an app message). Text is a bounded quote preview, not a raw secret-bearing
+// media payload or the Matrix Markdown representation.
+type SentMessageQuote struct {
+	Type MessageType
+	Text string // Backend-native reference content.
+	Body string // Readable fallback without protocol markup.
+}
+
+// QualifiedMessageSender returns provenance-qualified IDs from a successful send.
+// Implementations must not retry an uncertain send (which can duplicate it).
+type QualifiedMessageSender interface {
+	SendMessageWithResult(context.Context, ChatID, OutgoingMessage) (MessageSendResult, error)
+}
+
 // LoginFlow describes one interactive login method, mirroring
 // bridgev2.LoginFlow. Presented to the user to choose from.
 type LoginFlow struct {
@@ -254,6 +277,7 @@ const (
 
 // OutgoingMessage is a message the bridge wants to send.
 type OutgoingMessage struct {
+	Reply    *Reply // Verified local reference for a native quote, never arbitrary event metadata.
 	Type     MessageType
 	Text     string   // body for text / caption; raw appmsg XML for outbound MsgApp
 	Mentions []UserID // @-mentions
@@ -273,8 +297,10 @@ type InboundMessage struct {
 	Location  *Location // Optional coordinates: nil is distinct from a valid (0, 0).
 	Timestamp time.Time
 	Extra     map[string]any
-	Solitaire *SolitaireSource // Exact source version for opt-in reply participation.
-	Reply     *Reply           // Optional original message and readable quote.
+	Solitaire *SolitaireSource  // Exact source version for opt-in reply participation.
+	Reply     *Reply            // Optional original message and readable quote.
+	Record    *ForwardedRecord  // Quoted history, not new messages from its named authors.
+	Quote     *SentMessageQuote // Optional safe backend preview for future outbound references.
 	// DeduplicationKeys are backend-defined, type-qualified ID aliases, stable
 	// across send responses and inbound delivery, scoped to an account/chat.
 	// They are internal delivery hints, not client-supplied source metadata.
@@ -294,7 +320,8 @@ type Media struct {
 // Reply describes an incoming quoted message. Target may be unavailable while
 // the original sender and text remain useful for a readable fallback.
 type Reply struct {
-	TargetKey  string // Backend-qualified ID, e.g. new:123; never an untyped fallback.
+	Type       MessageType // Neutral type of the original message.
+	TargetKey  string      // Backend-qualified ID, e.g. new:123; never an untyped fallback.
 	Target     MessageID
 	Sender     UserID
 	SenderName string

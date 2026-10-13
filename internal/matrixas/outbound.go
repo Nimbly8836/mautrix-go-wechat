@@ -14,7 +14,12 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/wechat/textemoji"
 )
 
-func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord, sender id.UserID, msg *event.MessageEventContent, eventType event.Type) {
+func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord, sender id.UserID, msg *event.MessageEventContent, eventType event.Type, eventIDs ...id.EventID) {
+	if msg.RelatesTo.GetReplaceID() != "" {
+		return
+	}
+	normalized := normalizePortalReply(msg)
+	msg = &normalized
 	if !s.allowed(sender) {
 		s.sendPortalNotice(ctx, rec.RoomID, "你没有使用此 bridge 的权限。")
 		return
@@ -54,7 +59,7 @@ func (s *Server) handlePortalMediaMessage(ctx context.Context, rec portalRecord,
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
 		return
 	}
-	msgID, err := s.api.SendMessage(ctx, rec.ChatID, outgoing)
+	msgID, err := s.sendPortalOutgoing(ctx, rec, sender, msg, outgoing, eventIDs...)
 	if err != nil {
 		log.Printf("failed to send Matrix media to WeChat chat=%s sender=%s msgtype=%s: %v", rec.ChatID, sender, msg.MsgType, err)
 		s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))
@@ -152,7 +157,12 @@ func (s *Server) shouldIgnorePortalCommand(msg *event.MessageEventContent) bool 
 	return false
 }
 
-func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, sender id.UserID, msg *event.MessageEventContent) {
+func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, sender id.UserID, msg *event.MessageEventContent, eventIDs ...id.EventID) {
+	if msg.RelatesTo.GetReplaceID() != "" {
+		return
+	}
+	normalized := normalizePortalReply(msg)
+	msg = &normalized
 	body := msg.Body
 	if strings.TrimSpace(body) == "" {
 		return
@@ -178,7 +188,7 @@ func (s *Server) handlePortalMessage(ctx context.Context, rec portalRecord, send
 		} else {
 			outgoing = remoteapi.OutgoingMessage{Type: remoteapi.MsgText, Text: textemoji.ToChineseTokens(body)}
 		}
-		msgID, err := s.api.SendMessage(ctx, rec.ChatID, outgoing)
+		msgID, err := s.sendPortalOutgoing(ctx, rec, sender, msg, outgoing, eventIDs...)
 		if err != nil {
 			log.Printf("failed to send Matrix msg to WeChat chat=%s sender=%s: %v", rec.ChatID, sender, err)
 			s.sendPortalNotice(ctx, rec.RoomID, fmt.Sprintf("发送到 WeChat 失败: %v", err))

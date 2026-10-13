@@ -10,6 +10,7 @@ import (
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 )
 
 func (s *Server) OnRedaction(ctx context.Context, r *remoteapi.Redaction) {
@@ -42,12 +43,19 @@ func (s *Server) OnRedaction(ctx context.Context, r *remoteapi.Redaction) {
 	if reference.EventID != "" && reference.Client != nil {
 		// Redact as the actual original bridge sender. Do not impersonate an
 		// arbitrary user named in the recall XML or rely on bot admin powers.
-		sum := sha256.Sum256([]byte(string(account) + "\x00" + string(rec.RoomID) + "\x00" + string(reference.EventID)))
-		redactCtx, cancelRedact := s.matrixOperationContext(ctx)
-		response, err := reference.Client.RedactEvent(redactCtx, rec.RoomID, reference.EventID, mautrix.ReqRedact{Reason: body, TxnID: fmt.Sprintf("wechat-revoke-%x", sum)})
-		cancelRedact()
-		if err != nil || response == nil || response.EventID == "" {
-			log.Printf("failed to confirm Matrix recall in %s: %v", rec.RoomID, err)
+		targets := append([]id.EventID{reference.EventID}, reference.RelatedEventIDs...)
+		confirmed := true
+		for _, target := range targets {
+			sum := sha256.Sum256([]byte(string(account) + "\x00" + string(rec.RoomID) + "\x00" + string(target)))
+			redactCtx, cancelRedact := s.matrixOperationContext(ctx)
+			response, err := reference.Client.RedactEvent(redactCtx, rec.RoomID, target, mautrix.ReqRedact{Reason: body, TxnID: fmt.Sprintf("wechat-revoke-%x", sum)})
+			cancelRedact()
+			if err != nil || response == nil || response.EventID == "" {
+				log.Printf("failed to confirm Matrix recall in %s event=%s: %v", rec.RoomID, target, err)
+				confirmed = false
+			}
+		}
+		if !confirmed {
 			content.Body += "（Matrix 原消息撤回未确认）"
 		}
 		content.RelatesTo = (&event.RelatesTo{}).SetReplyTo(reference.EventID)
