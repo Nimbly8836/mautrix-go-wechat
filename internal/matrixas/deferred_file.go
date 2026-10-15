@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -18,10 +20,12 @@ import (
 )
 
 const (
-	fileCaptionWindow          = 30 * time.Second
-	fileCandidateLimit         = 512
-	deferredFileTimeout        = 120 * time.Second
-	deferredFileFailureTimeout = 10 * time.Second
+	fileCaptionWindow           = 30 * time.Second
+	fileCandidateLimit          = 512
+	deferredFileDownloadTimeout = 10 * time.Minute
+	deferredFileUploadTimeout   = 2 * time.Minute
+	deferredFileTimeout         = deferredFileDownloadTimeout + deferredFileUploadTimeout
+	deferredFileFailureTimeout  = 10 * time.Second
 )
 
 type fileCaptionKey struct {
@@ -57,7 +61,7 @@ type fileCaptionDelivery struct {
 }
 
 func isFileLifecycleMessage(m *remoteapi.InboundMessage) bool {
-	return m.Type == remoteapi.MsgFile && m.Record == nil && m.Solitaire == nil
+	return m.Type == remoteapi.MsgFile && m.Record == nil && m.Solitaire == nil && !isPendingFile(m)
 }
 
 func fileLifecycleName(m *remoteapi.InboundMessage) string {
@@ -101,7 +105,7 @@ func fileCaptionMatches(c *fileCaption, m *remoteapi.InboundMessage) bool {
 	}
 	// These are the observed backend filename substitutions, not a general
 	// punctuation normalizer. The direction matters: caption -> file name.
-	return c.name == name || strings.NewReplacer("(", "_", ")", "_", "（", "_", "）", "_", "-", "_").Replace(c.name) == name
+	return fileNamesMatch(c.name, name)
 }
 
 func (s *Server) beginFileCaptionDelivery(account remoteapi.UserID, rec portalRecord, m *remoteapi.InboundMessage) fileCaptionDelivery {
@@ -156,7 +160,7 @@ func (s *Server) beginFileCaptionDelivery(account remoteapi.UserID, rec portalRe
 			previous = entry
 		}
 	}
-	if isFileLifecycleMessage(m) && !slot.ambiguous && previous != nil && now.Before(previous.expires) && !previous.ambiguous && !previous.claimed && fileCaptionMatches(previous.candidate, m) {
+	if isFileLifecycleMessage(m) && m.FileTransfer == nil && !slot.ambiguous && previous != nil && now.Before(previous.expires) && !previous.ambiguous && !previous.claimed && fileCaptionMatches(previous.candidate, m) {
 		previous.claimed = true
 		delivery.claimed = previous.candidate
 	}
@@ -231,6 +235,16 @@ func (s *Server) bridgeDeferredFile(ctx context.Context, account remoteapi.UserI
 	client := s.as.BotIntent().Client
 	var reply *event.RelatesTo
 	matched := delivery.claimed != nil
+	if update := s.explicitFileUpdateReference(account, rec, m); update.EventID != "" {
+		if update.BridgeSender && update.Client != nil && len(update.RelatedEventIDs) == 0 {
+			delivery.claimed = &fileCaption{eventID: update.EventID, client: update.Client}
+			matched = true
+		} else {
+			// A real original exists but cannot safely be edited. Keep a clear
+			// file marker and link the new file status to it instead.
+			reply = (&event.RelatesTo{}).SetReplyTo(update.EventID)
+		}
+	}
 	resuming := false
 	for _, key := range m.DeduplicationKeys {
 		if !strings.HasPrefix(key, "new:") {
@@ -289,19 +303,22 @@ func (s *Server) bridgeDeferredFile(ctx context.Context, account remoteapi.UserI
 	}
 	// Failure uses a separate short budget only while the original connector
 	// context remains live. Never expose backend URLs, errors, or credentials.
+	failureStatus := "文件传输失败"
 	fail := func() {
 		if root == "" || ctx.Err() != nil {
 			return
 		}
 		failureCtx, done := context.WithTimeout(ctx, deferredFileFailureTimeout)
 		defer done()
-		if editID, ok := send(failureCtx, &event.MessageEventContent{MsgType: event.MsgText, Body: name + "（文件传输失败）"}, "failure", true); ok {
+		if editID, ok := send(failureCtx, &event.MessageEventContent{MsgType: event.MsgText, Body: fileStatusBody(name, failureStatus, 0)}, "failure", true); ok {
 			_ = s.appendMessageReferenceParts(account, rec, root, client, editID)
 		}
 	}
 	if !matched && !resuming {
-		content := &event.MessageEventContent{MsgType: event.MsgText, Body: name}
-		s.attachInboundReply(account, rec, m, content)
+		content := &event.MessageEventContent{MsgType: event.MsgText, Body: fileStatusBody(name, "等待下载", 0), RelatesTo: reply}
+		if reply == nil {
+			s.attachInboundReply(account, rec, m, content)
+		}
 		reply = content.RelatesTo
 		var ok bool
 		root, ok = send(workCtx, content, "root", false)
@@ -315,7 +332,7 @@ func (s *Server) bridgeDeferredFile(ctx context.Context, account remoteapi.UserI
 			s.rememberMessageEvent(m.Chat, alias, root)
 		}
 	}
-	progress, ok := send(workCtx, &event.MessageEventContent{MsgType: event.MsgText, Body: name + "（文件传输中…）"}, "progress", true)
+	progress, ok := send(workCtx, &event.MessageEventContent{MsgType: event.MsgText, Body: fileStatusBody(name, "文件传输中…", 0)}, "progress", true)
 	if !ok {
 		fail()
 		return
@@ -348,13 +365,21 @@ func (s *Server) bridgeDeferredFile(ctx context.Context, account remoteapi.UserI
 	media := m.Media
 	if m.FetchMedia != nil {
 		var err error
-		media, err = m.FetchMedia(workCtx)
+		downloadCtx, finishDownload := context.WithTimeout(workCtx, deferredFileDownloadTimeout)
+		media, err = m.FetchMedia(downloadCtx)
+		finishDownload()
 		if err != nil {
+			failureStatus = "文件传输失败：下载失败"
+			if errors.Is(err, context.DeadlineExceeded) {
+				failureStatus = "文件传输失败：下载超时"
+			}
+			log.Printf("file transfer failed stage=download chat=%s message=%s error_type=%T", rec.ChatID, m.ID, err)
 			fail()
 			return
 		}
 	}
 	if media == nil || len(media.Data) == 0 {
+		failureStatus = "文件传输失败：没有文件数据"
 		fail()
 		return
 	}
@@ -369,19 +394,28 @@ func (s *Server) bridgeDeferredFile(ctx context.Context, account remoteapi.UserI
 	if media.FileName != "" {
 		name = recordShortText(media.FileName, 512)
 	}
-	upload, err := s.as.BotIntent().UploadBytesWithName(workCtx, media.Data, mime, name)
+	uploadCtx, finishUpload := context.WithTimeout(workCtx, deferredFileUploadTimeout)
+	upload, err := s.as.BotIntent().UploadBytesWithName(uploadCtx, media.Data, mime, name)
+	finishUpload()
 	if err != nil || upload == nil {
+		failureStatus = "文件传输失败：上传到 Matrix 失败"
+		if errors.Is(err, context.DeadlineExceeded) {
+			failureStatus = "文件传输失败：上传到 Matrix 超时"
+		}
+		log.Printf("file transfer failed stage=matrix_upload chat=%s message=%s error_type=%T", rec.ChatID, m.ID, err)
 		fail()
 		return
 	}
 	uri, valid := validMXC(upload.ContentURI.String())
 	if !valid || len(uri) > 2048 {
+		failureStatus = "文件传输失败：Matrix 未返回有效附件地址"
 		fail()
 		return
 	}
 	content := &event.MessageEventContent{MsgType: event.MsgFile, Body: name, FileName: name, URL: uri, Info: &event.FileInfo{MimeType: mime, Size: len(media.Data)}}
 	terminal, ok := send(workCtx, content, "complete", true)
 	if !ok {
+		failureStatus = "文件传输失败：文件消息更新未确认"
 		fail()
 		return
 	}

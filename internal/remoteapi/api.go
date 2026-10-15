@@ -287,13 +287,14 @@ type OutgoingMessage struct {
 
 // InboundMessage is a message received from the backend.
 type InboundMessage struct {
-	Account UserID // Optional backend account provenance, not the message sender.
-	ID      MessageID
-	Chat    ChatID
-	Sender  UserID
-	Type    MessageType
-	Text    string
-	Media   *Media
+	Account      UserID // Optional backend account provenance, not the message sender.
+	ID           MessageID
+	Chat         ChatID
+	Sender       UserID
+	Type         MessageType
+	Text         string
+	Media        *Media
+	FileTransfer *FileTransfer // Optional upload placeholder or explicit replacement identity.
 	// FetchMedia resolves a file after callback acknowledgement. It captures
 	// private backend metadata, never the callback request's context. The core
 	// supplies the connector lifetime and a bounded operation timeout.
@@ -312,6 +313,15 @@ type InboundMessage struct {
 	// DeliveryOrder is assigned by the connector before concurrent dispatch.
 	// It lets a sink correlate adjacent events without trusting completion order.
 	DeliveryOrder uint64 `json:"-"`
+}
+
+// FileTransfer represents backend-authored upload lifecycle information. An
+// explicit Replaces/TargetKey is scoped to the same account/chat/sender; it is
+// not inferred from display text and must never authorize cross-sender edits.
+type FileTransfer struct {
+	Pending   bool
+	Replaces  MessageID
+	TargetKey string
 }
 
 // Media is a binary attachment. Backends fill either Data (already fetched) or

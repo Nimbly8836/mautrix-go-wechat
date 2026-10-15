@@ -620,6 +620,9 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	if m.Account != "" && m.Account != account {
 		return
 	}
+	if isPendingFile(m) && s.knownFileMessageReference(account, rec, m).EventID != "" {
+		return
+	}
 	fileDelivery := s.beginFileCaptionDelivery(account, rec, m)
 	if m.Solitaire != nil {
 		if err := s.deliverSolitaireToPortal(ctx, rec, m); err != nil {

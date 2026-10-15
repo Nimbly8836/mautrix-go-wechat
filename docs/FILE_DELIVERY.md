@@ -8,7 +8,22 @@ the file download.
 
 ## Placeholder and edits
 
-The bridge creates a filename placeholder, edits it to show progress, then edits
+WeChat app type 74 is an upload announcement, not an ordinary filename text.
+It is shown immediately as `[文件] filename（等待文件就绪）` with its declared
+size, without attempting a download. A later app-type-6 file can explicitly name
+that announcement through `appattach/overwrite_newmsgid`. The bridge resolves
+that exact source ID within the same account/chat/room/sender and edits the
+original bridge-owned event, even after restart or a long upload delay. This
+explicit association takes precedence over filename/time heuristics; invalid
+explicit IDs are never substituted with a similarly named message.
+
+If the original is a verified same-sender target but cannot safely be edited
+(for example, it is human-authored in Matrix), a clearly marked file placeholder
+is sent as a reply to it. A missing or mismatched target does not authorize an
+edit or relation to an unrelated event. A replayed upload announcement does not
+create another visible entry.
+
+The bridge creates a marked `[文件]` placeholder when needed, edits it to show progress, then edits
 that **same visible Matrix event** into a native `m.file` with `url`, `filename`
 and MIME/size information. Failure is another edit of the same event, not a
 separate notice or file card. The original Matrix sender is preserved, including
@@ -41,16 +56,31 @@ unrelated text is never edited or deleted to force a match.
 
 ## Budgets and cancellation
 
-There are at most four active fetch/upload operations per server. Work is bounded
-by 120 seconds and the connector context. A terminal failure edit has a separate
-short budget only while that connector remains live. Account/portal changes and
-shutdown prevent publication into a replacement account or room.
+There are at most four active fetch/upload operations per server. Downloads have
+up to **10 minutes**, and upload to Matrix has its own **2-minute** budget. The
+whole operation, including waiting for a transfer slot, is bounded by **12
+minutes** and the connector context. A terminal failure edit has a separate
+short budget only while that connector remains live. Status messages distinguish
+download failure/timeout from Matrix upload failure/timeout without exposing
+credentials. Account/portal changes and shutdown prevent publication into a
+replacement account or room.
 
-Files are limited to 64 MiB. The existing 64-KiB backend download sections are
-retained, with bounded HTTP response reads and exact chunk/aggregate length
-validation. Self-sent files select the conversation peer before the download.
-Private attachment identifiers remain in the backend fetch closure, not display
-text or public message metadata.
+Files are limited to **64 MiB**. When ordinary file XML supplies `cdnattachurl`
+and `aeskey`, the bridge uses the passive `/Tools/CdnDownloadRecordItem` endpoint
+with **DataType=8** and the real file size. In fk-zhang v6.0.9 this selects the
+normal file channel followed by the large-file channel when the protocol says
+it is needed. The actual response is `Data.Image` Base64, even for ZIP/PDF files.
+A per-operation HTTP client uses the caller's download deadline instead of the
+ordinary 70-second timeout. Response bounds include Base64 expansion; downloaded
+length and any supplied original MD5 checksum must match. There is no forwarding
+to filehelper or fallback to the legacy CGI after a CDN failure.
+
+Files without CDN metadata retain 64-KiB legacy sections with exact chunk/total
+validation. A nested `BaseResponse.ret != 0` is rejected even if the outer JSON
+says `Success=true`; metadata is never mistaken for file bytes. Self-sent legacy
+files select the conversation peer before the download. Private attachment
+identifiers remain in the backend fetch closure, not display text or public
+message metadata.
 
 ## References and restart
 
@@ -66,7 +96,9 @@ Confirmed terminal delivery is not republished on replay. A replay of a pending
 file can reuse its persisted root. The fetch closure itself is not a durable job
 queue: after a crash, work resumes only when the backend/history delivers that
 file again. Candidate matching history is in memory, so a restart between an
-unpaired filename and its file may prevent coalescing.
+unpaired plain-text filename and its file may prevent heuristic coalescing.
+Explicit type-74 replacement identities use the durable journal instead and do
+not depend on that short-lived cache.
 
 This does not automatically edit/redact pre-existing duplicate messages. Such a
 repair requires explicitly identified events and separate approval. Deployment

@@ -29,6 +29,13 @@ func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventCon
 		}
 		return content
 	}
+	if isPendingFile(m) {
+		size := int64(0)
+		if m.Media != nil {
+			size = m.Media.Size
+		}
+		return &event.MessageEventContent{MsgType: event.MsgText, Body: fileStatusBody(fileLifecycleName(m), "等待文件就绪", size)}
+	}
 	body := m.Text
 	if body == "" {
 		body = fmt.Sprintf("[%s]", remoteTypeName(m.Type))

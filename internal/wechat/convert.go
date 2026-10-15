@@ -381,7 +381,7 @@ func isFileAttachmentXML(raw string) bool {
 		}
 	}
 	kind, err := appMessageTypeFromXML(raw)
-	return err == nil && kind == 6
+	return err == nil && (kind == 6 || kind == 74)
 }
 
 // prepareFileMedia does no I/O. In particular, webhook request cancellation must
@@ -393,11 +393,25 @@ func (c *Client) prepareFileMedia(base *remoteapi.InboundMessage, sources ...str
 			raw = strings.TrimSpace(strings.TrimPrefix(raw, string(base.Sender)+":"))
 		}
 		kind, err := appMessageTypeFromXML(raw)
-		if err != nil || kind != 6 {
+		if err != nil || (kind != 6 && kind != 74) {
 			continue
 		}
 		payload, err := parseFileAttachmentPayload(raw, string(base.Sender), string(base.Chat))
 		c.deferFileMedia(base, payload, err)
+		if kind == 74 {
+			// An upload announcement has no downloadable bytes yet. Only an
+			// explicit later app6 overwrite_newmsgid can complete this transfer.
+			base.FileTransfer = &remoteapi.FileTransfer{Pending: true}
+			base.FetchMedia = nil
+		} else if payload.HasReplacement {
+			// Preserve an explicitly invalid hint so consumers cannot substitute
+			// a filename heuristic for an ambiguous protocol identity.
+			base.FileTransfer = &remoteapi.FileTransfer{}
+			if payload.Replaces != "" {
+				base.FileTransfer.Replaces = remoteapi.MessageID(payload.Replaces)
+				base.FileTransfer.TargetKey = "new:" + payload.Replaces
+			}
+		}
 		attachAppQuotePreview(base, raw)
 		return true
 	}
@@ -444,12 +458,17 @@ func (c *Client) deferFileMedia(base *remoteapi.InboundMessage, payload fileAtta
 }
 
 type fileAttachmentPayload struct {
-	Title    string
-	AppID    string
-	AttachID string
-	TotalLen int64
-	FileExt  string
-	UserName string
+	Title          string
+	AppID          string
+	AttachID       string
+	TotalLen       int64
+	FileExt        string
+	UserName       string
+	CDNURL         string
+	AESKey         string
+	FullMd5        string
+	Replaces       string
+	HasReplacement bool
 }
 
 type fileXMLAttachment struct {
@@ -457,12 +476,16 @@ type fileXMLAttachment struct {
 	IDs      []replyXMLText `xml:"attachid"`
 	CDNIDs   []replyXMLText `xml:"cdnattachid"`
 	FileExts []replyXMLText `xml:"fileext"`
+	CDNURLs  []replyXMLText `xml:"cdnattachurl"`
+	AESKeys  []replyXMLText `xml:"aeskey"`
+	Replaces []replyXMLText `xml:"overwrite_newmsgid"`
 }
 
 type fileXMLApp struct {
 	XMLName     xml.Name
 	AppID       string              `xml:"appid,attr"`
 	AppIDs      []replyXMLText      `xml:"appid"`
+	MD5s        []replyXMLText      `xml:"md5"`
 	Titles      []replyXMLText      `xml:"title"`
 	FileExts    []replyXMLText      `xml:"fileext"`
 	FromUsers   []replyXMLText      `xml:"fromusername"`
@@ -506,10 +529,23 @@ func parseFileAttachmentPayload(sourceXML, sender, talker string) (fileAttachmen
 	appFrom, _ := replyText(app.FromUsers)
 	appFromUser, _ := replyText(app.FromUser)
 	payload.UserName = firstNonEmpty(strings.TrimSpace(from), strings.TrimSpace(fromUser), strings.TrimSpace(appFrom), strings.TrimSpace(appFromUser), sender, talker)
+	for _, attachment := range app.Attachments {
+		payload.HasReplacement = payload.HasReplacement || len(attachment.Replaces) > 0
+	}
 	if len(app.Attachments) != 1 {
 		return payload, fmt.Errorf("missing or ambiguous file attachment")
 	}
 	attachment := app.Attachments[0]
+	if target, ok := replyText(attachment.Replaces); ok {
+		payload.Replaces = positiveMessageID(target)
+	}
+	cdnURL, urlOK := replyText(attachment.CDNURLs)
+	aesKey, keyOK := replyText(attachment.AESKeys)
+	fullMD5, md5OK := replyText(app.MD5s)
+	if (len(attachment.CDNURLs) > 0 && !urlOK) || (len(attachment.AESKeys) > 0 && !keyOK) || (len(app.MD5s) > 0 && !md5OK) {
+		return payload, fmt.Errorf("ambiguous file download metadata")
+	}
+	payload.CDNURL, payload.AESKey, payload.FullMd5 = strings.TrimSpace(cdnURL), strings.TrimSpace(aesKey), strings.TrimSpace(fullMD5)
 	attachID, _ := replyText(attachment.IDs)
 	cdnID, _ := replyText(attachment.CDNIDs)
 	payload.AttachID = firstNonEmpty(strings.TrimSpace(attachID), strings.TrimSpace(cdnID))
@@ -534,11 +570,23 @@ func (c *Client) downloadFileForAccount(ctx context.Context, payload fileAttachm
 	if c == nil || c.t == nil || account == "" || c.selfWxid() != account {
 		return nil, "", fmt.Errorf("file attachment account unavailable or changed")
 	}
-	if payload.AttachID == "" || payload.TotalLen <= 0 {
-		return nil, "", fmt.Errorf("missing file attach_id or total length")
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if payload.TotalLen <= 0 {
+		return nil, "", fmt.Errorf("missing file total length")
 	}
 	if payload.TotalLen > maxFileDownloadBytes {
 		return nil, "", fmt.Errorf("file exceeds 64 MiB download limit")
+	}
+	if payload.CDNURL != "" {
+		if payload.AESKey == "" {
+			return nil, "", fmt.Errorf("missing file CDN key")
+		}
+		return c.downloadCDNFile(ctx, payload, account)
+	}
+	if payload.AttachID == "" {
+		return nil, "", fmt.Errorf("missing file attach_id")
 	}
 	const chunkSize int64 = 65536 // Keep the endpoint's established section size.
 	var out []byte
@@ -585,7 +633,11 @@ func (c *Client) downloadFileChunk(ctx context.Context, req downloadFileReq) ([]
 	if err != nil {
 		return nil, "", err
 	}
-	return mediaBytesFromRawResponse(raw, contentType, "/Tools/DownloadFile")
+	data, err := fileChunkBytes(raw, contentType, req.Section.DataLen)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, http.DetectContentType(data), nil
 }
 
 func fileNameFromFileMessage(text, sourceXML string) string {
@@ -1106,7 +1158,7 @@ func parseAppMessage(content, push string) (remoteapi.MessageType, string) {
 	switch appType {
 	case "5", "33", "36": // link / mini program-ish
 		typ = remoteapi.MsgLink
-	case "6":
+	case "6", "74":
 		typ = remoteapi.MsgFile
 	default:
 		typ = remoteapi.MsgApp

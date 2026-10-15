@@ -39,7 +39,8 @@ func (s *Server) appendMessageReferenceParts(account remoteapi.UserID, rec porta
 }
 
 func trustedFilePart(root, part messageReference) bool {
-	return root.Type == remoteapi.MsgText && part.Type == remoteapi.MsgFile &&
+	rootKind := root.Type == remoteapi.MsgText || ((root.Type == remoteapi.MsgFile || root.Type == remoteapi.MsgApp) && fileNamesMatch(root.Text, part.Text))
+	return rootKind && part.Type == remoteapi.MsgFile &&
 		root.BridgeSender && part.BridgeSender && root.EventID != part.EventID &&
 		root.MatrixSender != "" && root.MatrixSender == part.MatrixSender &&
 		root.Sender != "" && root.Sender == part.Sender
