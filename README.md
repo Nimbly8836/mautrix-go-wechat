@@ -185,6 +185,14 @@ Oversized, expired or unavailable attachments have visible fallback labels;
 long transcripts use a bounded preview plus a native text-file attachment.
 See [merged-record behavior and limits](docs/MERGED_RECORDS.md).
 
+## Receiving files
+
+Ordinary WeChat files acknowledge callbacks before downloading. A single filename
+placeholder is edited in place into a native Matrix file; failure also updates
+that same message. A preceding, unambiguous same-sender filename caption can be
+reused rather than producing a second visible entry. See
+[file delivery, matching rules and limits](docs/FILE_DELIVERY.md).
+
 ## Keeping other bots' commands in Matrix
 
 Configure command prefixes that should **not** be forwarded from Matrix portal

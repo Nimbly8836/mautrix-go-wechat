@@ -46,6 +46,7 @@ type messageReferenceStore struct {
 	err     error
 	forward map[messageReferenceKey]messageReference
 	reverse map[matrixReferenceKey]messageReference
+	parents map[matrixReferenceKey]id.EventID // Related event -> unique visible root; empty means ambiguous.
 }
 
 func referenceSnapshot(text string) string {
@@ -122,7 +123,7 @@ func validateReferenceRecord(r referenceRecord) error {
 }
 
 func openMessageReferenceStore(path string) (*messageReferenceStore, error) {
-	store := &messageReferenceStore{path: path, forward: make(map[messageReferenceKey]messageReference), reverse: make(map[matrixReferenceKey]messageReference)}
+	store := &messageReferenceStore{path: path, forward: make(map[messageReferenceKey]messageReference), reverse: make(map[matrixReferenceKey]messageReference), parents: make(map[matrixReferenceKey]id.EventID)}
 	// An unconfigured store is useful for embedded/test Servers. Configured
 	// deployments always derive this path from their mandatory portal file.
 	if path == "" {
@@ -249,6 +250,17 @@ func (s *messageReferenceStore) index(r referenceRecord) {
 		s.forward[messageReferenceKey{r.Account, r.Chat, r.Room, key}] = r.Reference
 	}
 	s.reverse[matrixKey] = r.Reference
+	if s.parents == nil {
+		s.parents = make(map[matrixReferenceKey]id.EventID)
+	}
+	for _, part := range r.Reference.RelatedEventIDs {
+		key := matrixReferenceKey{r.Account, r.Chat, r.Room, part}
+		if owner, exists := s.parents[key]; !exists {
+			s.parents[key] = r.Reference.EventID
+		} else if owner != r.Reference.EventID {
+			s.parents[key] = ""
+		}
+	}
 }
 
 func mergeRelatedEventIDs(previous, next []id.EventID) []id.EventID {
@@ -269,6 +281,10 @@ func mergeRelatedEventIDs(previous, next []id.EventID) []id.EventID {
 func (s *messageReferenceStore) append(r referenceRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.appendLocked(r)
+}
+
+func (s *messageReferenceStore) appendLocked(r referenceRecord) error {
 	if s.err != nil {
 		return s.err
 	}

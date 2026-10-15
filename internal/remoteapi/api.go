@@ -287,24 +287,31 @@ type OutgoingMessage struct {
 
 // InboundMessage is a message received from the backend.
 type InboundMessage struct {
-	Account   UserID // Optional backend account provenance, not the message sender.
-	ID        MessageID
-	Chat      ChatID
-	Sender    UserID
-	Type      MessageType
-	Text      string
-	Media     *Media
-	Location  *Location // Optional coordinates: nil is distinct from a valid (0, 0).
-	Timestamp time.Time
-	Extra     map[string]any
-	Solitaire *SolitaireSource  // Exact source version for opt-in reply participation.
-	Reply     *Reply            // Optional original message and readable quote.
-	Record    *ForwardedRecord  // Quoted history, not new messages from its named authors.
-	Quote     *SentMessageQuote // Optional safe backend preview for future outbound references.
+	Account UserID // Optional backend account provenance, not the message sender.
+	ID      MessageID
+	Chat    ChatID
+	Sender  UserID
+	Type    MessageType
+	Text    string
+	Media   *Media
+	// FetchMedia resolves a file after callback acknowledgement. It captures
+	// private backend metadata, never the callback request's context. The core
+	// supplies the connector lifetime and a bounded operation timeout.
+	FetchMedia func(context.Context) (*Media, error) `json:"-"`
+	Location   *Location                             // Optional coordinates: nil is distinct from a valid (0, 0).
+	Timestamp  time.Time
+	Extra      map[string]any
+	Solitaire  *SolitaireSource  // Exact source version for opt-in reply participation.
+	Reply      *Reply            // Optional original message and readable quote.
+	Record     *ForwardedRecord  // Quoted history, not new messages from its named authors.
+	Quote      *SentMessageQuote // Optional safe backend preview for future outbound references.
 	// DeduplicationKeys are backend-defined, type-qualified ID aliases, stable
 	// across send responses and inbound delivery, scoped to an account/chat.
 	// They are internal delivery hints, not client-supplied source metadata.
 	DeduplicationKeys []string
+	// DeliveryOrder is assigned by the connector before concurrent dispatch.
+	// It lets a sink correlate adjacent events without trusting completion order.
+	DeliveryOrder uint64 `json:"-"`
 }
 
 // Media is a binary attachment. Backends fill either Data (already fetched) or

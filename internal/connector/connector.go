@@ -14,9 +14,14 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	"github.com/leat/mautrix-go-wechat/internal/remoteapi"
 )
+
+// One process-wide order survives connector/account replacement. Sinks keep
+// only short-lived arrival windows; restarting the process clears both sides.
+var messageDeliveryOrder atomic.Uint64
 
 // Connector owns one logged-in backend client and translates between the
 // neutral event stream and whatever Matrix-facing sink you plug in.
@@ -88,8 +93,9 @@ func (c *Connector) dispatch(ctx context.Context, ev remoteapi.Event) {
 	switch ev.Kind {
 	case remoteapi.EventMessage:
 		if ev.Message != nil {
-			msg := ev.Message
-			c.dispatchAsync(ctx, msg.Chat, msg.Reply != nil, func() { c.dispatchMessage(ctx, msg) })
+			msg := *ev.Message
+			msg.DeliveryOrder = messageDeliveryOrder.Add(1)
+			c.dispatchAsync(ctx, msg.Chat, msg.Reply != nil || msg.FetchMedia != nil, func() { c.dispatchMessage(ctx, &msg) })
 		}
 	case remoteapi.EventRedaction:
 		if ev.Redaction != nil {
@@ -111,7 +117,7 @@ func (c *Connector) dispatch(ctx context.Context, ev remoteapi.Event) {
 	}
 }
 
-// Ordinary messages remain concurrent. Related events wait for earlier
+// Ordinary messages remain concurrent. Related events and deferred files wait for earlier
 // deliveries in their chat, so a slow Matrix acknowledgement cannot make a
 // valid reply/recall look like an unknown target. Waiting never blocks the pump
 // or another chat, and cancellation never waits for a stuck sink.

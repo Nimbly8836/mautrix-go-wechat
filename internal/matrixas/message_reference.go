@@ -32,9 +32,9 @@ type messageReference struct {
 	Client          *mautrix.Client       `json:"-"` // Original bridge sender, including bot fallback.
 }
 
-func (s *Server) rememberMessageReference(account remoteapi.UserID, rec portalRecord, message *remoteapi.InboundMessage, eventID id.EventID, client *mautrix.Client, relatedEventIDs ...id.EventID) {
+func (s *Server) rememberMessageReference(account remoteapi.UserID, rec portalRecord, message *remoteapi.InboundMessage, eventID id.EventID, client *mautrix.Client, relatedEventIDs ...id.EventID) error {
 	if message == nil || eventID == "" || client == nil || message.Chat != rec.ChatID || (message.Account != "" && message.Account != account) {
-		return
+		return fmt.Errorf("invalid message reference scope or sender")
 	}
 	keys := append([]string(nil), message.DeduplicationKeys...)
 	// Legacy unqualified aliases remain recall-only and never become new IDs.
@@ -43,12 +43,18 @@ func (s *Server) rememberMessageReference(account remoteapi.UserID, rec portalRe
 	}
 	ref := messageReference{EventID: eventID, RelatedEventIDs: append([]id.EventID(nil), relatedEventIDs...), MatrixSender: client.UserID, BridgeSender: true, Sender: message.Sender, Type: message.Type, Text: referenceSnapshot(message.Text), Client: client}
 	if message.Quote != nil {
-		ref.Type = message.Quote.Type
+		// A file still maps to wire type 49, but retain its neutral file kind
+		// so a trusted edit part can be distinguished from a generic app event.
+		if message.Type != remoteapi.MsgFile {
+			ref.Type = message.Quote.Type
+		}
 		ref.QuoteText = referenceSnapshot(message.Quote.Text)
 	}
 	if err := s.saveMessageReference(account, rec, keys, ref); err != nil {
 		log.Printf("ERROR: inbound message was delivered but its durable reference could not be saved: %v", err)
+		return err
 	}
+	return nil
 }
 
 func (s *Server) saveMessageReference(account remoteapi.UserID, rec portalRecord, keys []string, ref messageReference) error {
@@ -100,6 +106,7 @@ func (s *Server) getMessageReference(account remoteapi.UserID, rec portalRecord,
 	}
 	store.mu.Lock()
 	ref := store.forward[messageReferenceKey{account, rec.ChatID, rec.RoomID, key}]
+	ref = store.visibleReferenceLocked(matrixReferenceKey{Account: account, Chat: rec.ChatID, Room: rec.RoomID}, ref, false)
 	ref.RelatedEventIDs = append([]id.EventID(nil), ref.RelatedEventIDs...)
 	store.mu.Unlock()
 	if ref.Client == nil && ref.BridgeSender && s.as != nil {
@@ -143,5 +150,8 @@ func (s *Server) getMatrixMessageReference(account remoteapi.UserID, rec portalR
 	if store.err != nil {
 		return messageReference{}, store.err
 	}
-	return store.reverse[matrixReferenceKey{account, rec.ChatID, rec.RoomID, eventID}], nil
+	key := matrixReferenceKey{account, rec.ChatID, rec.RoomID, eventID}
+	ref := store.visibleReferenceLocked(key, store.reverse[key], true)
+	ref.RelatedEventIDs = append([]id.EventID(nil), ref.RelatedEventIDs...)
+	return ref, nil
 }

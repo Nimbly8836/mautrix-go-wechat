@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"html"
@@ -12,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +34,7 @@ const (
 
 	// The Base64-encoded voice payload plus its JSON envelope must fit the transport's 64 MiB response limit.
 	maxVoiceDownloadBytes int64 = 47 << 20
+	maxFileDownloadBytes  int64 = 64 << 20
 )
 
 func shouldDropLocal(m localMessage) bool {
@@ -93,6 +96,9 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 			"is_local":      true,
 		},
 	}
+	if m.MsgType == wxApp && c.prepareFileMedia(&base, m.Content, m.ContentText) {
+		return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+	}
 	if m.MsgType == wxRevoke {
 		return c.convertRevoke(base, content, m.ContentText, m.PushContent)
 	}
@@ -116,7 +122,7 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(extraString(base.Extra, "voice_fromusername"), sender, chat), MsgID: firstNonZero(m.MsgID, m.NewMsgID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
 	}
 	if base.Type == remoteapi.MsgFile {
-		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: m.MsgID, NewMsgID: m.NewMsgID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
+		c.deferFileMedia(&base, fileAttachmentPayload{}, fmt.Errorf("invalid file attachment XML"))
 	}
 	if m.MsgType == wxEmoji {
 		c.attachEmojiMedia(ctx, &base, content)
@@ -130,8 +136,8 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
 	content := stripLastMessageOps(firstNonEmpty(m.ContentText, m.Content.Str, m.PushContent))
-	if m.MsgType == wxLocation || m.MsgType == wxRevoke || (m.MsgType == wxApp && (isQuotedReplyXML(firstNonEmpty(m.Content.Str, m.ContentText)) || isMergedRecordXML(firstNonEmpty(m.Content.Str, m.ContentText)))) {
-		// Rendered summaries omit location details and quoted-message metadata.
+	if m.MsgType == wxLocation || m.MsgType == wxRevoke || (m.MsgType == wxApp && (isQuotedReplyXML(firstNonEmpty(m.Content.Str, m.ContentText)) || isMergedRecordXML(firstNonEmpty(m.Content.Str, m.ContentText)) || isFileAttachmentXML(firstNonEmpty(m.Content.Str, m.ContentText)))) {
+		// Rendered summaries omit location, quote and file attachment metadata.
 		content = stripLastMessageOps(firstNonEmpty(m.Content.Str, m.ContentText, m.PushContent))
 	}
 	if shouldDropWebhookNoise(m, content) {
@@ -204,6 +210,9 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		},
 	}
 
+	if m.MsgType == wxApp && c.prepareFileMedia(&base, m.Content.Str, m.ContentText) {
+		return remoteapi.Event{Kind: remoteapi.EventMessage, Message: &base}, true
+	}
 	if m.MsgType == wxRevoke {
 		return c.convertRevoke(base, content, m.ContentText, m.PushContent)
 	}
@@ -227,7 +236,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		c.attachVoiceMedia(ctx, &base, voiceMessageDownloadReq{FromUserName: firstNonEmpty(extraString(base.Extra, "voice_fromusername"), sender, chat), MsgID: firstNonZero(rawID, messageID), Length: int64Value(extraString(base.Extra, "voice_length")), BufID: extraString(base.Extra, "voice_bufid")})
 	}
 	if base.Type == remoteapi.MsgFile {
-		c.attachFileMedia(ctx, &base, fileMessageDownloadReq{Talker: chat, SenderUserName: sender, MsgID: rawID, NewMsgID: messageID, MsgSeq: m.MsgSeq, MsgType: m.MsgType, SourceXml: content, Xml: content})
+		c.deferFileMedia(&base, fileAttachmentPayload{}, fmt.Errorf("invalid file attachment XML"))
 	}
 	if m.MsgType == wxEmoji {
 		c.attachEmojiMedia(ctx, &base, content)
@@ -362,30 +371,76 @@ func normalizeVoiceBase64Fragment(fragment string) string {
 	}, fragment)
 }
 
-func (c *Client) attachFileMedia(ctx context.Context, base *remoteapi.InboundMessage, req fileMessageDownloadReq) {
-	if c == nil || c.t == nil || base == nil {
-		return
+// This is only a content-selection probe. Actual parsing below strips a group
+// prefix only when it matches the sender resolved from the message envelope.
+func isFileAttachmentXML(raw string) bool {
+	raw = strings.TrimSpace(stripLastMessageOps(raw))
+	if !strings.HasPrefix(raw, "<") {
+		if _, body, ok := strings.Cut(raw, ":"); ok {
+			raw = strings.TrimSpace(body)
+		}
 	}
-	payload := parseFileAttachmentPayload(base.Text, req.SourceXml, req.SenderUserName, req.Talker)
-	data, mimeType, err := c.downloadFile(ctx, payload)
-	if err != nil {
-		log.Printf("failed to download WeChat file %s title=%q app_id=%q attach_id_set=%t total_len=%d user=%q: %v", base.ID, payload.Title, payload.AppID, payload.AttachID != "", payload.TotalLen, payload.UserName, err)
-		return
+	kind, err := appMessageTypeFromXML(raw)
+	return err == nil && kind == 6
+}
+
+// prepareFileMedia does no I/O. In particular, webhook request cancellation must
+// not become the lifetime of an attachment delivered after its acknowledgement.
+func (c *Client) prepareFileMedia(base *remoteapi.InboundMessage, sources ...string) bool {
+	for _, raw := range sources {
+		raw = strings.TrimSpace(stripLastMessageOps(raw))
+		if strings.HasSuffix(string(base.Chat), "@chatroom") && base.Sender != "" {
+			raw = strings.TrimSpace(strings.TrimPrefix(raw, string(base.Sender)+":"))
+		}
+		kind, err := appMessageTypeFromXML(raw)
+		if err != nil || kind != 6 {
+			continue
+		}
+		payload, err := parseFileAttachmentPayload(raw, string(base.Sender), string(base.Chat))
+		c.deferFileMedia(base, payload, err)
+		attachAppQuotePreview(base, raw)
+		return true
 	}
-	// For messages sent by this account, WeChat often puts the sender (our
-	// own wxid) in <fromusername>. DownloadFile needs the conversation peer.
-	// Prefer Talker in that case, otherwise self-sent files fail to download.
-	if payload.UserName == c.selfWxid() && req.Talker != "" {
-		payload.UserName = req.Talker
+	return false
+}
+
+func (c *Client) deferFileMedia(base *remoteapi.InboundMessage, payload fileAttachmentPayload, parseErr error) {
+	account := string(base.Account)
+	// DownloadFile needs the conversation peer, not our own fromusername.
+	if payload.UserName == account && base.Chat != "" {
+		payload.UserName = string(base.Chat)
 	}
-	fileName := payload.Title
-	if fileName == "" {
-		fileName = fileNameFromFileMessage(base.Text, req.SourceXml)
+	metadata := remoteapi.Media{
+		FileName: firstNonEmpty(payload.Title, "wechat-file"),
+		Size:     max(payload.TotalLen, 0),
 	}
-	if mimeType == "" {
-		mimeType = mimeTypeForFile(fileName, data)
+	metadata.MimeType = mimeTypeForFile(metadata.FileName, nil)
+	if metadata.MimeType == "application/octet-stream" && payload.FileExt != "" {
+		metadata.MimeType = mimeTypeForFile("file."+payload.FileExt, nil)
 	}
-	base.Media = &remoteapi.Media{Data: data, MimeType: mimeType, FileName: fileName, Size: int64(len(data))}
+	pending := metadata
+	base.Type, base.Text, base.Media = remoteapi.MsgFile, metadata.FileName, &pending
+	// MsgSource is protocol XML, not display metadata. File XML and credentials
+	// stay exclusively in the private payload captured below, never in Extra.
+	delete(base.Extra, "msg_source")
+	base.FetchMedia = func(ctx context.Context) (*remoteapi.Media, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		data, mimeType, err := c.downloadFileForAccount(ctx, payload, account)
+		if err != nil {
+			return nil, err
+		}
+		result := metadata
+		result.Data, result.Size = data, int64(len(data))
+		if mimeType != "application/octet-stream" {
+			result.MimeType = mimeType
+		}
+		return &result, nil
+	}
 }
 
 type fileAttachmentPayload struct {
@@ -397,37 +452,106 @@ type fileAttachmentPayload struct {
 	UserName string
 }
 
-func parseFileAttachmentPayload(text, sourceXML, sender, talker string) fileAttachmentPayload {
-	payload := fileAttachmentPayload{
-		Title:    fileNameFromFileMessage(text, sourceXML),
-		AppID:    firstNonEmpty(xmlAttr(sourceXML, "appid"), xmlTag(sourceXML, "appid")),
-		AttachID: firstNonEmpty(xmlTag(sourceXML, "attachid"), xmlTag(sourceXML, "cdnattachid")),
-		TotalLen: int64Value(xmlTag(sourceXML, "totallen")),
-		FileExt:  xmlTag(sourceXML, "fileext"),
-		UserName: firstNonEmpty(xmlTag(sourceXML, "fromusername"), xmlTag(sourceXML, "fromuser"), sender, talker),
+type fileXMLAttachment struct {
+	Lengths  []replyXMLText `xml:"totallen"`
+	IDs      []replyXMLText `xml:"attachid"`
+	CDNIDs   []replyXMLText `xml:"cdnattachid"`
+	FileExts []replyXMLText `xml:"fileext"`
+}
+
+type fileXMLApp struct {
+	XMLName     xml.Name
+	AppID       string              `xml:"appid,attr"`
+	AppIDs      []replyXMLText      `xml:"appid"`
+	Titles      []replyXMLText      `xml:"title"`
+	FileExts    []replyXMLText      `xml:"fileext"`
+	FromUsers   []replyXMLText      `xml:"fromusername"`
+	FromUser    []replyXMLText      `xml:"fromuser"`
+	Attachments []fileXMLAttachment `xml:"appattach"`
+}
+
+func parseFileAttachmentPayload(sourceXML, sender, talker string) (fileAttachmentPayload, error) {
+	var doc struct {
+		XMLName   xml.Name
+		Apps      []fileXMLApp   `xml:"appmsg"`
+		FromUsers []replyXMLText `xml:"fromusername"`
+		FromUser  []replyXMLText `xml:"fromuser"`
 	}
-	return payload
+	var payload fileAttachmentPayload
+	// Reuse the bounded, namespace/DTD/depth-rejecting XML decoder. Select only
+	// direct fields: nested app messages or CDATA cannot supply attachment IDs.
+	if decodeRecordXML(sourceXML, &doc) != nil {
+		return payload, fmt.Errorf("invalid file attachment XML")
+	}
+	var app fileXMLApp
+	if doc.XMLName.Local == "appmsg" {
+		if decodeRecordXML(sourceXML, &app) != nil {
+			return payload, fmt.Errorf("invalid file attachment XML")
+		}
+	} else if len(doc.Apps) == 1 {
+		app = doc.Apps[0]
+	} else {
+		return payload, fmt.Errorf("ambiguous file attachment XML")
+	}
+	title, _ := replyText(app.Titles)
+	payload.Title = strings.TrimSpace(title)
+	// A filename is display text, never a nested protocol document.
+	if strings.ContainsAny(payload.Title, "<>") {
+		payload.Title = ""
+	}
+	appID, _ := replyText(app.AppIDs)
+	payload.AppID = firstNonEmpty(app.AppID, strings.TrimSpace(appID))
+	from, _ := replyText(doc.FromUsers)
+	fromUser, _ := replyText(doc.FromUser)
+	appFrom, _ := replyText(app.FromUsers)
+	appFromUser, _ := replyText(app.FromUser)
+	payload.UserName = firstNonEmpty(strings.TrimSpace(from), strings.TrimSpace(fromUser), strings.TrimSpace(appFrom), strings.TrimSpace(appFromUser), sender, talker)
+	if len(app.Attachments) != 1 {
+		return payload, fmt.Errorf("missing or ambiguous file attachment")
+	}
+	attachment := app.Attachments[0]
+	attachID, _ := replyText(attachment.IDs)
+	cdnID, _ := replyText(attachment.CDNIDs)
+	payload.AttachID = firstNonEmpty(strings.TrimSpace(attachID), strings.TrimSpace(cdnID))
+	ext, _ := replyText(attachment.FileExts)
+	appExt, _ := replyText(app.FileExts)
+	payload.FileExt = firstNonEmpty(strings.TrimSpace(ext), strings.TrimSpace(appExt))
+	length, ok := replyText(attachment.Lengths)
+	var err error
+	payload.TotalLen, err = strconv.ParseInt(strings.TrimSpace(length), 10, 64)
+	if !ok || err != nil {
+		payload.TotalLen = 0
+		return payload, fmt.Errorf("invalid file attachment length")
+	}
+	return payload, nil
 }
 
 func (c *Client) downloadFile(ctx context.Context, payload fileAttachmentPayload) ([]byte, string, error) {
-	c.mu.RLock()
-	wxid := c.wxid
-	c.mu.RUnlock()
-	if wxid == "" {
-		return nil, "", fmt.Errorf("missing wxid")
+	return c.downloadFileForAccount(ctx, payload, c.selfWxid())
+}
+
+func (c *Client) downloadFileForAccount(ctx context.Context, payload fileAttachmentPayload, account string) ([]byte, string, error) {
+	if c == nil || c.t == nil || account == "" || c.selfWxid() != account {
+		return nil, "", fmt.Errorf("file attachment account unavailable or changed")
 	}
 	if payload.AttachID == "" || payload.TotalLen <= 0 {
 		return nil, "", fmt.Errorf("missing file attach_id or total length")
 	}
-	const chunkSize int64 = 65536
+	if payload.TotalLen > maxFileDownloadBytes {
+		return nil, "", fmt.Errorf("file exceeds 64 MiB download limit")
+	}
+	const chunkSize int64 = 65536 // Keep the endpoint's established section size.
 	var out []byte
-	for start := int64(0); start < payload.TotalLen; start += chunkSize {
-		n := chunkSize
-		if remaining := payload.TotalLen - start; remaining < n {
-			n = remaining
+	for start := int64(0); start < payload.TotalLen; {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
 		}
+		if c.selfWxid() != account {
+			return nil, "", fmt.Errorf("file attachment account changed")
+		}
+		n := min(chunkSize, payload.TotalLen-start)
 		req := downloadFileReq{
-			Wxid:     wxid,
+			Wxid:     account,
 			AppID:    payload.AppID,
 			AttachId: payload.AttachID,
 			DataLen:  payload.TotalLen,
@@ -438,13 +562,26 @@ func (c *Client) downloadFile(ctx context.Context, payload fileAttachmentPayload
 		if err != nil {
 			return nil, "", err
 		}
+		if int64(len(chunk)) != n || int64(len(out)) > payload.TotalLen-int64(len(chunk)) {
+			return nil, "", fmt.Errorf("invalid file chunk length: got %d, expected %d", len(chunk), n)
+		}
 		out = append(out, chunk...)
+		start += n // n is bounded by the remaining validated total length.
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if c.selfWxid() != account {
+		return nil, "", fmt.Errorf("file attachment account changed")
+	}
+	if int64(len(out)) != payload.TotalLen {
+		return nil, "", fmt.Errorf("incomplete file attachment")
 	}
 	return out, mimeTypeForFile(payload.Title, out), nil
 }
 
 func (c *Client) downloadFileChunk(ctx context.Context, req downloadFileReq) ([]byte, string, error) {
-	raw, contentType, err := c.t.postRaw(ctx, "/Tools/DownloadFile", req, nil)
+	raw, contentType, err := c.t.postRawLimited(ctx, "/Tools/DownloadFile", req, nil, (req.Section.DataLen+2)/3*4+(1<<20))
 	if err != nil {
 		return nil, "", err
 	}

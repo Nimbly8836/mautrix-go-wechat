@@ -83,6 +83,11 @@ type Server struct {
 	solitaireDeliveryMu    sync.Mutex
 	solitaireDeliveries    map[solitaireDeliveryKey]*solitaireDelivery
 	solitaireDeliveryOrder []*solitaireDelivery
+	// Caption candidates contain only confirmed bridge sends, not room history.
+	fileDeliveryMu       sync.Mutex
+	fileCaptions         map[fileCaptionKey][]*fileCaptionSlot
+	fileDeliverySequence uint64
+	fileTransfers        chan struct{}
 	// Lock order: spaceMu -> packMu -> accountDataMu -> accountStore.mu /
 	// builtin store mutex. Code holding packMu must never acquire spaceMu.
 	// Account-data transactions use lock-acquiring wrappers plus non-recursive
@@ -615,6 +620,7 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	if m.Account != "" && m.Account != account {
 		return
 	}
+	fileDelivery := s.beginFileCaptionDelivery(account, rec, m)
 	if m.Solitaire != nil {
 		if err := s.deliverSolitaireToPortal(ctx, rec, m); err != nil {
 			log.Printf("failed to bridge solitaire %s to %s: %v", m.ID, rec.RoomID, err)
@@ -623,6 +629,10 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 		return
 	}
 	if s.isConfirmedOutboundEcho(account, rec, m) {
+		return
+	}
+	if isFileLifecycleMessage(m) {
+		s.bridgeDeferredFile(ctx, account, rec, m, fileDelivery)
 		return
 	}
 	sender := m.Sender
@@ -677,7 +687,10 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 		return
 	}
 	if resp != nil && resp.EventID != "" {
-		s.rememberMessageReference(account, rec, m, resp.EventID, client)
+		if err := s.rememberMessageReference(account, rec, m, resp.EventID, client); err != nil {
+			return
+		}
+		s.rememberFileCaption(fileDelivery, m, resp.EventID, client)
 		for _, msgID := range messageIDAliases(m) {
 			s.rememberMessageEvent(m.Chat, msgID, resp.EventID)
 		}

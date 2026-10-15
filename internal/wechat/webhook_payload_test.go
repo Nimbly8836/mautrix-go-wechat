@@ -189,11 +189,12 @@ func TestHandleWebhookFileXMLDownloadsRawBinaryFileMedia(t *testing.T) {
 	}
 	select {
 	case ev := <-c.Events():
-		if ev.Message == nil || ev.Message.Media == nil {
-			t.Fatalf("expected file media, got %#v", ev)
+		if ev.Message == nil || ev.Message.Media == nil || ev.Message.FetchMedia == nil {
+			t.Fatalf("expected deferred file media, got %#v", ev)
 		}
-		if string(ev.Message.Media.Data) != string(fileBytes) {
-			t.Fatalf("unexpected file bytes: %#v", ev.Message.Media.Data)
+		media, err := ev.Message.FetchMedia(context.Background())
+		if err != nil || media == nil || string(media.Data) != string(fileBytes) {
+			t.Fatalf("unexpected file download: media=%#v err=%v", media, err)
 		}
 	default:
 		t.Fatalf("expected webhook to emit file message")
@@ -230,14 +231,18 @@ func TestHandleWebhookFileXMLDownloadsFileMedia(t *testing.T) {
 	}
 	select {
 	case ev := <-c.Events():
+		if requested {
+			t.Fatalf("file download occurred before FetchMedia")
+		}
+		if ev.Message == nil || ev.Message.Type != remoteapi.MsgFile || ev.Message.Media == nil || ev.Message.FetchMedia == nil {
+			t.Fatalf("expected deferred file media, got %#v", ev)
+		}
+		media, err := ev.Message.FetchMedia(context.Background())
+		if err != nil || media == nil || string(media.Data) != string(fileBytes) {
+			t.Fatalf("unexpected file download: media=%#v err=%v", media, err)
+		}
 		if !requested {
 			t.Fatalf("expected file download request")
-		}
-		if ev.Message == nil || ev.Message.Type != remoteapi.MsgFile || ev.Message.Media == nil {
-			t.Fatalf("expected file media, got %#v", ev)
-		}
-		if string(ev.Message.Media.Data) != string(fileBytes) {
-			t.Fatalf("unexpected file bytes: %#v", ev.Message.Media.Data)
 		}
 		if ev.Message.Media.FileName != "xcodemap-idea-1.26.2.final.signed.zip" {
 			t.Fatalf("unexpected filename: %q", ev.Message.Media.FileName)
