@@ -177,6 +177,9 @@ func (s *Server) portalRoomName(ctx context.Context, chat remoteapi.Chat) string
 	name := ""
 	if !chat.IsGroup && chat.ID != "" {
 		name = s.contactDisplayName(ctx, remoteapi.UserID(chat.ID))
+		if name == chatID {
+			name = ""
+		}
 	}
 	if name == "" && chat.Name != "" && chat.Name != chatID {
 		name = chat.Name
@@ -347,30 +350,12 @@ func (s *Server) applyPortalMetadata(ctx context.Context, rec portalRecord, chat
 	chat = normalizePortalChat(rec, chat)
 	if !chat.IsGroup && chat.ID != "" {
 		if ct, ok := s.contactForRemote(ctx, remoteapi.UserID(chat.ID), true); ok {
-			if ct.AvatarURL != "" {
-				chat.Avatar = ct.AvatarURL
-			}
-			if name := matrixPick(ct.Remark, ct.Name); name != "" {
-				chat.Name = name
-			}
-			if len(ct.Extra) > 0 {
-				chat.Extra = ct.Extra
-			}
+			chat = chatWithContact(chat, ct)
 		}
 	}
-	name := s.portalRoomName(ctx, chat)
-	if name != "" {
-		if name != rec.Name {
-			rec.Name = name
-			s.portals.set(rec)
-		}
-		if _, err := s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomName, "", map[string]any{"name": name}); err != nil {
-			log.Printf("failed to set portal room name room=%s chat=%s: %v", rec.RoomID, rec.ChatID, err)
-		}
-		if _, err := s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateTopic, "", map[string]any{"topic": portalTopic(name, chat)}); err != nil {
-			log.Printf("failed to set portal room topic room=%s chat=%s: %v", rec.RoomID, rec.ChatID, err)
-		}
-	}
+	s.portalMetadataMu.Lock()
+	s.writePortalIdentity(ctx, rec, chat, s.portalRoomName(ctx, chat))
+	s.portalMetadataMu.Unlock()
 	if avatar := strings.TrimSpace(chat.Avatar); avatar != "" {
 		if mxc, err := s.roomAvatarFromURL(ctx, avatar); err == nil && mxc != "" {
 			if _, err := s.as.BotIntent().SendStateEvent(ctx, rec.RoomID, event.StateRoomAvatar, "", event.RoomAvatarEventContent{URL: mxc}); err != nil {
@@ -408,6 +393,12 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 		// Some APIs don't expose metadata reliably; still create a room.
 		chat = remoteapi.Chat{ID: chatID, Name: string(chatID), IsGroup: strings.HasSuffix(string(chatID), "@chatroom")}
 	}
+	chat = normalizePortalChat(portalRecord{ChatID: chatID}, chat)
+	if !chat.IsGroup {
+		if ct, ok := s.contactForRemote(ctx, remoteapi.UserID(chatID), false); ok {
+			chat = chatWithContact(chat, ct)
+		}
+	}
 	name := s.portalRoomName(ctx, chat)
 	official := isOfficialChat(chat)
 	if !officialAccountModeCreatesPortal(s.officialAccountMode(), official) {
@@ -441,6 +432,9 @@ func (s *Server) ensurePortal(ctx context.Context, chatID remoteapi.ChatID) (por
 		s.ensureRoomAdminPower(ctx, owner, resp.RoomID)
 	}
 	s.applyPortalMetadata(ctx, rec, chat)
+	if updated, ok := s.portals.get(chatID); ok && updated.RoomID == rec.RoomID {
+		rec = updated
+	}
 	s.syncPortalMembers(ctx, rec, chat, true, puppetProfileUpdateAuto)
 	log.Printf("created portal room: chat=%s room=%s", chatID, resp.RoomID)
 	if err := s.addPortalToAccountSpace(ctx, s.currentAccountID(ctx), rec); err != nil {

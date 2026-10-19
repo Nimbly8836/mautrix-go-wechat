@@ -108,6 +108,26 @@ mono PCM and encoded as SILK at a 12 kbps target bitrate. Native SILK and exact
 16 kHz mono 16-bit PCM WAV use a direct path. Install `ffmpeg` when running the bridge
 outside Docker; the provided Docker image includes it.
 
+## Official-account names and invitations
+
+Official-account rooms use `公众号 · <remark or nickname>` and an official-account
+topic. Creation resolves the current account's contact cache before choosing the
+room name and applying `official_account_mode`; a temporary directory failure
+must not discard already-known names or bypass the `mute`/`reject` policy.
+
+Incoming messages also repair old official-account rooms that still have a raw
+ID or stale bridge-managed name once verified contact metadata is available.
+Repair updates the **existing room**, not its membership: it does not create a
+replacement room, resend an invitation, upload an avatar, or replay messages.
+Human-renamed Matrix rooms are left unchanged. Name/topic writes are recorded
+locally only after Matrix acknowledgements, so failures can be retried by a
+later message rather than permanently pinning the raw ID.
+
+Already-issued invitations may retain an old name snapshot in the client until
+accepted; this repair does not withdraw or resend them to force a client refresh.
+An apparent repeated invitation should be checked against its room ID and
+membership-event history, separately from room metadata updates.
+
 ## Receiving WeChat locations
 
 WeChat location messages (type 48), from callbacks or local-message polling, are

@@ -92,10 +92,11 @@ type Server struct {
 	// builtin store mutex. Code holding packMu must never acquire spaceMu.
 	// Account-data transactions use lock-acquiring wrappers plus non-recursive
 	// locked helpers so their read-modify-write sequences cannot interleave.
-	portalCreateMu sync.Mutex
-	spaceMu        sync.Mutex
-	packMu         sync.Mutex
-	accountDataMu  sync.Mutex
+	portalCreateMu   sync.Mutex
+	portalMetadataMu sync.Mutex
+	spaceMu          sync.Mutex
+	packMu           sync.Mutex
+	accountDataMu    sync.Mutex
 	// Test barriers invoked after a portal snapshot and immediately before the
 	// corresponding image-pack lock.
 	afterPortalSnapshot        func([]portalRecord)
@@ -620,6 +621,9 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	if m.Account != "" && m.Account != account {
 		return
 	}
+	if m.Solitaire != nil || isFileLifecycleMessage(m) {
+		rec = s.refreshOfficialPortalIdentity(ctx, account, rec)
+	}
 	if isPendingFile(m) && s.knownFileMessageReference(account, rec, m).EventID != "" {
 		return
 	}
@@ -646,6 +650,8 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	if shouldJoinPuppet(account, sender) {
 		client = s.ensurePuppetJoined(ctx, sender, rec.RoomID)
 	}
+	// Joining may have resolved previously missing contact metadata.
+	rec = s.refreshOfficialPortalIdentity(ctx, account, rec)
 	if m.Record != nil {
 		s.bridgeRecordToPortal(ctx, account, rec, m, client)
 		return
