@@ -103,6 +103,7 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 		return c.convertRevoke(base, content, m.ContentText, m.PushContent)
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	c.attachChatRoomInvite(&base, content, m.ContentText, m.PushContent)
 	if m.MsgType == wxLocation {
 		attachLocation(&base, content, m.ContentText, m.PushContent)
 	}
@@ -132,6 +133,23 @@ func (c *Client) convertLocal(ctx context.Context, m localMessage) (remoteapi.Ev
 
 // convertInbound maps a raw WeChat message into a neutral remoteapi.Event.
 // Returns ok=false for messages the bridge should drop (system noise).
+func (c *Client) attachChatRoomInvite(base *remoteapi.InboundMessage, content, rendered, push string) {
+	if base == nil {
+		return
+	}
+	invite, ok := parseChatRoomInvite(content, rendered, push, base.Text)
+	if !ok {
+		return
+	}
+	base.ChatInvite = invite
+	base.Type = remoteapi.MsgApp
+	base.Text = strings.TrimSpace(firstNonEmpty(rendered, content, push, "收到群聊邀请"))
+	if base.Extra == nil {
+		base.Extra = map[string]any{}
+	}
+	base.Extra["chat_invite"] = true
+}
+
 func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Event, bool) {
 	from := m.FromUserName.Str
 	to := m.ToUserName.Str
@@ -217,6 +235,7 @@ func (c *Client) convertInbound(ctx context.Context, m rawMessage) (remoteapi.Ev
 		return c.convertRevoke(base, content, m.ContentText, m.PushContent)
 	}
 	applyMessageType(&base, m.MsgType, content, m.PushContent)
+	c.attachChatRoomInvite(&base, content, m.ContentText, m.PushContent)
 	if m.MsgType == wxLocation {
 		attachLocation(&base, content, m.ContentText, m.PushContent)
 	}

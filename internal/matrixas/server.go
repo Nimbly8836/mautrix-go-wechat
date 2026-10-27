@@ -92,11 +92,16 @@ type Server struct {
 	// builtin store mutex. Code holding packMu must never acquire spaceMu.
 	// Account-data transactions use lock-acquiring wrappers plus non-recursive
 	// locked helpers so their read-modify-write sequences cannot interleave.
-	portalCreateMu   sync.Mutex
-	portalMetadataMu sync.Mutex
-	spaceMu          sync.Mutex
-	packMu           sync.Mutex
-	accountDataMu    sync.Mutex
+	portalCreateMu       sync.Mutex
+	portalMetadataMu     sync.Mutex
+	chatInviteMu         sync.Mutex
+	chatInvites          map[id.EventID]pendingChatRoomInvite
+	chatInviteKeys       map[string]id.EventID
+	chatInviteProcessing map[string]bool
+	chatInviteAccepted   map[string]bool
+	spaceMu              sync.Mutex
+	packMu               sync.Mutex
+	accountDataMu        sync.Mutex
 	// Test barriers invoked after a portal snapshot and immediately before the
 	// corresponding image-pack lock.
 	afterPortalSnapshot        func([]portalRecord)
@@ -469,6 +474,11 @@ func (s *Server) handleMatrixEvent(ctx context.Context, evt *event.Event) {
 	}
 
 	// Accept invites to the bot, then send a management-room greeting.
+	if evt.Type == event.EventUnstablePollResponse {
+		s.handleChatRoomInviteResponse(ctx, evt)
+		return
+	}
+
 	if evt.Type == event.StateMember && evt.StateKey != nil && *evt.StateKey == bot.String() {
 		mem := evt.Content.AsMember()
 		if mem.Membership == event.MembershipInvite {
@@ -640,6 +650,10 @@ func (s *Server) bridgeRemoteToPortal(ctx context.Context, rec portalRecord, m *
 	}
 	if isFileLifecycleMessage(m) {
 		s.bridgeDeferredFile(ctx, account, rec, m, fileDelivery)
+		return
+	}
+	if m.ChatInvite != nil {
+		s.bridgeChatRoomInvite(ctx, account, rec, m)
 		return
 	}
 	sender := m.Sender

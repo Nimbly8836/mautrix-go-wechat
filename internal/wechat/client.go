@@ -82,13 +82,14 @@ type Client struct {
 
 // compile-time interface checks
 var (
-	_ remoteapi.PuppetAPI            = (*Client)(nil)
-	_ remoteapi.WebhookReceiver      = (*Client)(nil)
-	_ remoteapi.MediaUploader        = (*Client)(nil)
-	_ remoteapi.Pinger               = (*Client)(nil)
-	_ remoteapi.LoginInfoProvider    = (*Client)(nil)
-	_ remoteapi.CachedLoginActivator = (*Client)(nil)
-	_ remoteapi.LoginRefresher       = (*Client)(nil)
+	_ remoteapi.PuppetAPI              = (*Client)(nil)
+	_ remoteapi.ChatRoomInviteAcceptor = (*Client)(nil)
+	_ remoteapi.WebhookReceiver        = (*Client)(nil)
+	_ remoteapi.MediaUploader          = (*Client)(nil)
+	_ remoteapi.Pinger                 = (*Client)(nil)
+	_ remoteapi.LoginInfoProvider      = (*Client)(nil)
+	_ remoteapi.CachedLoginActivator   = (*Client)(nil)
+	_ remoteapi.LoginRefresher         = (*Client)(nil)
 )
 
 // ---------------------------------------------------------------------------

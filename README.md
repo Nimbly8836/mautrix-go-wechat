@@ -156,6 +156,20 @@ uses the source coordinates without assuming or converting their reference syste
 This applies to newly bridged messages; existing malformed events are not edited
 or resent. Matrix-to-WeChat location sending is unchanged.
 
+## Receiving group invitations
+
+WeChat `addchatroombyinvite` system messages are recognized only when the URL
+has the exact HTTPS `support.weixin.qq.com` host/path and a single ticket query
+parameter. The ticket remains private inside the backend capability; it is not
+copied into Matrix text or logs.
+
+The bridge displays the inviter/group name and sends a one-choice Matrix poll
+that clients render as a clickable **接收邀请** action. Selecting it calls the
+backend's `/Group/ConsentToJoin` protocol, not a browser. A successful response
+must contain a validated `@chatroom` ID before a Matrix portal is created. The
+same invite URL is not offered repeatedly while its action is pending or after
+it has been accepted; failures are reported without blind automatic retries.
+
 ## Receiving WeChat recalls and quoted replies
 
 Group recalls and quoted replies are handled for both callbacks and local-message

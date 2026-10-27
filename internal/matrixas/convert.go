@@ -22,6 +22,16 @@ func matrixEventTypeFromRemote(m *remoteapi.InboundMessage) event.Type {
 }
 
 func matrixContentFromRemote(m *remoteapi.InboundMessage) *event.MessageEventContent {
+	if m.ChatInvite != nil {
+		body := "收到群聊邀请"
+		if m.ChatInvite.Inviter != "" {
+			body += "\n邀请人：" + m.ChatInvite.Inviter
+		}
+		if m.ChatInvite.ChatName != "" {
+			body += "\n群聊：" + m.ChatInvite.ChatName
+		}
+		return &event.MessageEventContent{MsgType: event.MsgNotice, Body: body}
+	}
 	if m.Record != nil {
 		content := renderRecord(m.Record, nil)
 		if recordContentTooLarge(content) {

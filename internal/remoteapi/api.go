@@ -158,6 +158,12 @@ type QualifiedMessageSender interface {
 	SendMessageWithResult(context.Context, ChatID, OutgoingMessage) (MessageSendResult, error)
 }
 
+// ChatRoomInviteAcceptor is an optional capability for backends that can
+// accept a native group invitation URL without opening it in a browser.
+type ChatRoomInviteAcceptor interface {
+	AcceptChatRoomInvite(context.Context, string) (ChatID, error)
+}
+
 // LoginFlow describes one interactive login method, mirroring
 // bridgev2.LoginFlow. Presented to the user to choose from.
 type LoginFlow struct {
@@ -305,6 +311,7 @@ type InboundMessage struct {
 	Solitaire  *SolitaireSource  // Exact source version for opt-in reply participation.
 	Reply      *Reply            // Optional original message and readable quote.
 	Record     *ForwardedRecord  // Quoted history, not new messages from its named authors.
+	ChatInvite *ChatRoomInvite   // Native group invitation awaiting explicit acceptance.
 	Quote      *SentMessageQuote // Optional safe backend preview for future outbound references.
 	// DeduplicationKeys are backend-defined, type-qualified ID aliases, stable
 	// across send responses and inbound delivery, scoped to an account/chat.
@@ -343,6 +350,14 @@ type Reply struct {
 	Sender     UserID
 	SenderName string
 	Text       string
+}
+
+// ChatRoomInvite contains safe display metadata and a private backend URL.
+// URL is never rendered into Matrix event content or logs.
+type ChatRoomInvite struct {
+	URL      string
+	Inviter  string
+	ChatName string
 }
 
 // Redaction reports a recalled message.
